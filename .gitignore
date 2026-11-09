@@ -225,4 +225,7 @@ __marimo__/
 artifacts/
 examples/generated/
 .pytest-tmp/
+
+# Local AI model weights are distributed separately and never committed
+*.gguf
 wheelhouse/
