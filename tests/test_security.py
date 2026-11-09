@@ -1,3 +1,4 @@
+import os
 from zipfile import ZipFile
 
 import pytest
@@ -25,6 +26,12 @@ def test_atomic_failure_leaves_existing_file_and_removes_temporary(tmp_path):
 
 
 def test_unc_paths_are_rejected_before_access():
+    with pytest.raises(ValueError):
+        local_path("//example.invalid/share/secret.hwpx")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="backslash UNC is a Windows path rule")
+def test_backslash_unc_paths_are_rejected_on_windows():
     with pytest.raises(ValueError):
         local_path(r"\\example.invalid\share\secret.hwpx")
 

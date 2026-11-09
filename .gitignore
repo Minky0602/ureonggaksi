@@ -224,4 +224,5 @@ __marimo__/
 .superpowers/
 artifacts/
 examples/generated/
+.pytest-tmp/
 wheelhouse/
