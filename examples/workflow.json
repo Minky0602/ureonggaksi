@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "name": "방과후 프로그램 신청서 취합",
+  "rules": [
+    {"name": "성명", "kind": "label", "query": "성명"},
+    {"name": "기관명", "kind": "label", "query": "기관명"},
+    {"name": "신청 인원", "kind": "label", "query": "신청 인원"},
+    {"name": "접수번호", "kind": "regex", "query": "접수번호:\\s*(\\S+)", "group": 1}
+  ]
+}
