@@ -19,7 +19,9 @@ def collect(target):
         dist = distribution(name)
         count = 0
         for item in dist.files or ():
-            if not any(word in str(item).lower() for word in ("license", "copying", "notice")):
+            if not any(
+                word in str(item).lower() for word in ("license", "licence", "copying", "notice")
+            ):
                 continue
             source = Path(dist.locate_file(item))
             if not source.is_file():
@@ -30,6 +32,10 @@ def collect(target):
             shutil.copy2(source, destination)
             count += 1
         print(f"{name}: {count} license/notice files")
+        if count == 0:
+            raise SystemExit(
+                f"{name}: no license file found; the bundle would miss a required notice"
+            )
 
 
 if __name__ == "__main__":
