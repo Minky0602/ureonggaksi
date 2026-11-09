@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local agent state and generated test/export artifacts
+.omx/
+.superpowers/
+artifacts/
+examples/generated/
+wheelhouse/
