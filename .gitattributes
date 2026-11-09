@@ -1,0 +1,7 @@
+# Store text with LF in the repository on every OS.
+* text=auto
+# Shell scripts must keep LF even on a Windows checkout, or Linux cannot run them.
+*.sh text eol=lf
+# Batch files need CRLF: cmd.exe can misread labels and blocks with LF only.
+*.cmd text eol=crlf
+*.png binary
