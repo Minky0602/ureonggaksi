@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ureonggaksi"
+version = "0.1.0"
+description = "Offline HWPX extraction with verifiable Excel provenance"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = [
+  "PySide6-Essentials>=6.8,<7",
+  "openpyxl>=3.1.5,<4",
+  "defusedxml>=0.7.1,<1",
+  "regex>=2024.11.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "ruff>=0.9", "pyinstaller>=6.11,<7"]
+
+[project.scripts]
+ureonggaksi = "ureonggaksi.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "--basetemp=.cache/pytest"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
