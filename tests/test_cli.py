@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 
@@ -21,14 +22,21 @@ def test_cli_batch_and_error_exit(sample, tmp_path):
         str(output),
         str(sample),
     ]
-    result = subprocess.run(command, capture_output=True, text=True)
+    # The child's stream encoding follows the caller's environment on Windows (cp949 by
+    # default, UTF-8 when PYTHONIOENCODING is set). Pin both ends so the test reads what
+    # the CLI wrote.
+    pipe = {
+        "capture_output": True,
+        "encoding": "utf-8",
+        "env": {**os.environ, "PYTHONIOENCODING": "utf-8"},
+    }
+    result = subprocess.run(command, **pipe)
     assert result.returncode == 0, result.stderr
     assert load_workbook(output)["취합"]["B2"].value == "홍길동"
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(command, **pipe)
     assert result.returncode == 2  # Explicit overwrite flag is required.
+    assert "출력 파일이 이미 있습니다" in result.stderr
     output.unlink()
-    result = subprocess.run(
-        [*command, str(tmp_path / "missing.hwpx")], capture_output=True, text=True
-    )
+    result = subprocess.run([*command, str(tmp_path / "missing.hwpx")], **pipe)
     assert result.returncode == 1
     assert output.exists()  # Valid documents are still exported.
