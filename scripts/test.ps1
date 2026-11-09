@@ -3,10 +3,10 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $projectRoot
 try {
     & ./.venv/Scripts/python.exe -m pytest -q
-    if ($LASTEXITCODE -ne 0) { throw '테스트 실패' }
+    if ($LASTEXITCODE -ne 0) { throw 'tests failed' }
     & ./.venv/Scripts/ruff.exe check .
-    if ($LASTEXITCODE -ne 0) { throw '정적 검사 실패' }
+    if ($LASTEXITCODE -ne 0) { throw 'lint check failed' }
     & ./.venv/Scripts/ruff.exe format --check .
-    if ($LASTEXITCODE -ne 0) { throw '포맷 검사 실패' }
+    if ($LASTEXITCODE -ne 0) { throw 'format check failed' }
 }
 finally { Pop-Location }
