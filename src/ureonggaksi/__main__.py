@@ -7,7 +7,7 @@ from .offline import install_network_guard
 
 def main(argv=None):
     install_network_guard()
-    parser = argparse.ArgumentParser(description="우렁각시 — 오프라인 HWPX 취합")
+    parser = argparse.ArgumentParser(description="우렁각시 - 오프라인 HWPX 취합")
     sub = parser.add_subparsers(dest="command")
     extract_parser = sub.add_parser("extract", help="워크플로를 이용한 명령행 일괄 추출")
     extract_parser.add_argument("--workflow", required=True, type=Path)

@@ -40,3 +40,17 @@ def test_cli_batch_and_error_exit(sample, tmp_path):
     result = subprocess.run([*command, str(tmp_path / "missing.hwpx")], **pipe)
     assert result.returncode == 1
     assert output.exists()  # Valid documents are still exported.
+
+
+def test_help_survives_korean_windows_pipe():
+    # A Korean Windows pipe or redirected file is cp949. Help text must be writable there:
+    # one character outside cp949 used to end `--help > file` with exit code 1.
+    for args, expected in ((["--help"], "우렁각시"), (["extract", "--help"], "--workflow")):
+        result = subprocess.run(
+            [sys.executable, "-m", "ureonggaksi", *args],
+            capture_output=True,
+            encoding="cp949",
+            env={**os.environ, "PYTHONIOENCODING": "cp949"},
+        )
+        assert result.returncode == 0, result.stderr
+        assert expected in result.stdout
