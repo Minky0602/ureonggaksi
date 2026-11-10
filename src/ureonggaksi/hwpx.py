@@ -23,6 +23,10 @@ MAX_NODES = 200_000
 MAX_BLOCKS = 20_000
 MAX_DEPTH = 128
 SECTION = re.compile(r"Contents/section\d+\.xml\Z")
+# <hp:t> 안에서 글자 대신 나오는 빈 요소와 그 뜻. 실제 한글 저장본에서 확인한 것만 적는다.
+# nbSpace(줄바꿈 금지 공백)·fwSpace(고정폭 공백)는 일반 공백으로 읽는다. 키 대조에 쓰이기 때문이다.
+SPACING_ELEMENTS = {"tab": "\t", "lineBreak": "\n", "nbSpace": " ", "fwSpace": " "}
+# 그 밖의 표식(markpenBegin/End 형광펜, titleMark 제목)은 글자를 바꾸지 않으므로 무시하고 글자만 잇는다.
 
 
 class HwpxError(ValueError):
@@ -72,17 +76,14 @@ def _paragraph_text(node: Element) -> str:
             if element.text:
                 parts.append(element.text)
             for child in element:
-                if _tag(child) == "tab":
-                    parts.append("\t")
-                elif _tag(child) == "lineBreak":
-                    parts.append("\n")
+                child_tag = _tag(child)
+                if child_tag in SPACING_ELEMENTS:
+                    parts.append(SPACING_ELEMENTS[child_tag])
                 if child.tail:
                     parts.append(child.tail)
             return
-        if tag == "lineBreak":
-            parts.append("\n")
-        elif tag == "tab":
-            parts.append("\t")
+        if tag in SPACING_ELEMENTS:
+            parts.append(SPACING_ELEMENTS[tag])
         else:
             for child in element:
                 collect(child)
