@@ -12,6 +12,9 @@ class Block:
     col: int = 0
     row_span: int = 1
     col_span: int = 1
+    # 한글의 변경 추적(삽입·삭제 표식)이 남아 있는 블록. 어느 글자가 최종인지 추측하지 않고
+    # text를 비워 둔다. 사용자가 한글에서 변경 내용을 적용한 뒤 다시 저장해야 읽는다.
+    tracked_change: bool = False
 
     @property
     def location(self) -> str:

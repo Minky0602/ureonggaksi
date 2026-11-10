@@ -23,6 +23,12 @@ MAX_NODES = 200_000
 MAX_BLOCKS = 20_000
 MAX_DEPTH = 128
 SECTION = re.compile(r"Contents/section\d+\.xml\Z")
+# <hp:t> 안에서 글자 대신 나오는 빈 요소와 그 뜻. 실제 한글 저장본에서 확인한 것만 적는다.
+# nbSpace(줄바꿈 금지 공백)·fwSpace(고정폭 공백)는 일반 공백으로 읽는다. 키 대조에 쓰이기 때문이다.
+SPACING_ELEMENTS = {"tab": "\t", "lineBreak": "\n", "nbSpace": " ", "fwSpace": " "}
+# 변경 추적 표식. 이 사이의 글자는 삽입 또는 삭제가 확정되지 않은 상태다.
+TRACK_CHANGE_ELEMENTS = {"insertBegin", "insertEnd", "deleteBegin", "deleteEnd"}
+# 그 밖의 표식(markpenBegin/End 형광펜, titleMark 제목)은 글자를 바꾸지 않으므로 무시하고 글자만 잇는다.
 
 
 class HwpxError(ValueError):
@@ -61,10 +67,13 @@ def _walk(root: Element):
         stack.extend(reversed(children))
 
 
-def _paragraph_text(node: Element) -> str:
+def _paragraph_text(node: Element) -> tuple[str, bool]:
+    """Return the paragraph's text and whether a track-change mark remains in it."""
     parts: list[str] = []
+    tracked = False
 
     def collect(element):
+        nonlocal tracked
         tag = _tag(element)
         if element is not node and tag in {"tbl", "p", "subList"}:
             return
@@ -72,23 +81,22 @@ def _paragraph_text(node: Element) -> str:
             if element.text:
                 parts.append(element.text)
             for child in element:
-                if _tag(child) == "tab":
-                    parts.append("\t")
-                elif _tag(child) == "lineBreak":
-                    parts.append("\n")
+                child_tag = _tag(child)
+                if child_tag in SPACING_ELEMENTS:
+                    parts.append(SPACING_ELEMENTS[child_tag])
+                elif child_tag in TRACK_CHANGE_ELEMENTS:
+                    tracked = True
                 if child.tail:
                     parts.append(child.tail)
             return
-        if tag == "lineBreak":
-            parts.append("\n")
-        elif tag == "tab":
-            parts.append("\t")
+        if tag in SPACING_ELEMENTS:
+            parts.append(SPACING_ELEMENTS[tag])
         else:
             for child in element:
                 collect(child)
 
     collect(node)
-    return "".join(parts)
+    return "".join(parts), tracked
 
 
 def _positive_attribute(node: Element, name: str, default: int, zero=False) -> int:
@@ -121,27 +129,33 @@ def _blocks(root: Element, section: str) -> list[Block]:
             if address.get("rowAddr") is None or address.get("colAddr") is None:
                 raise HwpxError("표 셀의 행·열 주소가 누락되었습니다.")
             texts = []
+            tracked = False
             for child, _, parents in _walk(node):
                 if _tag(child) == "p" and not any(_tag(p) == "tc" for p in parents[1:]):
-                    text = _paragraph_text(child)
+                    text, paragraph_tracked = _paragraph_text(child)
+                    tracked = tracked or paragraph_tracked
                     if text or not any(_tag(n) == "tbl" for n in child.iter()):
                         texts.append(text)
             result.append(
                 Block(
                     section,
                     locator,
-                    "\n".join(texts),
+                    "" if tracked else "\n".join(texts),
                     "cell",
                     tables[id(owner)],
                     _positive_attribute(address, "rowAddr", 0, zero=True) + 1,
                     _positive_attribute(address, "colAddr", 0, zero=True) + 1,
                     _positive_attribute(span, "rowSpan", 1) if span is not None else 1,
                     _positive_attribute(span, "colSpan", 1) if span is not None else 1,
+                    tracked_change=tracked,
                 )
             )
         elif tag == "p" and not any(_tag(a) == "tc" for a in ancestors):
-            text = _paragraph_text(node)
-            if text:
+            text, tracked = _paragraph_text(node)
+            if tracked:
+                # 글자를 비운 채 블록은 남겨 "읽지 않은 곳이 있다"는 사실을 보존한다.
+                result.append(Block(section, locator, "", "paragraph", tracked_change=True))
+            elif text:
                 result.append(Block(section, locator, text, "paragraph"))
         if len(result) > MAX_BLOCKS:
             raise HwpxError("문서의 텍스트 블록 수가 한도를 초과했습니다.")

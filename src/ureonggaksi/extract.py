@@ -7,6 +7,10 @@ from .models import Document, DocumentResult, ExtractedValue, Verification
 from .workflow import Rule, Workflow
 
 REGEX_BUDGET_SECONDS = 0.15
+TRACKED_CHANGE_MESSAGE = (
+    "변경 추적이 남아 있어 값을 읽지 않았습니다. "
+    "한글에서 변경 내용을 모두 적용한 뒤 다시 저장해 주세요."
+)
 
 
 def _trim(text: str, start=0, end=None):
@@ -64,13 +68,16 @@ def extract(doc: Document, workflow: Workflow) -> DocumentResult:
         )
         try:
             candidates = []
+            tracked = False
             for source, start, end in _candidates(doc, rule):
                 if start < end:
                     candidates.append((source, start, end))
+                tracked = tracked or source.tracked_change
                 if len(candidates) >= 2:
                     break  # Two is sufficient to prove ambiguity; bound result memory.
             if not candidates:
-                value = ExtractedValue(**base, message="일치하는 값이 없거나 빈 값입니다.")
+                message = TRACKED_CHANGE_MESSAGE if tracked else "일치하는 값이 없거나 빈 값입니다."
+                value = ExtractedValue(**base, message=message)
             elif len(candidates) > 1:
                 value = ExtractedValue(
                     **base,
