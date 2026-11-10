@@ -91,6 +91,8 @@ def _paragraph_text(node: Element) -> tuple[str, bool]:
             return
         if tag in SPACING_ELEMENTS:
             parts.append(SPACING_ELEMENTS[tag])
+        elif tag in TRACK_CHANGE_ELEMENTS:
+            tracked = True  # 표본에서는 <t> 안에만 나왔지만, 바깥에 있어도 같은 뜻이다
         else:
             for child in element:
                 collect(child)

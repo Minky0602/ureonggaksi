@@ -76,6 +76,28 @@ def test_tracked_change_cell_is_left_blank_and_flagged(tmp_path, inner):
     assert (org.status, org.value) == ("ok", "한빛초")
 
 
+def test_tracked_candidate_blocks_a_value_even_when_another_candidate_is_clean(tmp_path):
+    """항목명이 두 곳이고 한쪽 값 칸만 변경 추적이면, 다른 쪽 값을 고르지 않는다(둘 이상 일치였을 수 있다)."""
+    tracked = '<hp:deleteBegin Id="1" TcId="1"/>홍길동<hp:deleteEnd Id="1" TcId="1" paraend="0"/>'
+    rows = [
+        [cell("성명", 0, 0), raw_cell(tracked, 0, 1)],
+        [cell("성명", 1, 0), cell("김철수", 1, 1)],
+    ]
+    doc = read_hwpx(
+        write_hwpx(tmp_path / "t.hwpx", ["<hp:p><hp:run>" + table(rows) + "</hp:run></hp:p>"])
+    )
+    (name,) = extract(doc, Workflow("명단", (Rule("성명", "label", query="성명"),))).values
+    assert (name.status, name.value, name.message) == ("missing", "", TRACKED_CHANGE_MESSAGE)
+
+
+def test_track_change_mark_outside_text_element_is_detected(tmp_path):
+    section = (
+        '<hp:p><hp:run><hp:deleteBegin Id="1" TcId="1"/><hp:t>지운 글자</hp:t>'
+        '<hp:deleteEnd Id="1" TcId="1" paraend="0"/></hp:run></hp:p>'
+    )
+    assert read_texts(tmp_path, [section]) == [("", True)]
+
+
 def test_tracked_change_paragraph_keeps_an_empty_block(tmp_path):
     inner = '접수번호: <hp:deleteBegin Id="1" TcId="1"/>A-001<hp:deleteEnd Id="1" TcId="1" paraend="0"/>'
     assert read_texts(tmp_path, [raw_para(inner), raw_para("담당자: 가나다")]) == [

@@ -9,7 +9,7 @@ from .workflow import Rule, Workflow
 REGEX_BUDGET_SECONDS = 0.15
 TRACKED_CHANGE_MESSAGE = (
     "변경 추적이 남아 있어 값을 읽지 않았습니다. "
-    "한글에서 변경 내용을 모두 적용한 뒤 다시 저장해 주세요."
+    "원문을 확인해 직접 입력하거나, 한글에서 변경 내용을 적용한 뒤 다시 저장해 주세요."
 )
 
 
@@ -75,9 +75,12 @@ def extract(doc: Document, workflow: Workflow) -> DocumentResult:
                 tracked = tracked or source.tracked_change
                 if len(candidates) >= 2:
                     break  # Two is sufficient to prove ambiguity; bound result memory.
-            if not candidates:
-                message = TRACKED_CHANGE_MESSAGE if tracked else "일치하는 값이 없거나 빈 값입니다."
-                value = ExtractedValue(**base, message=message)
+            if tracked:
+                # 후보 가운데 변경 추적 칸이 하나라도 있으면 값을 고르지 않는다. 그 칸의 글자를
+                # 모르므로 "하나만 일치"인지 "둘 이상 일치"인지도 판단할 수 없기 때문이다.
+                value = ExtractedValue(**base, message=TRACKED_CHANGE_MESSAGE)
+            elif not candidates:
+                value = ExtractedValue(**base, message="일치하는 값이 없거나 빈 값입니다.")
             elif len(candidates) > 1:
                 value = ExtractedValue(
                     **base,
