@@ -125,6 +125,8 @@ def test_number_refuses_anything_that_needs_guessing(raw):
         ("350만 원", "", "3500000"),
         ("1.0원", "", "1"),
         ("0.0원", "", "0"),
+        ("3,500,000원정", "", "3500000"),  # 계약서 표기
+        ("금 3,500,000원정(금삼백오십만원정)", "", "3500000"),
     ],
 )
 def test_money_spelling_variants_are_read_correctly(raw, unit, expected):
@@ -133,7 +135,18 @@ def test_money_spelling_variants_are_read_correctly(raw, unit, expected):
 
 
 @pytest.mark.parametrize(
-    "raw", ["3,500,00원", "1,2,3원", "1,000,원", "3천5백만원", "1,000원 이상", "(금삼백오십만원)"]
+    "raw",
+    [
+        "3,500,00원",
+        "1,2,3원",
+        "1,000,원",
+        "0,500원",  # 첫 묶음이 0 — 유럽식 소수 쉼표와 겹친다
+        "3천5백만원",
+        "1,000원 이상",
+        "(금삼백오십만원)",
+        "3,500,000원(금액 미정)",  # 괄호 한글 금액이 아니라 주석이다
+        "35,000천원 (VAT 포함)",
+    ],
 )
 def test_money_refuses_anything_that_needs_guessing(raw):
     assert normalize(raw, "money", unit="원").reason_code == "parse_failed"

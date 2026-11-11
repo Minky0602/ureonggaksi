@@ -211,7 +211,8 @@ def normalize(raw: str, value_type, *, unit="", default_unit="", rounding=None, 
     #   needs_rounding(원 환산이 정수 아님, rounding 답 없음)
     # text는 양끝 공백만 떼고 그대로("0012", 전각도 그대로 — 글자 일치 대조용). 숫자·금액·날짜만 전각을 반각으로 바꾼다.
     # money는 원으로 환산해 CellValue(number, …, unit="원"). 단위는 글자(뒤의 "(천원)" 포함) > 규칙 unit > 답 default_unit.
-    # 뒤의 "(금삼백오십만원)" 괄호 한글은 읽지 않는다. 원칙: 정보를 지어내야 읽을 수 있는 글자는 읽지 않는다
+    # 뒤의 "(금삼백오십만원)" 괄호 한글 금액과 끝의 "정"은 읽지 않고 넘긴다. 그 밖의 주석("(VAT 포함)", "(금액 미정)")은 거부.
+    # 원칙: 정보를 지어내야 읽을 수 있는 글자는 읽지 않는다
 
 @dataclass(frozen=True)
 class WorkflowVersion:           # ERD Workflow + WorkflowVersion

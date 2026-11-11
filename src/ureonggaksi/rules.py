@@ -77,8 +77,17 @@ class FieldRule:
     def __post_init__(self):
         if self.kind == COLUMN_KIND:
             _check_name(self.name, "항목 이름")
-            if not isinstance(self.query, str) or not self.query.strip() or len(self.query) > 200:
-                raise RuleError("표 열 항목에는 열 머리글 이름을 적어야 합니다.")
+            _check_name(self.query, "열 머리글 이름", 200)
+            # 문서 추출용 필드는 기본값이어야 한다. 뜻 없는 값이 지문을 다르게 만들지 않도록(검수 L-6)
+            if (self.section, self.table, self.row, self.col, self.direction, self.group) != (
+                "",
+                1,
+                1,
+                1,
+                "right",
+                1,
+            ) or type(self.required) is not bool:
+                raise RuleError("표 열 항목에는 열 머리글 이름과 값 종류·단위·대상 열만 둡니다.")
         else:
             try:
                 self.to_rule()  # 기존 추출 규칙의 형식 검사를 그대로 받는다
