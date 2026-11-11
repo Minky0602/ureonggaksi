@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -74,7 +75,7 @@ class CellValue:
     unit: 금액 등의 단위("원"). 대상 셀에는 value만 쓴다.
     """
 
-    kind: str = "empty"
+    kind: Literal["empty", "text", "number", "date", "bool"] = "empty"
     value: str = ""
     unit: str = ""
 

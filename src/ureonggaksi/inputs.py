@@ -5,6 +5,7 @@ writing use only this snapshot, so "the file we inspected" is always "the file w
 """
 
 import hashlib
+import os
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,7 +19,7 @@ from .models import Document
 from .storage import local_path
 
 # 입력 한도(OQ-04). 사무용 PC 실측 전의 제안값이다. 넘으면 분석을 시작하기 전에 INPUT_LIMIT로 설명한다.
-MAX_SOURCES = 200
+MAX_SOURCES = 500  # 기존 화면·CLI·README와 같은 값
 MAX_TARGET_BYTES = 32 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024
 
@@ -83,11 +84,18 @@ def _read_target(path: Path) -> tuple[Path, bytes, str]:
 def _read_source(file_id: str, path: Path, seen: dict[str, str]) -> tuple[InputFile, bytes | None]:
     try:
         resolved = local_path(path)
+    except ValueError as exc:  # 네트워크 경로. 문구에 경로가 없다
+        return InputFile(file_id, Path(path), "source", None, "failed", str(exc)), None
+    try:
         if resolved.suffix.lower() != ".hwpx":
             raise HwpxError("HWPX 파일만 지원합니다. HWP는 HWPX로 변환해 주세요.")
         data = _read(resolved, MAX_FILE_BYTES)
-    except (OSError, ValueError, HwpxError) as exc:
-        return InputFile(file_id, Path(path), "source", None, "failed", str(exc)), None
+    except OSError:
+        # errno 문구와 전체 경로를 그대로 내보내지 않는다. 경로는 InputFile.path에 이미 있다.
+        reason = "파일을 읽을 수 없습니다. 존재 여부와 접근 권한을 확인하세요."
+        return InputFile(file_id, resolved, "source", None, "failed", reason), None
+    except HwpxError as exc:
+        return InputFile(file_id, resolved, "source", None, "failed", str(exc)), None
     except ServiceError as exc:
         return InputFile(file_id, resolved, "source", None, "failed", exc.message), None
     digest = _fingerprint(data)
@@ -116,22 +124,21 @@ def _read_source(file_id: str, path: Path, seen: dict[str, str]) -> tuple[InputF
 def _check_paths(sources: list[Path], target: Path, output_dir: Path) -> Path:
     try:
         out = local_path(output_dir)
-    except ValueError as exc:
-        raise ServiceError("PATH_CONFLICT", str(exc)) from exc
-    if out.exists() and not out.is_dir():
-        raise ServiceError("PATH_CONFLICT", "출력 위치는 폴더여야 합니다.")
+    except ValueError as exc:  # 네트워크 경로는 충돌이 아니라 지원하지 않는 위치다
+        raise ServiceError("INPUT_UNSUPPORTED", str(exc)) from exc
     inputs = {_same_file(p) for p in [*sources, target]}
     if _same_file(out) in inputs:
         raise ServiceError("PATH_CONFLICT", "출력 폴더가 입력 파일과 같은 경로입니다.")
+    if out.exists() and not out.is_dir():
+        raise ServiceError("PATH_CONFLICT", "출력 위치는 폴더여야 합니다.")
     if _same_file(target) in {_same_file(p) for p in sources}:
         raise ServiceError("PATH_CONFLICT", "대상 파일이 원본 파일과 같은 경로입니다.")
     return out
 
 
 def _same_file(path: Path) -> str:
-    import os
-
-    return os.path.normcase(str(Path(path).expanduser().absolute()))
+    """경로 표기(상대·대소문자·`..`·링크)가 달라도 같은 파일이면 같은 값이 되게 한다."""
+    return os.path.normcase(str(Path(path).expanduser().resolve()))
 
 
 def open_inputs(sources: list[Path], target: Path, output_dir: Path) -> Inputs:

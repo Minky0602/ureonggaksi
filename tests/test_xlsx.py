@@ -159,6 +159,98 @@ def test_excel_saved_workbook_reads_like_the_synthetic_one(tmp_path):
     assert cells["E2"].value == CellValue("date", "2026-11-06")
 
 
+def test_huge_merge_or_array_ref_is_refused_before_openpyxl_expands_it(tmp_path):
+    """5 KB 파일의 ref="A1:XFD1048576" 하나로 수백만 객체가 생기지 않게 로드 전에 막는다."""
+    import time
+    from zipfile import ZIP_DEFLATED, ZipFile
+
+    seed = write_xlsx(tmp_path / "seed.xlsx")
+    for tag, replacement in [
+        (
+            "merge",
+            b'<mergeCells count="1"><mergeCell ref="A1:XFD1048576"/></mergeCells></worksheet>',
+        ),
+        (
+            "array",
+            b'<sheetData><row r="1"><c r="A1"><f t="array" ref="A1:XFD1048576">1</f></c></row></sheetData></worksheet>',
+        ),
+    ]:
+        bomb = tmp_path / f"{tag}.xlsx"
+        with ZipFile(seed) as src, ZipFile(bomb, "w", ZIP_DEFLATED) as dst:
+            for item in src.infolist():
+                payload = src.read(item.filename)
+                if item.filename == "xl/worksheets/sheet1.xml":
+                    if tag == "merge":
+                        payload = payload.replace(b"</worksheet>", replacement)
+                    else:
+                        start = payload.index(b"<sheetData")
+                        payload = payload[:start] + replacement
+                dst.writestr(item, payload)
+        source = write_hwpx(tmp_path / f"{tag}.hwpx")
+        began = time.monotonic()
+        with pytest.raises(ServiceError) as info:
+            open_inputs([source], bomb, tmp_path / "out")
+        assert info.value.code == "INPUT_LIMIT"
+        assert time.monotonic() - began < 2
+
+
+def test_duplicate_zip_entries_are_refused(tmp_path):
+    from zipfile import ZIP_DEFLATED, ZipFile
+
+    seed = write_xlsx(tmp_path / "seed.xlsx")
+    twin = tmp_path / "twin.xlsx"
+    with ZipFile(seed) as src, ZipFile(twin, "w", ZIP_DEFLATED) as dst:
+        for item in src.infolist():
+            dst.writestr(item, src.read(item.filename))
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            dst.writestr("xl/worksheets/sheet1.xml", src.read("xl/worksheets/sheet1.xml"))
+    source = write_hwpx(tmp_path / "a.hwpx")
+    with pytest.raises(ServiceError) as info:
+        open_inputs([source], twin, tmp_path / "out")
+    assert info.value.code == "INPUT_UNSUPPORTED"
+
+
+def test_big_integers_are_not_rounded():
+    assert cell_value(12345678901234567890123456789012) == CellValue(
+        "number", "12345678901234567890123456789012"
+    )
+    assert cell_value(0.1 + 0.2) == CellValue("number", "0.30000000000000004")
+    assert cell_value(-5) == CellValue("number", "-5")
+    assert cell_value(dt.time(9, 30)) == CellValue("text", "09:30:00")
+
+
+def test_header_with_blank_cells_still_wins_over_a_full_data_row(tmp_path):
+    rows = [["사업코드", "사업명", None, "예산"], ["0012", "도서관", "비고1", 1]]
+    view = view_of(tmp_path, write_xlsx(tmp_path / "t.xlsx", rows))
+    assert (view.header_row, view.columns) == (1, ("사업코드", "사업명", "C", "예산"))
+
+
+def test_unlocked_cell_on_a_protected_sheet_is_writable(tmp_path):
+    from openpyxl import load_workbook
+    from openpyxl.styles import Protection
+
+    path = write_xlsx(tmp_path / "t.xlsx", protect=True)
+    book = load_workbook(path)
+    book.active["C2"].protection = Protection(locked=False)
+    book.save(path)
+    cells = by_address(view_of(tmp_path, path))
+    assert (cells["C2"].blocked, cells["B2"].blocked) == ("", "protected")
+
+
+def test_reversed_data_rows_and_negative_preview_are_rejected(tmp_path, target):
+    with pytest.raises(ServiceError):
+        view_of(tmp_path, target, header_row=1, data_rows=(5, 3))
+    with pytest.raises(ServiceError):
+        view_of(tmp_path, target, preview_rows=-1)
+    assert view_of(tmp_path, target, preview_rows=0).cells == ()
+
+
+def test_date_header_is_shown_as_a_date(tmp_path):
+    rows = [["코드", dt.date(2026, 1, 1)], ["0012", 1]]
+    view = view_of(tmp_path, write_xlsx(tmp_path / "t.xlsx", rows))
+    assert view.columns == ("코드", "2026-01-01")
+
+
 def test_zip_bomb_and_encrypted_entries_are_refused_before_openpyxl(tmp_path, monkeypatch):
     """압축 해제 폭탄은 openpyxl이 XML을 펼치기 전에 ZIP 항목 크기로 막는다."""
     from zipfile import ZIP_DEFLATED, ZipFile
