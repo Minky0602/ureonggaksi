@@ -271,13 +271,17 @@ def _within(bounds: Bounds, row: int, col: int) -> bool:
 
 
 def _blocked(
-    formula_sheet, array_ranges, merged_ranges, protected: bool, row: int, col: int
+    formula_sheet, array_ranges, merged_followers: set, protected: bool, row: int, col: int
 ) -> Blocked:
-    """범위를 펼치지 않고 칸마다 포함 여부만 본다(큰 ref로 메모리를 채우지 못하게)."""
+    """배열 수식 범위는 포함 여부만 보고(보통 몇 개), 병합은 미리 펼친 집합을 본다.
+
+    병합 면적 합계는 사전 검사가 500,000칸으로 묶으므로 펼쳐도 메모리가 안전하다(검수 M6: 범위 3,000개 ×
+    칸 50,000개를 선형 탐색하면 30초가 걸렸다).
+    """
     source = formula_sheet.cell(row, col)
     if source.data_type == "f" or any(_within(b, row, col) for b in array_ranges):
         return "formula"
-    if any(_within(b, row, col) and (row, col) != (b[0], b[1]) for b in merged_ranges):
+    if (row, col) in merged_followers:
         return "merged"
     if protected and source.protection.locked:
         return "protected"
@@ -327,9 +331,13 @@ def inspect_target(
             for col in range(1, max_col + 1)
         )
         array_ranges = [_bounds(ref) for ref in formula_sheet.array_formulae.values()]
-        merged_ranges = [
-            (m.min_row, m.min_col, m.max_row, m.max_col) for m in formula_sheet.merged_cells.ranges
-        ]
+        merged_followers = {
+            (r, c)
+            for m in formula_sheet.merged_cells.ranges
+            for r in range(m.min_row, m.max_row + 1)
+            for c in range(m.min_col, m.max_col + 1)
+            if (r, c) != (m.min_row, m.min_col)
+        }
         protected = bool(formula_sheet.protection.sheet)
         cells = []
         for row in range(first, min(last, first + preview_rows - 1) + 1):
@@ -338,7 +346,9 @@ def inspect_target(
                     TargetCell(
                         f"{get_column_letter(col)}{row}",
                         cell_value(values_sheet.cell(row, col).value),
-                        _blocked(formula_sheet, array_ranges, merged_ranges, protected, row, col),
+                        _blocked(
+                            formula_sheet, array_ranges, merged_followers, protected, row, col
+                        ),
                     )
                 )
         return TargetView(name, sheets, header, (first, last), columns, tuple(cells))

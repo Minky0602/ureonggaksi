@@ -72,7 +72,12 @@ KINDS: tuple[KindInfo, ...] = (
         "칸 구조를 확인해 직접 입력",
         ("blocked_formula", "blocked_merged", "blocked_protected"),
     ),
-    KindInfo("unreadable_file", "파일을 읽지 못함", "파일을 확인해 다시 넣기", ("source_failed",)),
+    KindInfo(
+        "unreadable_file",
+        "파일을 읽지 못함",
+        "파일을 확인해 다시 넣기",
+        ("source_failed", "no_records"),
+    ),
     KindInfo("no_document", "문서가 없는 행", "문서가 빠졌는지 확인", ("target_without_source",)),
     KindInfo(
         "check_diff",
@@ -100,6 +105,7 @@ REASONS = {
     "blocked_merged": "병합 칸",
     "blocked_protected": "보호 칸",
     "source_failed": "파일을 읽지 못함 ({detail})",
+    "no_records": "문서에서 레코드(규칙이 가리키는 표)를 찾지 못함",
     "target_without_source": "이 행의 값을 가진 문서가 입력에 없음 (키 {key})",
     "mismatch": "표와 문서가 다름 (표 {previous} · 문서 {proposed})",
     "missing_in_sheet": "표가 비어 있음 (문서 {proposed})",
@@ -128,4 +134,16 @@ def action_of(kind: str) -> str:
 
 
 def sort_key(item: ManualItem) -> tuple:
-    return (KIND_ORDER.get(item.kind, len(KINDS)), item.where, item.reason_code)
+    """종류 순서 → 주소(열 글자, 행 번호) → 코드. 'C10'이 'C3' 뒤에 온다."""
+    sheet, _, address = item.where.rpartition("!")
+    letters = address.rstrip("0123456789")
+    digits = address[len(letters) :]
+    row = int(digits) if digits.isdigit() else 0
+    return (
+        KIND_ORDER.get(item.kind, len(KINDS)),
+        sheet,
+        len(letters),
+        letters,
+        row,
+        item.reason_code,
+    )
