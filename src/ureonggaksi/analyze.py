@@ -360,11 +360,13 @@ def _group_reason(members: list[_Judged], target_cell: TargetCell | None) -> tup
         return first.target_code, readable[0].proposed if len(members) == 1 else CellValue()
     if target_cell is None:
         return "no_target", CellValue()  # 대상 범위 밖(일어나지 않아야 하지만 추측하지 않는다)
+    agreed = len(readable) == len(members) and all(
+        _same(m.proposed, readable[0].proposed) for m in readable[1:]
+    )
     if target_cell.blocked:
-        return f"blocked_{target_cell.blocked}", readable[0].proposed
-    if len(readable) != len(members) or any(
-        not _same(m.proposed, readable[0].proposed) for m in readable[1:]
-    ):
+        # 제안값은 문서들이 모두 같을 때만 보여 준다(입력 순서에 좌우되지 않게, 3차 검수 L-x)
+        return f"blocked_{target_cell.blocked}", readable[0].proposed if agreed else CellValue()
+    if not agreed:
         return "conflict", CellValue()
     return "", readable[0].proposed
 

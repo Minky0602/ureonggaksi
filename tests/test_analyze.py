@@ -570,3 +570,11 @@ def test_merged_header_over_a_single_merged_data_column_is_read(tmp_path):
         items[("0012", "사업비")].write_selected
         and items[("0017", "사업비")].proposed.value == "35000000"
     )
+
+
+def test_blocked_cell_proposal_does_not_depend_on_file_order(tmp_path):
+    docs = [("a", plan_doc("0016", "350만원")), ("b", plan_doc("0016", "1원"))]
+    forward = analyze_docs(tmp_path / "f", docs)
+    backward = analyze_docs(tmp_path / "b", list(reversed(docs)))
+    assert forward.items[0].reason_code == backward.items[0].reason_code == "blocked_formula"
+    assert forward.items[0].proposed == backward.items[0].proposed == CellValue()
