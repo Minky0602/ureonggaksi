@@ -46,7 +46,7 @@ class ManualItem:                # 직접 처리 목록 한 줄. ChangeItem·실
     change_id: str | None        # 파일 단위 항목이면 None
 
 QuestionSlot = Literal["key_column", "target_column", "work_type",           # 규칙이 서지 않을 때
-                       "default_unit", "rounding", "date_order"]   # 공통 문제일 때
+                       "default_unit", "rounding", "date_order"]   # 공통 문제일 때. 답 값은 2.4 RuleSet.policy 참조
 QUESTION_RATIO = 0.30            # 사용자 설정이 아닌 코드 기준값. Q01 정답셋으로 조정한다
 SKIP = "__skip__"                # 답: 건너뛰기. 해당 칸은 비워 둔다
 
@@ -172,14 +172,38 @@ def inspect_source(inputs: Inputs, file_id: str) -> Document        # 기존 hwp
 
 ```python
 @dataclass(frozen=True)
+class RecordRule:                # 사업 레코드 경계 (P02-3에서 확정)
+    kind: Literal["document", "table_rows"]   # document: 문서 하나 = 레코드 하나 / table_rows: 지정 표의 헤더 아래 각 행
+    key_field: str               # 레코드를 대상 행과 잇는 항목 이름(fields 가운데 하나). 항상 text로 다룬다
+    section: str = ""; table: int = 1; header_row: int = 1   # table_rows일 때 표 위치
+
+@dataclass(frozen=True)
+class FieldRule:                 # 기존 Rule(label/cell/regex)의 필드 + 아래 셋
+    value_type: Literal["text", "number", "money", "date"] = "text"
+    unit: str = ""               # 규칙이 밝힌 원문 단위(표 머리 "단위: 천원"). money에만. 글자에 단위가 있으면 글자가 우선
+    target_column: str = ""      # 대상 열 **이름**(열 문자 아님). 실행 때 TargetView.columns에서 위치를 찾는다
+
+@dataclass(frozen=True)
+class TargetRule:
+    sheet: str; header_row: int; data_rows: tuple[int, int]; key_column: str   # 열은 이름으로 참조
+
+@dataclass(frozen=True)
 class RuleSet:                   # 직접 선택·AI·가져오기 모두 이 형식을 만든다
-    record: RecordRule           # 사업 레코드 경계(표·헤더 행·키 필드). 상세 형식은 P02
-    fields: tuple[FieldRule, ...]   # 기존 Rule(label/cell/regex) + value_type·unit·default_unit
-    target: TargetRule           # sheet·header_row·data_rows·key_column·(field, column) 쌍
+    record: RecordRule
+    fields: tuple[FieldRule, ...]
+    target: TargetRule
     # 3판 수정: match_policy 삭제. 키는 글자 그대로 일치만 인정한다(PRD v1.4)
     work_type: Literal["fill", "check"]   # 빈칸 채우기 / 값 검토
-    policy: Pairs                # 질문으로 정한 값: default_unit·rounding·date_order. 미정이면 없음
+    policy: Pairs                # 질문으로 정한 값. default_unit: 원·천원·만원·백만원·억원 / rounding: down(절사)·up(절상)·half_up(반올림) /
+                                 # date_order: ymd·dmy·mdy. 미정이면 없음. 반올림 선택지는 공공 관행 3가지다(DIF-027)
     # 3판: existing_value 선택지 삭제. 기존값이 다르면 항상 직접 처리(PRD 6.1 기준 6)
+    # 형식 오류(없는 값 종류, 중복 항목 이름 등)는 생성 시 RuleError. 뜻 오류(없는 열 등)는 validate_rule이 목록으로
+
+def normalize(raw: str, value_type, *, unit="", default_unit="", rounding=None, date_order=None) -> Normalized
+    # Normalized(value: CellValue | None, reason_code: str, transforms: tuple[str, ...]). reason_code는 5.1절:
+    # missing_value(빈 글자) · parse_failed(숫자·날짜로 못 읽음, "미정", ▲ 부호, 순서 모호한 날짜) ·
+    # ambiguous_unit(단위가 글자·규칙·답 어디에도 없음) · needs_rounding(원 환산이 정수 아님, rounding 답 없음)
+    # text는 양끝 공백만 떼고 그대로("0012"). money는 원으로 환산해 CellValue(number, …, unit="원")
 
 @dataclass(frozen=True)
 class WorkflowVersion:           # ERD Workflow + WorkflowVersion
@@ -198,6 +222,9 @@ class RuleIssue:
 def validate_rule(rule: RuleSet, inputs: Inputs, view: TargetView) -> tuple[RuleIssue, ...]
 
 class RuleStore:                 # 로컬 폴더 rules/<workflow_id>/<revision>.json
+    # 기본 위치: Windows %LOCALAPPDATA%\ureonggaksi\rules, 그 외 $XDG_DATA_HOME 또는 ~/.local/share/ureonggaksi/rules.
+    # 생성자에 폴더를 주입할 수 있다. 파일은 1 MiB 이하, 읽을 때 rule_hash를 다시 계산해 다르면 거부한다
+    def __init__(self, root: Path | None = None)
     def list(self) -> tuple[WorkflowSummary, ...]          # 최근 저장 순. S01 '최근 작업'
     def load(self, workflow_id: str, revision: int | None = None) -> WorkflowVersion
     def save(self, name: str, rule: RuleSet, base: WorkflowVersion | None = None,
