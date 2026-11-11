@@ -300,13 +300,19 @@ def analyze(inputs: Inputs, rule: RuleSet | WorkflowVersion, *, scope: Literal["
     #   ③ 변환: ambiguous_unit · parse_failed · needs_rounding  ④ 대상 행: no_target · multi_target(+target_candidates)
     #   ⑤ 막힌 칸: blocked_formula/merged/protected  ⑥ 작업 종류: existing_differs(fill) · mismatch/missing_in_sheet(check)
     #   ⑦ 같은 (키, 항목)을 노리는 레코드가 둘 이상: 제안값이 모두 같고 모두 읽혔으면 ChangeItem 하나에 evidence를 모아
-    #     한 번 쓴다. 하나라도 다르거나 못 읽었으면 conflict. 먼저 걸린 기준의 코드가 reason_code다.
-    # 키 비교는 글자 그대로(문서 글자 vs 대상 칸 CellValue.value). 대상 칸이 숫자 12이고 문서가 "0012"면 no_target.
+    #     한 번 쓴다. 하나라도 다르거나 못 읽었으면 conflict(입력 순서와 무관). 혼자면 자기 코드. 먼저 걸린 기준의 코드가 reason_code다.
+    #   키 항목 자체를 못 읽은 레코드(없음·두 곳·변경 추적)는 그 레코드의 모든 칸이 키의 코드(missing_value·ambiguous_field·
+    #   tracked_change)를 받고 reason에 "키 항목을 읽지 못해"가 붙는다. no_target이 아니다.
+    # 키 비교는 양끝 공백만 떼고 글자 그대로(문서 글자 vs 대상 칸 CellValue.value). 안쪽 공백·전각·대소문자 차이는 다른 키.
+    # 대상 칸이 숫자 12이고 문서가 "0012"면 no_target. table_rows에서 머리글이 여러 열에 걸치면(colSpan) 그 항목은
+    # ambiguous_field, 머리글 블록이 덮는 행(rowSpan)은 데이터가 아니다. 머리글 비교는 공백·끝 콜론 제외·대소문자 무시.
+    # 읽혔지만 레코드가 없는 원본(표 없음)은 Plan.empty_sources → ManualItem(unreadable_file, no_records).
     # 대상 키가 빈 행(합계 행 등)은 세지 않는다. 키가 있는데 어떤 레코드와도 연결되지 않은 행이 "문서가 없는 행"이다
     # (복수 후보로라도 연결된 행은 아니다). change_id = sha256(canonical_json([record_key, field]))[:16],
     # evidence_id = sha256(canonical_json([file_id, record_key, field, location]))[:16]. 키를 못 읽은 레코드의
-    # record_key는 "<file_id>#<순서>"다. Plan에는 sheet·problem_counts(reason_code→건수, 6.2 질문 판단용)·
-    # unmatched_rows((행, 키)…)가 더 있다. review는 P05(자세히 화면)에서 구현한다.
+    # record_key는 "<file_id>#<순서>"다(내부용, 소명에는 파일 이름을 쓴다). Plan에는 sheet·problem_counts(reason_code→건수,
+    # 6.2 질문 판단용)·unmatched_rows((행, 키)…)·empty_sources·key_column_letter가 더 있다. Sample 범위에서는 문서를 다
+    # 읽지 않으므로 unmatched_rows를 세지 않고 files_ok는 전체 정상 원본 수다. review는 P05(자세히 화면)에서 구현한다.
 
 ItemStatus = Literal["confirmed", "needs_review", "failed", "excluded", "unchanged"]   # FR-20
 Area = Literal["done", "manual", "excluded"]                                            # FR-21

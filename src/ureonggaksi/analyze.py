@@ -22,6 +22,15 @@ from .xlsx import TargetCell, inspect_target
 
 ItemStatus = Literal["confirmed", "needs_review", "failed", "excluded", "unchanged"]
 Area = Literal["done", "manual", "excluded"]
+UNREADABLE_CODES = (
+    "missing_value",
+    "ambiguous_field",
+    "tracked_change",
+    "ambiguous_unit",
+    "parse_failed",
+    "needs_rounding",
+)
+FAILED_CODES = {"missing_value", "tracked_change"}  # 값 자체를 못 읽음(FR-20의 '실패')
 
 
 class Cancel(Protocol):
@@ -125,6 +134,8 @@ class Plan:
     unmatched_rows: tuple[tuple[int, str], ...] = field(
         default_factory=tuple
     )  # (행, 키) 문서가 없는 행
+    empty_sources: tuple[str, ...] = ()  # 읽혔지만 레코드가 하나도 없는 원본(file_id)
+    key_column_letter: str = "A"
 
 
 def _short_hash(parts: list[str]) -> str:
@@ -135,6 +146,15 @@ def _same(a: CellValue | None, b: CellValue) -> bool:
     return a is not None and (a.kind, a.value) == (b.kind, b.value)
 
 
+def _address_order(address: str | None) -> tuple:
+    """정렬용: 열 글자 → 행 번호(숫자). 'C10'이 'C3' 뒤에 온다."""
+    if not address:
+        return (99, "~", 0)  # 대상 없는 항목은 맨 뒤
+    letters = address.rstrip("0123456789")
+    digits = address[len(letters) :]
+    return (len(letters), letters, int(digits) if digits.isdigit() else 0)
+
+
 @dataclass
 class _Judged:
     record: Record
@@ -142,6 +162,7 @@ class _Judged:
     evidence: Evidence
     proposed: CellValue
     reason_code: str = ""
+    key_failed: bool = False
     target_row: int | None = None
     candidates: tuple[TargetCandidate, ...] = ()
 
@@ -176,45 +197,54 @@ def analyze(
         )
     cells = {c.address: c for c in view.cells}
     key_col = view.columns.index(target.key_column) + 1
+    key_letter = get_column_letter(key_col)
     column_index = {name: index + 1 for index, name in enumerate(view.columns)}
+    names = {s.file_id: s.path.name for s in inputs.sources}
 
-    # 대상 키 → 행 목록. 키가 빈 행은 세지 않는다(합계 행 등)
+    # 대상 키 → 행 목록. 양끝 공백만 떼고 글자 그대로 비교한다(문서 쪽도 같다). 키가 빈 행은 세지 않는다
     rows_by_key: dict[str, list[int]] = {}
     key_of_row: dict[int, str] = {}
     for row in range(target.data_rows[0], target.data_rows[1] + 1):
-        cell = cells.get(f"{get_column_letter(key_col)}{row}")
-        key_text = cell.value.value if cell else ""
+        cell = cells.get(f"{key_letter}{row}")
+        key_text = cell.value.value.strip() if cell else ""
         if key_text:
             rows_by_key.setdefault(key_text, []).append(row)
             key_of_row[row] = key_text
 
     # 레코드 추출
-    sources = [s for s in inputs.active_sources if scope == "all" or s.file_id in scope.file_ids]
+    active = list(inputs.active_sources)
+    sources = [s for s in active if scope == "all" or s.file_id in scope.file_ids]
     records: list[Record] = []
+    empty_sources: list[str] = []
     for index, source in enumerate(sources, start=1):
         if cancel.is_set():
             raise ServiceError("CANCELLED", "분석을 취소했습니다.")
         progress("문서 읽기", index, len(sources))
         found = extract_records(inspect_source(inputs, source.file_id), source.file_id, ruleset)
+        if not found:
+            empty_sources.append(source.file_id)  # 읽혔지만 레코드가 없다(표 없음). 소명으로 알린다
         if scope != "all":
             found = found[: max(scope.max_records - len(records), 0)]
         records.extend(found)
 
+    value_fields = [f.name for f in ruleset.fields if f.name != ruleset.record.key_field]
     judged = [
-        _judge(record, field_name, ruleset, rows_by_key, cells, column_index, key_col)
+        _judge(record, field_name, ruleset, rows_by_key, cells, key_letter)
         for record in records
-        for field_name in [f.name for f in ruleset.fields if f.name != ruleset.record.key_field]
+        for field_name in value_fields
     ]
-    items = _merge(judged, ruleset, cells, column_index)
-    # 문서가 연결된 행: 확정된 행과 복수 후보 행 모두. 후보로라도 문서가 있는 행은 "문서가 없는 행"이 아니다
+    items = _merge(judged, ruleset, cells, column_index, names)
+    # 문서가 연결된 행: 확정된 행과 복수 후보 행 모두. 표본(Sample) 분석에서는 세지 않는다(문서를 다 읽지 않았다)
     matched_rows = {j.target_row for j in judged if j.target_row is not None} | {
         c.row for j in judged for c in j.candidates
     }
-    unmatched = tuple(
-        (row, key) for row, key in sorted(key_of_row.items()) if row not in matched_rows
+    unmatched = (
+        tuple((row, key) for row, key in sorted(key_of_row.items()) if row not in matched_rows)
+        if scope == "all"
+        else ()
     )
     counts = PlanCounts(
-        files_ok=len(sources),
+        files_ok=len(active),
         files_failed=sum(1 for s in inputs.sources if s.status == "failed"),
         files_excluded=sum(1 for s in inputs.sources if s.status == "excluded"),
         records=len(records),
@@ -241,10 +271,12 @@ def analyze(
         view.sheet,
         tuple((code, str(count)) for code, count in sorted(problems.items())),
         unmatched,
+        tuple(empty_sources),
+        key_letter,
     )
 
 
-def _judge(record, field_name, ruleset, rows_by_key, cells, column_index, key_col) -> _Judged:
+def _judge(record, field_name, ruleset, rows_by_key, cells, key_letter) -> _Judged:
     field_rule = ruleset.field(field_name)
     value = record.value(field_name)
     raw = value.raw_text if value and value.status == "ok" else ""
@@ -257,45 +289,47 @@ def _judge(record, field_name, ruleset, rows_by_key, cells, column_index, key_co
         date_order=ruleset.policy_value("date_order") or None,
     )
     proposed = normalized.value if normalized.value is not None else CellValue()
+    location = value.location if value else ""
     evidence = Evidence(
-        _short_hash(
-            [record.file_id, record.record_key, field_name, value.location if value else ""]
-        ),
+        _short_hash([record.file_id, record.record_key, field_name, location]),
         record.file_id,
         record.sha256,
         record.record_key,
-        value.location if value else "",
+        location,
         raw,
         proposed,
         normalized.transforms,
     )
     judged = _Judged(record, field_name, evidence, proposed)
-    # ② 값이 한 곳에서만 찾아졌다 ③ 변환이 모호하지 않다
-    if value is None or value.status == "missing":
-        judged.reason_code = "missing_value"
-    elif value.status == "ambiguous":
-        judged.reason_code = "ambiguous_field"
-    elif value.status == "tracked":
-        judged.reason_code = "tracked_change"
+    # ② 값이 한 곳에서만 찾아졌다 ③ 변환이 모호하지 않다 — 키 항목부터 본다. 키를 못 읽으면 행을 찾을 수 없다
+    key_value = record.value(ruleset.record.key_field)
+    if key_value is None or key_value.status != "ok":
+        judged.reason_code = _status_code(key_value.status if key_value else "missing")
+        judged.key_failed = True
+        return judged
+    if value is None or value.status != "ok":
+        judged.reason_code = _status_code(value.status if value else "missing")
     elif normalized.reason_code:
         judged.reason_code = normalized.reason_code
     # ④ 대상 행이 키의 정확 일치로 정확히 하나다
-    rows = rows_by_key.get(record.key, []) if record.key else []
+    rows = rows_by_key.get(record.key, [])
     if len(rows) == 1:
         judged.target_row = rows[0]
     elif rows:
         judged.candidates = tuple(
-            TargetCandidate(
-                row,
-                f"{get_column_letter(key_col)}{row}",
-                cells[f"{get_column_letter(key_col)}{row}"].value,
-            )
+            TargetCandidate(row, f"{key_letter}{row}", cells[f"{key_letter}{row}"].value)
             for row in rows
         )
         judged.reason_code = judged.reason_code or "multi_target"
     else:
         judged.reason_code = judged.reason_code or "no_target"
     return judged
+
+
+def _status_code(status: str) -> str:
+    return {"ambiguous": "ambiguous_field", "tracked": "tracked_change"}.get(
+        status, "missing_value"
+    )
 
 
 def _target_cell(
@@ -308,7 +342,24 @@ def _target_cell(
     return address, cells.get(address)
 
 
-def _merge(judged_list, ruleset, cells, column_index) -> list[ChangeItem]:
+def _group_reason(members: list[_Judged]) -> str:
+    """묶음의 ②③④ 판정. 입력 순서에 좌우되지 않는다.
+
+    혼자면 자기 코드. 여럿이면 하나라도 못 읽었거나 값이 다르면 conflict(⑦, api 2.6), 모두 같으면 "".
+    대상 행 문제(no_target·multi_target)는 묶음 전체가 같은 키라 같은 결과다.
+    """
+    if len(members) == 1:
+        return members[0].reason_code
+    codes = {m.reason_code for m in members}
+    if codes <= {"", "no_target", "multi_target"}:
+        if codes & {"no_target", "multi_target"}:
+            return next(iter(codes & {"no_target", "multi_target"}))
+        first = members[0].proposed
+        return "" if all(_same(m.proposed, first) for m in members[1:]) else "conflict"
+    return "conflict"
+
+
+def _merge(judged_list, ruleset, cells, column_index, names) -> list[ChangeItem]:
     # 같은 (키, 항목)을 노리는 레코드끼리 묶는다. 같은 값이면 근거를 모아 한 번 쓰고, 다르면 충돌이다(⑦)
     groups: dict[tuple[str, str], list[_Judged]] = {}
     for judged in judged_list:
@@ -318,15 +369,11 @@ def _merge(judged_list, ruleset, cells, column_index) -> list[ChangeItem]:
         first = members[0]
         address, target_cell = _target_cell(first, ruleset, cells, column_index)
         evidence = tuple(m.evidence for m in members)
-        reason_code = first.reason_code
+        reason_code = _group_reason(members)
         proposed = first.proposed
         if not reason_code and target_cell is not None:
-            # ⑤ 막힌 칸
-            if target_cell.blocked:
+            if target_cell.blocked:  # ⑤ 막힌 칸
                 reason_code = f"blocked_{target_cell.blocked}"
-            # ⑦ 같은 칸에 다른 값을 쓰려는 원본
-            elif any(m.reason_code or not _same(m.proposed, proposed) for m in members[1:]):
-                reason_code = "conflict"
         elif not reason_code and target_cell is None:
             reason_code = "no_target"  # 대상 범위 밖(일어나지 않아야 하지만 추측하지 않는다)
         previous = target_cell.value if target_cell is not None else None
@@ -348,24 +395,25 @@ def _merge(judged_list, ruleset, cells, column_index) -> list[ChangeItem]:
                     status = "unchanged"
                 else:
                     reason_code = "mismatch"
-        if reason_code in ("missing_value", "tracked_change"):
-            status = "failed"  # 값 자체를 못 읽었다(FR-20의 '실패'). 나머지 이유는 '검토 필요'
-        reason = (
-            describe(
+        if reason_code in FAILED_CODES:
+            status = "failed"
+        reason = ""
+        if reason_code:
+            reason = describe(
                 reason_code,
                 previous=previous.display() if previous else "",
                 proposed=proposed.display(),
-                key=record_key,
+                key=first.record.key,
                 candidates=", ".join(c.address for c in first.candidates),
                 sources=" · ".join(
-                    f"{m.evidence.file_id} {m.proposed.display() or m.evidence.raw_text or '(없음)'}"
+                    f"{names.get(m.evidence.file_id, m.evidence.file_id)} "
+                    f"{m.proposed.display() or m.evidence.raw_text or '(없음)'}"
                     for m in members
                 ),
                 raw=first.evidence.raw_text,
             )
-            if reason_code
-            else ""
-        )
+            if first.key_failed:
+                reason = "키 항목을 읽지 못해 행을 찾을 수 없음 — " + reason
         items.append(
             ChangeItem(
                 _short_hash([record_key, field_name]),
@@ -384,18 +432,21 @@ def _merge(judged_list, ruleset, cells, column_index) -> list[ChangeItem]:
                 write_selected=write_selected,
             )
         )
-    items.sort(key=lambda i: (i.target_ref or "~", i.record_key, i.field))
+    items.sort(key=lambda i: (_address_order(i.target_ref), i.record_key, i.field))
     return items
 
 
 def manual_items(plan: Plan) -> tuple[ManualItem, ...]:
-    """직접 처리 영역 + 실패 원본 + 문서가 없는 행. 이유·할 일은 5.1절 표의 문장 틀로 만든다."""
+    """직접 처리 영역 + 실패 원본 + 레코드 없는 원본 + 문서가 없는 행. 이유·할 일은 5.1절 표의 문장 틀로 만든다."""
+    names = {s.file_id: s.path.name for s in plan.inputs.sources}
     items: list[ManualItem] = []
     for item in plan.items:
         if item.area != "manual":
             continue
         kind = kind_of(item.reason_code)
-        where = f"{plan.sheet}!{item.target_ref}" if item.target_ref else _evidence_where(item)
+        where = (
+            f"{plan.sheet}!{item.target_ref}" if item.target_ref else _evidence_where(item, names)
+        )
         items.append(
             ManualItem(kind, where, item.reason, action_of(kind), item.reason_code, item.change_id)
         )
@@ -411,11 +462,22 @@ def manual_items(plan: Plan) -> tuple[ManualItem, ...]:
                     None,
                 )
             )
+    for file_id in plan.empty_sources:
+        items.append(
+            ManualItem(
+                "unreadable_file",
+                names.get(file_id, file_id),
+                describe("no_records"),
+                action_of("unreadable_file"),
+                "no_records",
+                None,
+            )
+        )
     for row, key in plan.unmatched_rows:
         items.append(
             ManualItem(
                 "no_document",
-                f"{plan.sheet}!{row}행",
+                f"{plan.sheet}!{plan.key_column_letter}{row}",
                 describe("target_without_source", key=key),
                 action_of("no_document"),
                 "target_without_source",
@@ -425,8 +487,10 @@ def manual_items(plan: Plan) -> tuple[ManualItem, ...]:
     return tuple(sorted(items, key=sort_key))
 
 
-def _evidence_where(item: ChangeItem) -> str:
+def _evidence_where(item: ChangeItem, names: dict[str, str]) -> str:
+    """대상 칸이 없을 때의 위치: '파일 이름 · 구역 · 표 · 행 열'. 내부 식별자는 쓰지 않는다."""
     first = item.evidence[0] if item.evidence else None
     if first is None:
         return item.record_key
-    return f"{first.file_id} {first.location or '레코드 ' + first.record_key}"
+    name = names.get(first.file_id, first.file_id)
+    return f"{name} {first.location}" if first.location else name

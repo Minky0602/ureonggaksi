@@ -206,8 +206,8 @@ def test_check_plan_reports_match_mismatch_and_missing_in_sheet(tmp_path):
 
 
 def test_keys_match_only_as_exact_text(tmp_path):
-    """'0012'와 숫자 12는 다른 키다(FR-11). 공백이 달라도 다르다."""
-    rows = [["사업코드", "사업명", "2026 예산"], [12, "숫자 키", None], ["0012 ", "공백 키", None]]
+    """'0012'와 숫자 12는 다른 키다(FR-11). 안쪽 공백이 달라도 다르다."""
+    rows = [["사업코드", "사업명", "2026 예산"], [12, "숫자 키", None], ["00 12", "공백 키", None]]
     target = write_xlsx(tmp_path / "t.xlsx", rows)
     source = write_hwpx(tmp_path / "a.hwpx", plan_doc("0012", "350만원"))
     plan = analyze(
@@ -261,7 +261,7 @@ def test_sample_scope_and_cancel(bundle):
         analyze(inputs, fill_rule(), cancel=Cancelled())
     assert info.value.code == "CANCELLED"
     plan = analyze(inputs, fill_rule(), scope=Sample(("src-1",)))
-    assert plan.counts.records == 1 and plan.counts.files_ok == 1
+    assert plan.counts.records == 1 and plan.counts.files_ok == 10  # files_ok는 전체 정상 원본 수
 
 
 def test_table_rows_records_split_two_projects_in_one_document(tmp_path):
@@ -350,3 +350,150 @@ def test_duplicate_source_files_do_not_double_count(tmp_path):
     target = write_xlsx(tmp_path / "t.xlsx", SHEET)
     plan = analyze(open_inputs([original, copy], target, tmp_path / "out"), fill_rule())
     assert plan.counts.records == 1 and plan.counts.files_ok == 1
+
+
+def analyze_docs(tmp_path, docs, rule=None, sheet=SHEET):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    paths = [write_hwpx(tmp_path / f"{n}.hwpx", s) for n, s in docs]
+    target = write_xlsx(tmp_path / "t.xlsx", sheet)
+    return analyze(open_inputs(paths, target, tmp_path / "out"), rule or fill_rule())
+
+
+def test_group_judgement_does_not_depend_on_file_order(tmp_path):
+    """같은 키의 문서 둘 중 하나를 못 읽으면 순서와 상관없이 같은 판정이다(검수 M1)."""
+    readable = plan_doc("0012", "350만원")
+    blank = plan_doc("0012", "")
+    forward = analyze_docs(tmp_path / "f", [("a", readable), ("b", blank)])
+    backward = analyze_docs(tmp_path / "b", [("a", blank), ("b", readable)])
+    f, b = by_key_field(forward)[("0012", "사업비")], by_key_field(backward)[("0012", "사업비")]
+    assert (f.reason_code, f.status) == (b.reason_code, b.status) == ("conflict", "needs_review")
+    assert forward.problem_counts == backward.problem_counts
+    assert "a.hwpx" in f.reason and "src-" not in f.reason  # 소명은 파일 이름으로 말한다
+
+
+def test_record_whose_key_cannot_be_read_is_an_unreadable_value_not_no_target(tmp_path):
+    """키가 두 곳·변경 추적·없음이면 그 레코드의 칸은 '값을 확실히 못 읽음'이다(검수 M2)."""
+    two_keys = [
+        "<hp:p><hp:run>"
+        + table(
+            [
+                [cell("사업코드", 0, 0), cell("0012", 0, 1)],
+                [cell("사업코드", 1, 0), cell("0013", 1, 1)],
+                [cell("사업비", 2, 0), cell("350만원", 2, 1)],
+            ]
+        )
+        + "</hp:run></hp:p>"
+    ]
+    no_key = [
+        "<hp:p><hp:run>"
+        + table([[cell("사업비", 0, 0), cell("350만원", 0, 1)]])
+        + "</hp:run></hp:p>"
+    ]
+    plan = analyze_docs(tmp_path, [("둘", two_keys), ("없음", no_key)])
+    codes = {(i.evidence[0].file_id, i.reason_code, i.status) for i in plan.items}
+    assert codes == {
+        ("src-1", "ambiguous_field", "needs_review"),
+        ("src-2", "missing_value", "failed"),
+    }
+    manual = manual_items(plan)
+    cells_manual = [m for m in manual if m.kind != "no_document"]
+    assert all(m.kind == "unreadable_value" for m in cells_manual)
+    assert all("#" not in m.reason and "src-" not in m.where for m in cells_manual)
+    assert cells_manual[0].where.startswith(("둘.hwpx", "없음.hwpx"))
+    assert all("키 항목" in m.reason for m in cells_manual)
+
+
+def test_document_without_the_table_is_reported_as_a_file_item(tmp_path):
+    rule = fill_rule(
+        record=RecordRule("table_rows", "코드"),
+        fields=(
+            FieldRule("코드", "column", query="코드"),
+            FieldRule(
+                "사업비",
+                "column",
+                query="사업비",
+                value_type="money",
+                unit="원",
+                target_column="2026 예산",
+            ),
+        ),
+    )
+    plan = analyze_docs(tmp_path, [("문단만", [para("표가 없는 문서")])], rule)
+    assert plan.counts.records == 0 and plan.empty_sources == ("src-1",)
+    item = next(m for m in manual_items(plan) if m.reason_code == "no_records")
+    assert (item.kind, item.where) == ("unreadable_file", "문단만.hwpx")
+
+
+def test_merged_header_spanning_two_columns_is_ambiguous_not_the_first_column(tmp_path):
+    """병합 머리글 '예산'(2열)에 맞은 항목은 2025·2026 중 어느 열인지 모른다(검수 H1)."""
+    rows = [
+        [cell("코드", 0, 0, rowspan=2), cell("예산", 0, 1, colspan=2)],
+        [cell("2025", 1, 1), cell("2026", 1, 2)],
+        [cell("0012", 2, 0), cell("1,000원", 2, 1), cell("2,000원", 2, 2)],
+    ]
+    sections = ["<hp:p><hp:run>" + table(rows) + "</hp:run></hp:p>"]
+    rule = fill_rule(
+        record=RecordRule("table_rows", "코드", header_row=1),
+        fields=(
+            FieldRule("코드", "column", query="코드"),
+            FieldRule(
+                "예산", "column", query="예산", value_type="money", target_column="2026 예산"
+            ),
+        ),
+    )
+    plan = analyze_docs(tmp_path, [("a", sections)], rule)
+    (item,) = plan.items
+    assert (item.record_key, item.reason_code, item.write_selected) == (
+        "0012",
+        "ambiguous_field",
+        False,
+    )
+    assert plan.counts.records == 1  # 머리글 블록(rowSpan 2)이 덮는 2행은 레코드가 아니다(검수 M5)
+    # 2행을 머리글로 지정하면 '2026' 열을 읽는다
+    right = fill_rule(
+        record=RecordRule("table_rows", "코드", header_row=2),
+        fields=(
+            FieldRule("코드", "column", query="코드"),
+            FieldRule(
+                "예산", "column", query="2026", value_type="money", target_column="2026 예산"
+            ),
+        ),
+    )
+    plan = analyze_docs(tmp_path / "r", [("a", sections)], right)
+    assert plan.items[0].reason_code == "missing_value" or plan.items[0].proposed.value == "2000"
+
+
+def test_key_whitespace_is_trimmed_on_both_sides_only_at_the_ends(tmp_path):
+    rows = [
+        ["사업코드", "사업명", "2026 예산"],
+        [" 0012", "표 쪽 앞 공백", None],
+        ["00 13", "안쪽 공백", None],
+    ]
+    docs = [("a", plan_doc("0012", "350만원")), ("b", plan_doc("0013", "350만원"))]
+    rule = fill_rule(target=TargetRule("사업취합", 1, (2, 3), "사업코드"))
+    plan = analyze_docs(tmp_path, docs, rule, rows)
+    items = by_key_field(plan)
+    assert items[("0012", "사업비")].write_selected  # 양끝 공백은 양쪽 모두 뗀다(검수 M7)
+    assert items[("0013", "사업비")].reason_code == "no_target"  # 안쪽 공백 차이는 다른 키다(FR-11)
+
+
+def test_items_and_manual_list_sort_by_row_number_not_text(tmp_path):
+    rows = [["사업코드", "사업명", "2026 예산"]] + [[f"{i:04d}", "", None] for i in range(1, 13)]
+    docs = [(f"d{i}", plan_doc(f"{i:04d}", "350만원")) for i in (3, 10, 11)]
+    rule = fill_rule(target=TargetRule("사업취합", 1, (2, 13), "사업코드"))
+    plan = analyze_docs(tmp_path, docs, rule, rows)
+    assert [i.target_ref for i in plan.items] == ["C4", "C11", "C12"]
+    manual = manual_items(plan)
+    assert [m.where for m in manual][:3] == [
+        "사업취합!A2",
+        "사업취합!A3",
+        "사업취합!A5",
+    ]  # 문서 없는 행, 키 열 주소
+
+
+def test_sample_scope_counts_files_as_a_whole_and_skips_unmatched_rows(tmp_path):
+    docs = [(f"d{i}", plan_doc(code, "350만원")) for i, code in enumerate(["0012", "0013", "0018"])]
+    paths = [write_hwpx(tmp_path / f"{n}.hwpx", s) for n, s in docs]
+    inputs = open_inputs(paths, write_xlsx(tmp_path / "t.xlsx", SHEET), tmp_path / "out")
+    plan = analyze(inputs, fill_rule(), scope=Sample(("src-1", "src-2"), max_records=1))
+    assert (plan.counts.files_ok, plan.counts.records, plan.unmatched_rows) == (3, 1, ())
