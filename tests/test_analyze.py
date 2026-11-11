@@ -460,7 +460,8 @@ def test_merged_header_spanning_two_columns_is_ambiguous_not_the_first_column(tm
         ),
     )
     plan = analyze_docs(tmp_path / "r", [("a", sections)], right)
-    assert plan.items[0].reason_code == "missing_value" or plan.items[0].proposed.value == "2000"
+    (item,) = plan.items
+    assert (item.proposed.value, item.write_selected) == ("2000", True)
 
 
 def test_key_whitespace_is_trimmed_on_both_sides_only_at_the_ends(tmp_path):
@@ -497,3 +498,75 @@ def test_sample_scope_counts_files_as_a_whole_and_skips_unmatched_rows(tmp_path)
     inputs = open_inputs(paths, write_xlsx(tmp_path / "t.xlsx", SHEET), tmp_path / "out")
     plan = analyze(inputs, fill_rule(), scope=Sample(("src-1", "src-2"), max_records=1))
     assert (plan.counts.files_ok, plan.counts.records, plan.unmatched_rows) == (3, 1, ())
+
+
+def test_group_applies_target_and_blocked_criteria_before_conflict(tmp_path):
+    """묶음에서도 ④ 대상 행·⑤ 막힌 칸이 ⑦ 충돌보다 먼저다(2차 검수 N1)."""
+    readable, blank = plan_doc("0099", "350만원"), plan_doc("0099", "")
+    plan = analyze_docs(tmp_path / "a", [("a", readable), ("b", blank)])
+    assert plan.items[0].reason_code == "no_target"
+    plan = analyze_docs(
+        tmp_path / "b", [("a", plan_doc("0014", "350만원")), ("b", plan_doc("0014", ""))]
+    )
+    item = plan.items[0]
+    assert item.reason_code == "multi_target" and [c.row for c in item.target_candidates] == [4, 5]
+    plan = analyze_docs(
+        tmp_path / "c", [("a", plan_doc("0016", "350만원")), ("b", plan_doc("0016", "1원"))]
+    )
+    assert plan.items[0].reason_code == "blocked_formula"
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "code", "status"),
+    [
+        ("", "", "missing_value", "failed"),
+        ("3,500", "3,600", "ambiguous_unit", "needs_review"),
+        ("3.5원", "4.5원", "needs_rounding", "needs_review"),
+        ("3,500", "미정", "ambiguous_unit", "needs_review"),  # 둘 다 못 읽음: UNREADABLE_CODES 순서
+        ("미정", "3,500", "ambiguous_unit", "needs_review"),
+    ],
+)
+def test_group_where_nothing_is_readable_keeps_the_unreadable_reason(
+    tmp_path, first, second, code, status
+):
+    """묶음의 모든 문서를 못 읽었으면 충돌이 아니라 못 읽은 이유다(2차 검수 N2). 순서와 무관."""
+    plan = analyze_docs(tmp_path, [("a", plan_doc("0012", first)), ("b", plan_doc("0012", second))])
+    (item,) = plan.items
+    assert (item.reason_code, item.status) == (code, status)
+    assert dict(plan.problem_counts) == {code: "1"}
+
+
+def test_conflict_proposal_is_empty_regardless_of_order(tmp_path):
+    forward = analyze_docs(
+        tmp_path / "f", [("a", plan_doc("0012", "")), ("b", plan_doc("0012", "350만원"))]
+    )
+    backward = analyze_docs(
+        tmp_path / "b", [("a", plan_doc("0012", "350만원")), ("b", plan_doc("0012", ""))]
+    )
+    assert forward.items[0].proposed == backward.items[0].proposed == CellValue()
+
+
+def test_merged_header_over_a_single_merged_data_column_is_read(tmp_path):
+    """머리글과 데이터 칸이 같은 두 격자 열을 한 칸으로 쓰면 한 열이다(2차 검수 N3)."""
+    rows = [
+        [cell("코드", 0, 0), cell("사업비", 0, 1, colspan=2)],
+        [cell("0012", 1, 0), cell("350만원", 1, 1, colspan=2)],
+        [cell("0017", 2, 0), cell("35,000천원", 2, 1, colspan=2)],
+    ]
+    rule = fill_rule(
+        record=RecordRule("table_rows", "코드"),
+        fields=(
+            FieldRule("코드", "column", query="코드"),
+            FieldRule(
+                "사업비", "column", query="사업비", value_type="money", target_column="2026 예산"
+            ),
+        ),
+    )
+    plan = analyze_docs(
+        tmp_path, [("a", ["<hp:p><hp:run>" + table(rows) + "</hp:run></hp:p>"])], rule
+    )
+    items = by_key_field(plan)
+    assert (
+        items[("0012", "사업비")].write_selected
+        and items[("0017", "사업비")].proposed.value == "35000000"
+    )

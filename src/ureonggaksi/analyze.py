@@ -161,7 +161,8 @@ class _Judged:
     field_name: str
     evidence: Evidence
     proposed: CellValue
-    reason_code: str = ""
+    value_code: str = ""  # ②③ 이 레코드의 값을 못 읽은 이유
+    target_code: str = ""  # ④ no_target · multi_target
     key_failed: bool = False
     target_row: int | None = None
     candidates: tuple[TargetCandidate, ...] = ()
@@ -301,17 +302,18 @@ def _judge(record, field_name, ruleset, rows_by_key, cells, key_letter) -> _Judg
         normalized.transforms,
     )
     judged = _Judged(record, field_name, evidence, proposed)
-    # ② 값이 한 곳에서만 찾아졌다 ③ 변환이 모호하지 않다 — 키 항목부터 본다. 키를 못 읽으면 행을 찾을 수 없다
+    # 키 항목부터 본다. 키를 못 읽으면 행을 찾을 수 없으므로 키의 코드가 이 칸의 이유다
     key_value = record.value(ruleset.record.key_field)
     if key_value is None or key_value.status != "ok":
-        judged.reason_code = _status_code(key_value.status if key_value else "missing")
+        judged.value_code = _status_code(key_value.status if key_value else "missing")
         judged.key_failed = True
         return judged
+    # ② 값이 한 곳에서만 찾아졌다 ③ 변환이 모호하지 않다 — 레코드 하나의 판정
     if value is None or value.status != "ok":
-        judged.reason_code = _status_code(value.status if value else "missing")
+        judged.value_code = _status_code(value.status if value else "missing")
     elif normalized.reason_code:
-        judged.reason_code = normalized.reason_code
-    # ④ 대상 행이 키의 정확 일치로 정확히 하나다
+        judged.value_code = normalized.reason_code
+    # ④ 대상 행 — 키가 같으면 결과도 같다. 묶음 판정에서 ②③ 다음, ⑤⑦ 앞에 적용한다
     rows = rows_by_key.get(record.key, [])
     if len(rows) == 1:
         judged.target_row = rows[0]
@@ -320,9 +322,9 @@ def _judge(record, field_name, ruleset, rows_by_key, cells, key_letter) -> _Judg
             TargetCandidate(row, f"{key_letter}{row}", cells[f"{key_letter}{row}"].value)
             for row in rows
         )
-        judged.reason_code = judged.reason_code or "multi_target"
+        judged.target_code = "multi_target"
     else:
-        judged.reason_code = judged.reason_code or "no_target"
+        judged.target_code = "no_target"
     return judged
 
 
@@ -342,40 +344,44 @@ def _target_cell(
     return address, cells.get(address)
 
 
-def _group_reason(members: list[_Judged]) -> str:
-    """묶음의 ②③④ 판정. 입력 순서에 좌우되지 않는다.
+def _group_reason(members: list[_Judged], target_cell: TargetCell | None) -> tuple[str, CellValue]:
+    """묶음(같은 키·항목의 레코드들)의 ②~⑤·⑦ 판정과 제안값. 입력 순서에 좌우되지 않는다.
 
-    혼자면 자기 코드. 여럿이면 하나라도 못 읽었거나 값이 다르면 conflict(⑦, api 2.6), 모두 같으면 "".
-    대상 행 문제(no_target·multi_target)는 묶음 전체가 같은 키라 같은 결과다.
+    ②③ 읽힌 값이 하나도 없으면 못 읽은 이유(여럿이면 UNREADABLE_CODES 순서로 앞선 것)
+    ④ 대상 행(no_target·multi_target) ⑤ 막힌 칸
+    ⑦ 레코드가 여럿이고 하나라도 못 읽었거나 읽힌 값이 서로 다르면 conflict(제안값은 비움)
     """
-    if len(members) == 1:
-        return members[0].reason_code
-    codes = {m.reason_code for m in members}
-    if codes <= {"", "no_target", "multi_target"}:
-        if codes & {"no_target", "multi_target"}:
-            return next(iter(codes & {"no_target", "multi_target"}))
-        first = members[0].proposed
-        return "" if all(_same(m.proposed, first) for m in members[1:]) else "conflict"
-    return "conflict"
+    readable = [m for m in members if not m.value_code]
+    if not readable:
+        code = min((m.value_code for m in members), key=UNREADABLE_CODES.index)
+        return code, CellValue()
+    first = members[0]
+    if first.target_code:
+        return first.target_code, readable[0].proposed if len(members) == 1 else CellValue()
+    if target_cell is None:
+        return "no_target", CellValue()  # 대상 범위 밖(일어나지 않아야 하지만 추측하지 않는다)
+    if target_cell.blocked:
+        return f"blocked_{target_cell.blocked}", readable[0].proposed
+    if len(readable) != len(members) or any(
+        not _same(m.proposed, readable[0].proposed) for m in readable[1:]
+    ):
+        return "conflict", CellValue()
+    return "", readable[0].proposed
 
 
 def _merge(judged_list, ruleset, cells, column_index, names) -> list[ChangeItem]:
-    # 같은 (키, 항목)을 노리는 레코드끼리 묶는다. 같은 값이면 근거를 모아 한 번 쓰고, 다르면 충돌이다(⑦)
-    groups: dict[tuple[str, str], list[_Judged]] = {}
+    # 같은 (키, 항목)을 노리는 레코드끼리 묶는다. 같은 값이면 근거를 모아 한 번 쓰고, 다르면 충돌이다(⑦).
+    # 키를 못 읽은 레코드는 자기만의 묶음이다(내부 키가 실제 키 글자와 겹쳐도 섞이지 않게, 검수 L-c)
+    groups: dict[tuple[str, str, bool], list[_Judged]] = {}
     for judged in judged_list:
-        groups.setdefault((judged.record.record_key, judged.field_name), []).append(judged)
+        group = (judged.record.record_key, judged.field_name, judged.key_failed)
+        groups.setdefault(group, []).append(judged)
     items = []
-    for (record_key, field_name), members in groups.items():
+    for (record_key, field_name, key_failed), members in groups.items():
         first = members[0]
         address, target_cell = _target_cell(first, ruleset, cells, column_index)
         evidence = tuple(m.evidence for m in members)
-        reason_code = _group_reason(members)
-        proposed = first.proposed
-        if not reason_code and target_cell is not None:
-            if target_cell.blocked:  # ⑤ 막힌 칸
-                reason_code = f"blocked_{target_cell.blocked}"
-        elif not reason_code and target_cell is None:
-            reason_code = "no_target"  # 대상 범위 밖(일어나지 않아야 하지만 추측하지 않는다)
+        reason_code, proposed = _group_reason(members, target_cell)
         previous = target_cell.value if target_cell is not None else None
         status: ItemStatus = "needs_review"
         write_selected = False
@@ -412,11 +418,12 @@ def _merge(judged_list, ruleset, cells, column_index, names) -> list[ChangeItem]
                 ),
                 raw=first.evidence.raw_text,
             )
-            if first.key_failed:
+            if key_failed:
                 reason = "키 항목을 읽지 못해 행을 찾을 수 없음 — " + reason
+        id_parts = [record_key, field_name] + (["key_failed"] if key_failed else [])
         items.append(
             ChangeItem(
-                _short_hash([record_key, field_name]),
+                _short_hash(id_parts),
                 record_key,
                 field_name,
                 address,

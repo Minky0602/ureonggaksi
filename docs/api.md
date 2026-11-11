@@ -136,7 +136,7 @@ def open_inputs(sources: list[Path], target: Path, output_dir: Path) -> Inputs
     # 원본 실패는 status="failed"로 돌려준다(→ 직접 처리 목록의 파일 항목). 대상 실패·경로 충돌·한도 초과는 ServiceError.
     # 한도(OQ-04, 제안값·실측 전): 원본 500개, HWPX 64 MiB, XLSX 32 MiB, 스냅샷 합계 256 MiB,
     # XLSX 안 ZIP 항목 2048개·해제 128 MiB·항목 64 MiB, 대상 시트 사용 범위 500,000칸(병합·수식 범위 하나, dimension도 같은 한도),
-    # 통합문서 전체 셀 1,000,000, 항목당 XML 요소 2,000,000. 셀 수는 openpyxl이 객체를 만드는 요소(c·row·hyperlink)의 합계,
+    # 통합문서 전체 셀 1,000,000, 항목당 XML 요소 2,000,000, 수식 범위 면적 합계 500,000. 셀 수는 openpyxl이 객체를 만드는 요소(c·row·hyperlink)의 합계,
     # 병합은 면적 합계, conditionalFormatting·dataValidation은 따로 20,000. 한도 검사는 openpyxl에 넘기기 전 ZIP 항목
     # 전부를 XML 파서로 훑어서 한다. 이 검사는 알려진 패턴을 막는 층이며, 로드 자체의 시간·메모리 상한은 P03에서 검토한다.
     # 중복은 바이트 SHA-256이 같을 때다. 스냅샷은 대표(먼저 온 것)에만 있으므로 대표를 제외하면 그 중복도 함께 쓰이지 않는다.
@@ -300,12 +300,14 @@ def analyze(inputs: Inputs, rule: RuleSet | WorkflowVersion, *, scope: Literal["
     #   ③ 변환: ambiguous_unit · parse_failed · needs_rounding  ④ 대상 행: no_target · multi_target(+target_candidates)
     #   ⑤ 막힌 칸: blocked_formula/merged/protected  ⑥ 작업 종류: existing_differs(fill) · mismatch/missing_in_sheet(check)
     #   ⑦ 같은 (키, 항목)을 노리는 레코드가 둘 이상: 제안값이 모두 같고 모두 읽혔으면 ChangeItem 하나에 evidence를 모아
-    #     한 번 쓴다. 하나라도 다르거나 못 읽었으면 conflict(입력 순서와 무관). 혼자면 자기 코드. 먼저 걸린 기준의 코드가 reason_code다.
+    #     한 번 쓴다. 묶음 판정 순서(입력 순서와 무관): 읽힌 값이 하나도 없으면 ②③의 이유(여럿이면 missing_value ·
+    #     ambiguous_field · tracked_change · ambiguous_unit · parse_failed · needs_rounding 순서로 앞선 것) → ④ 대상 행 →
+    #     ⑤ 막힌 칸 → 하나라도 못 읽었거나 읽힌 값이 서로 다르면 conflict(제안값은 비움). 먼저 걸린 기준의 코드가 reason_code다.
     #   키 항목 자체를 못 읽은 레코드(없음·두 곳·변경 추적)는 그 레코드의 모든 칸이 키의 코드(missing_value·ambiguous_field·
     #   tracked_change)를 받고 reason에 "키 항목을 읽지 못해"가 붙는다. no_target이 아니다.
     # 키 비교는 양끝 공백만 떼고 글자 그대로(문서 글자 vs 대상 칸 CellValue.value). 안쪽 공백·전각·대소문자 차이는 다른 키.
     # 대상 칸이 숫자 12이고 문서가 "0012"면 no_target. table_rows에서 머리글이 여러 열에 걸치면(colSpan) 그 항목은
-    # ambiguous_field, 머리글 블록이 덮는 행(rowSpan)은 데이터가 아니다. 머리글 비교는 공백·끝 콜론 제외·대소문자 무시.
+    # ambiguous_field(단, 그 아래 데이터 칸이 모두 머리글과 같은 시작 열·폭이면 한 열), 머리글 블록이 덮는 행(rowSpan)은 데이터가 아니다. 머리글 비교는 공백·끝 콜론 제외·대소문자 무시.
     # 읽혔지만 레코드가 없는 원본(표 없음)은 Plan.empty_sources → ManualItem(unreadable_file, no_records).
     # 대상 키가 빈 행(합계 행 등)은 세지 않는다. 키가 있는데 어떤 레코드와도 연결되지 않은 행이 "문서가 없는 행"이다
     # (복수 후보로라도 연결된 행은 아니다). change_id = sha256(canonical_json([record_key, field]))[:16],

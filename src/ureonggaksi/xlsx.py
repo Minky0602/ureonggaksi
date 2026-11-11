@@ -82,7 +82,7 @@ def _check_entry_xml(stream) -> int:
     항목 이름(확장자·위치)이나 루트 이름으로 시트를 고르지 않는다. openpyxl은 rels가 가리키는 항목을 이름과
     상관없이 시트로 읽고 루트 이름도 보지 않기 때문이다(재검수 H1'·H1''). 글자 검색(정규식)도 표기로 우회된다.
     """
-    cells = heavy = refs = nodes = merged_area = 0
+    cells = heavy = refs = nodes = merged_area = formula_area = 0
     try:
         for _event, element in iterparse(
             stream, events=("start",), forbid_dtd=True, forbid_entities=True, forbid_external=True
@@ -114,10 +114,13 @@ def _check_entry_xml(stream) -> int:
                     )
                 area = _range_area(element.get("ref"))
                 if tag == "mergeCell":
-                    merged_area += (
-                        area  # 겹쳐도 openpyxl은 각각 MergedCell을 만든다 → 합계로 묶는다
-                    )
+                    # 겹쳐도 openpyxl은 각각 MergedCell을 만든다 → 합계로 묶는다
+                    merged_area += area
                     area = merged_area
+                elif tag == "f":
+                    # 배열·공유 수식 범위도 합계로 묶는다. 미리보기가 이 범위를 펼쳐 칸 조회를 하므로(2차 검수 N4)
+                    formula_area += area
+                    area = formula_area
                 if area > MAX_SHEET_CELLS:
                     raise ServiceError("INPUT_LIMIT", RANGE_MESSAGE)
             element.clear()
@@ -266,10 +269,6 @@ def _bounds(ref: str) -> Bounds:
     return min_row, min_col, max_row, max_col
 
 
-def _within(bounds: Bounds, row: int, col: int) -> bool:
-    return bounds[0] <= row <= bounds[2] and bounds[1] <= col <= bounds[3]
-
-
 def _blocked(
     formula_sheet, array_ranges, merged_followers: set, protected: bool, row: int, col: int
 ) -> Blocked:
@@ -279,7 +278,7 @@ def _blocked(
     칸 50,000개를 선형 탐색하면 30초가 걸렸다).
     """
     source = formula_sheet.cell(row, col)
-    if source.data_type == "f" or any(_within(b, row, col) for b in array_ranges):
+    if source.data_type == "f" or (row, col) in array_ranges:
         return "formula"
     if (row, col) in merged_followers:
         return "merged"
@@ -330,7 +329,13 @@ def inspect_target(
             cell_value(values_sheet.cell(header, col).value).value.strip() or get_column_letter(col)
             for col in range(1, max_col + 1)
         )
-        array_ranges = [_bounds(ref) for ref in formula_sheet.array_formulae.values()]
+        # 배열 수식 범위를 칸 집합으로 펼친다. 면적 합계는 사전 검사가 500,000칸으로 묶는다(2차 검수 N4)
+        array_ranges = {
+            (r, c)
+            for b in (_bounds(ref) for ref in formula_sheet.array_formulae.values())
+            for r in range(b[0], b[2] + 1)
+            for c in range(b[1], b[3] + 1)
+        }
         merged_followers = {
             (r, c)
             for m in formula_sheet.merged_cells.ranges
