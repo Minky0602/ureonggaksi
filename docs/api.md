@@ -134,8 +134,10 @@ class Inputs:
 
 def open_inputs(sources: list[Path], target: Path, output_dir: Path) -> Inputs
     # 원본 실패는 status="failed"로 돌려준다(→ 직접 처리 목록의 파일 항목). 대상 실패·경로 충돌·한도 초과는 ServiceError.
-    # 한도(OQ-04, 제안값·실측 전): 원본 200개, HWPX 64 MiB, XLSX 32 MiB, 스냅샷 합계 256 MiB,
-    # XLSX 안 ZIP 항목 2048개·해제 128 MiB, 대상 시트 사용 범위 500,000칸. 중복은 바이트 SHA-256이 같을 때다.
+    # 한도(OQ-04, 제안값·실측 전): 원본 500개, HWPX 64 MiB, XLSX 32 MiB, 스냅샷 합계 256 MiB,
+    # XLSX 안 ZIP 항목 2048개·해제 128 MiB·시트 XML 64 MiB, 대상 시트 사용 범위 500,000칸(병합·수식 범위 하나도 같은 한도).
+    # 중복은 바이트 SHA-256이 같을 때다. 스냅샷은 대표(먼저 온 것)에만 있으므로 대표를 제외하면 그 중복도 함께 쓰이지 않는다.
+    # 실패 이유 문구에는 경로·errno를 넣지 않는다(경로는 InputFile.path).
 def exclude_source(inputs: Inputs, file_id: str) -> Inputs        # 새 run_id
 ```
 
@@ -155,10 +157,11 @@ class TargetView:
 
 def inspect_target(inputs: Inputs, sheet: str | None = None, header_row: int | None = None,
                    data_rows: tuple[int, int] | None = None, preview_rows: int = 50) -> TargetView
-    # sheet 기본값은 통합문서의 활성 시트. header_row 기본값은 1~20행 중 비지 않은 칸이 가장 많은 첫 행,
+    # sheet 기본값은 통합문서의 활성 시트. header_row 기본값은 1~20행 중 글자 칸이 가장 많은 첫 행,
     # data_rows 기본값은 (header_row+1, 마지막 비지 않은 행). 데이터가 없으면 (header_row+1, header_row).
-    # blocked는 formula(배열 수식은 범위 전체) > merged(병합의 왼쪽 위가 아닌 칸) > protected 순서로 하나.
+    # blocked는 formula(배열·공유 수식은 범위 전체) > merged(병합의 왼쪽 위가 아닌 칸) > protected(시트 보호 + 칸 잠김) 순서로 하나.
     # 기존값은 openpyxl 타입을 그대로 CellValue로 옮긴다. 수식 칸의 기존값은 파일에 저장된 캐시값이고 없으면 empty.
+    # int는 자릿수 그대로(반올림 없음). time·timedelta·오류값("#DIV/0!")은 text다(계약에 그 종류가 없다).
 def inspect_source(inputs: Inputs, file_id: str) -> Document        # 기존 hwpx.Document 재사용
 ```
 

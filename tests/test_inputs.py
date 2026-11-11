@@ -138,9 +138,36 @@ def test_limits_are_explained_before_analysis(tmp_path, target, monkeypatch):
     assert info.value.code == "INPUT_LIMIT"
 
 
-def test_run_id_changes_when_inputs_change(tmp_path, target):
+def test_each_open_gets_a_new_run_id_but_the_same_content_fingerprint(tmp_path, target):
     source = write_hwpx(tmp_path / "a.hwpx")
     first = open_inputs([source], target, tmp_path / "out")
     second = open_inputs([source], target, tmp_path / "out")
     assert first.run_id != second.run_id
     assert first.sources[0].sha256 == second.sources[0].sha256  # 내용 지문은 식별자와 분리된다
+
+
+def test_failure_reasons_do_not_leak_paths_or_errno(tmp_path, target):
+    missing = tmp_path / "없는파일.hwpx"
+    result = open_inputs([missing], target, tmp_path / "out")
+    reason = result.sources[0].reason
+    assert result.sources[0].status == "failed"
+    assert "Errno" not in reason and str(tmp_path) not in reason
+
+
+def test_path_spelling_variants_still_count_as_the_same_file(tmp_path, target):
+    source = write_hwpx(tmp_path / "a.hwpx")
+    variant = tmp_path / "sub" / ".." / "A.HWPX"  # ..·대소문자(Windows)
+    (tmp_path / "sub").mkdir()
+    with pytest.raises(ServiceError) as info:
+        open_inputs([source], target, variant)
+    assert info.value.code == "PATH_CONFLICT"
+
+
+def test_excluding_the_representative_leaves_duplicates_inactive(tmp_path, target):
+    """대표 원본을 제외하면 그 중복도 함께 쓰이지 않는다(스냅샷은 대표에만 있다). 계약의 알려진 한계."""
+    original = write_hwpx(tmp_path / "a.hwpx")
+    copy = tmp_path / "b.hwpx"
+    shutil.copy(original, copy)
+    result = exclude_source(open_inputs([original, copy], target, tmp_path / "out"), "src-1")
+    assert [s.status for s in result.sources] == ["excluded", "duplicate"]
+    assert result.active_sources == ()
