@@ -295,6 +295,18 @@ def analyze(inputs: Inputs, rule: RuleSet | WorkflowVersion, *, scope: Literal["
     # 차이는 기준 6 하나다. fill: 빈칸 → 쓸 칸, 같은 값 → unchanged, 다른 값 → existing_differs.
     #                       check: 같은 값 → unchanged(일치), 다른 값 → mismatch, 빈칸 → missing_in_sheet. write_selected는 항상 False.
     # Sample은 자세히 화면의 직접 선택 흐름에서만 쓴다. prepare는 항상 "all"이다.
+    # (P02-4에서 확정) 기준 적용 순서와 reason_code: ① validate_rule 이슈가 있으면 분석 전 RULE_INVALID(detail=(path, code)…)
+    #   ② 값 한 곳: missing_value · ambiguous_field · tracked_change(→ status "failed"는 missing_value·tracked_change만)
+    #   ③ 변환: ambiguous_unit · parse_failed · needs_rounding  ④ 대상 행: no_target · multi_target(+target_candidates)
+    #   ⑤ 막힌 칸: blocked_formula/merged/protected  ⑥ 작업 종류: existing_differs(fill) · mismatch/missing_in_sheet(check)
+    #   ⑦ 같은 (키, 항목)을 노리는 레코드가 둘 이상: 제안값이 모두 같고 모두 읽혔으면 ChangeItem 하나에 evidence를 모아
+    #     한 번 쓴다. 하나라도 다르거나 못 읽었으면 conflict. 먼저 걸린 기준의 코드가 reason_code다.
+    # 키 비교는 글자 그대로(문서 글자 vs 대상 칸 CellValue.value). 대상 칸이 숫자 12이고 문서가 "0012"면 no_target.
+    # 대상 키가 빈 행(합계 행 등)은 세지 않는다. 키가 있는데 어떤 레코드와도 연결되지 않은 행이 "문서가 없는 행"이다
+    # (복수 후보로라도 연결된 행은 아니다). change_id = sha256(canonical_json([record_key, field]))[:16],
+    # evidence_id = sha256(canonical_json([file_id, record_key, field, location]))[:16]. 키를 못 읽은 레코드의
+    # record_key는 "<file_id>#<순서>"다. Plan에는 sheet·problem_counts(reason_code→건수, 6.2 질문 판단용)·
+    # unmatched_rows((행, 키)…)가 더 있다. review는 P05(자세히 화면)에서 구현한다.
 
 ItemStatus = Literal["confirmed", "needs_review", "failed", "excluded", "unchanged"]   # FR-20
 Area = Literal["done", "manual", "excluded"]                                            # FR-21
