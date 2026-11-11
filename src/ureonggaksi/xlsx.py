@@ -5,7 +5,6 @@ Writing is not here yet: the minimal-change patch arrives with the save step (P0
 
 import datetime as dt
 import io
-import re
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import PurePosixPath
@@ -29,6 +28,7 @@ if TYPE_CHECKING:
 MAX_SHEET_CELLS = 500_000
 MAX_ENTRIES = 2048
 MAX_UNPACKED_BYTES = 128 * 1024 * 1024
+MAX_WORKBOOK_CELLS = 1_000_000  # openpyxl은 통합문서 전체를 읽으므로 시트 합계에도 한도를 둔다
 MAX_SHEET_XML_BYTES = 64 * 1024 * 1024
 MAX_RANGE_REFS = 10_000  # 시트 하나의 병합·배열 수식 범위 수
 HEADER_SEARCH_ROWS = 20
@@ -36,7 +36,6 @@ PREVIEW_ROWS = 50
 
 UNSUPPORTED_MESSAGE = "대상 XLSX를 읽을 수 없습니다. 손상·암호화 여부와 형식을 확인하세요."
 RANGE_MESSAGE = f"대상 시트의 사용 범위가 {MAX_SHEET_CELLS:,}칸을 초과했습니다."
-XML_ENTRY = re.compile(r".*\.xml\Z", re.IGNORECASE)
 RANGE_ELEMENTS = {"mergeCell", "f", "dimension"}
 
 Blocked = Literal["", "formula", "merged", "protected"]
@@ -71,35 +70,35 @@ def _range_area(ref: str) -> int:
     return (max_row - min_row + 1) * (max_col - min_col + 1)
 
 
-def _check_sheet_xml(stream) -> None:
-    """XML 파서로 시트를 한 번 훑는다(글자 검색은 따옴표·접두사·공백 표기로 우회된다, 재검수 H1').
+def _check_entry_xml(stream) -> int:
+    """ZIP 항목 하나를 XML 파서로 훑어 셀(<c>) 수를 돌려준다. XML이 아니면 0.
 
     openpyxl은 병합·배열 수식의 ref 범위 전체와 모든 <c>에 객체를 만들므로, 그 전에 범위 넓이·범위 수·셀 수를 본다.
-    루트가 worksheet가 아닌 XML은 첫 요소만 보고 끝낸다.
+    항목 이름(확장자·위치)이나 루트 이름으로 시트를 고르지 않는다. openpyxl은 rels가 가리키는 항목을 이름과
+    상관없이 시트로 읽고 루트 이름도 보지 않기 때문이다(재검수 H1'·H1''). 글자 검색(정규식)도 표기로 우회된다.
     """
     cells = refs = 0
-    root_seen = False
-    for _event, element in iterparse(
-        stream, events=("start",), forbid_dtd=True, forbid_entities=True, forbid_external=True
-    ):
-        tag = element.tag.rsplit("}", 1)[-1]
-        if not root_seen:
-            root_seen = True
-            if tag != "worksheet":
-                return
-        if tag == "c":
-            cells += 1
-            if cells > MAX_SHEET_CELLS:
-                raise ServiceError("INPUT_LIMIT", RANGE_MESSAGE)
-        elif tag in RANGE_ELEMENTS and element.get("ref"):
-            refs += 1
-            if refs > MAX_RANGE_REFS:
-                raise ServiceError(
-                    "INPUT_LIMIT", "대상 시트의 병합·수식 범위 수가 한도를 초과했습니다."
-                )
-            if _range_area(element.get("ref")) > MAX_SHEET_CELLS:
-                raise ServiceError("INPUT_LIMIT", RANGE_MESSAGE)
-        element.clear()
+    try:
+        for _event, element in iterparse(
+            stream, events=("start",), forbid_dtd=True, forbid_entities=True, forbid_external=True
+        ):
+            tag = element.tag.rsplit("}", 1)[-1]
+            if tag == "c":
+                cells += 1
+                if cells > MAX_SHEET_CELLS:
+                    raise ServiceError("INPUT_LIMIT", RANGE_MESSAGE)
+            elif tag in RANGE_ELEMENTS and element.get("ref"):
+                refs += 1
+                if refs > MAX_RANGE_REFS:
+                    raise ServiceError(
+                        "INPUT_LIMIT", "대상 시트의 병합·수식 범위 수가 한도를 초과했습니다."
+                    )
+                if _range_area(element.get("ref")) > MAX_SHEET_CELLS:
+                    raise ServiceError("INPUT_LIMIT", RANGE_MESSAGE)
+            element.clear()
+    except ParseError:
+        return 0  # 그림·글꼴 같은 XML이 아닌 항목. openpyxl도 XML로 읽지 않는다
+    return cells
 
 
 def _check_archive(data: bytes) -> None:
@@ -112,6 +111,7 @@ def _check_archive(data: bytes) -> None:
                     "INPUT_LIMIT", "대상 XLSX의 항목 수 또는 해제 크기가 한도를 초과했습니다."
                 )
             names: set[str] = set()
+            total_cells = 0
             for entry in entries:
                 name = entry.filename
                 if (
@@ -134,12 +134,15 @@ def _check_archive(data: bytes) -> None:
                     and entry.file_size / max(entry.compress_size, 1) > 1000
                 ):
                     raise ServiceError("INPUT_LIMIT", "비정상적으로 높은 압축률의 XLSX입니다.")
-                if XML_ENTRY.fullmatch(name):
-                    # 시트 부품의 이름·위치는 rels가 정하므로 이름으로 고르지 않고 XML 전부를 본다
-                    if entry.file_size > MAX_SHEET_XML_BYTES:
-                        raise ServiceError("INPUT_LIMIT", "대상 XML이 처리 한도를 초과했습니다.")
-                    with archive.open(name) as stream:
-                        _check_sheet_xml(stream)
+                if entry.file_size > MAX_SHEET_XML_BYTES:
+                    raise ServiceError("INPUT_LIMIT", "대상 XLSX 항목이 처리 한도를 초과했습니다.")
+                with archive.open(name) as stream:
+                    total_cells += _check_entry_xml(stream)
+                if total_cells > MAX_WORKBOOK_CELLS:
+                    raise ServiceError(
+                        "INPUT_LIMIT",
+                        f"통합문서 전체 셀 수가 {MAX_WORKBOOK_CELLS:,}칸을 초과했습니다.",
+                    )
     except (
         BadZipFile,
         OSError,
@@ -234,7 +237,7 @@ Bounds = tuple[int, int, int, int]  # min_row, min_col, max_row, max_col
 
 
 def _bounds(ref: str) -> Bounds:
-    min_col, min_row, max_col, max_row = range_boundaries(ref)
+    min_col, min_row, max_col, max_row = range_boundaries(ref.rsplit("!", 1)[-1])
     return min_row, min_col, max_row, max_col
 
 
