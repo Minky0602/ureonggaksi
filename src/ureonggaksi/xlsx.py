@@ -10,8 +10,11 @@ from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Literal
+from xml.etree.ElementTree import ParseError
 from zipfile import BadZipFile, ZipFile
 
+from defusedxml.common import DefusedXmlException
+from defusedxml.ElementTree import iterparse
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
@@ -32,10 +35,9 @@ HEADER_SEARCH_ROWS = 20
 PREVIEW_ROWS = 50
 
 UNSUPPORTED_MESSAGE = "대상 XLSX를 읽을 수 없습니다. 손상·암호화 여부와 형식을 확인하세요."
-WORKSHEET_ENTRY = re.compile(r"xl/worksheets/sheet\d+\.xml\Z")
-# openpyxl은 병합·배열 수식의 ref 범위 전체에 객체를 만든다. 5 KB 파일로도 수백만 칸이 되므로
-# 로드 전에 XML 글자 그대로에서 범위 크기를 본다.
-RANGE_REF = re.compile(rb'<(?:mergeCell|f|dimension)\b[^>]*?\sref="([^"]{1,64})"')
+RANGE_MESSAGE = f"대상 시트의 사용 범위가 {MAX_SHEET_CELLS:,}칸을 초과했습니다."
+XML_ENTRY = re.compile(r".*\.xml\Z", re.IGNORECASE)
+RANGE_ELEMENTS = {"mergeCell", "f", "dimension"}
 
 Blocked = Literal["", "formula", "merged", "protected"]
 
@@ -57,22 +59,47 @@ class TargetView:
     cells: tuple[TargetCell, ...]  # 미리보기 행의 주소·기존값·막힘 여부
 
 
-def _range_area(ref: bytes) -> int:
+def _range_area(ref: str) -> int:
+    """`'시트'!A1:B2`의 시트 이름은 떼고 본다. 열·행 전체(`A:Z`, `1:5`)는 한도를 넘는 것으로 친다."""
     try:
-        min_col, min_row, max_col, max_row = range_boundaries(ref.decode("ascii"))
-    except (ValueError, UnicodeDecodeError, TypeError) as exc:
+        bounds = range_boundaries(ref.rsplit("!", 1)[-1])
+    except (ValueError, TypeError) as exc:
         raise ServiceError("INPUT_UNSUPPORTED", UNSUPPORTED_MESSAGE) from exc
+    if any(b is None for b in bounds):
+        return MAX_SHEET_CELLS + 1
+    min_col, min_row, max_col, max_row = bounds
     return (max_row - min_row + 1) * (max_col - min_col + 1)
 
 
-def _check_sheet_xml(xml: bytes) -> None:
-    refs = RANGE_REF.findall(xml)
-    if len(refs) > MAX_RANGE_REFS:
-        raise ServiceError("INPUT_LIMIT", "대상 시트의 병합·수식 범위 수가 한도를 초과했습니다.")
-    if any(_range_area(ref) > MAX_SHEET_CELLS for ref in refs):
-        raise ServiceError(
-            "INPUT_LIMIT", f"대상 시트의 사용 범위가 {MAX_SHEET_CELLS:,}칸을 초과했습니다."
-        )
+def _check_sheet_xml(stream) -> None:
+    """XML 파서로 시트를 한 번 훑는다(글자 검색은 따옴표·접두사·공백 표기로 우회된다, 재검수 H1').
+
+    openpyxl은 병합·배열 수식의 ref 범위 전체와 모든 <c>에 객체를 만들므로, 그 전에 범위 넓이·범위 수·셀 수를 본다.
+    루트가 worksheet가 아닌 XML은 첫 요소만 보고 끝낸다.
+    """
+    cells = refs = 0
+    root_seen = False
+    for _event, element in iterparse(
+        stream, events=("start",), forbid_dtd=True, forbid_entities=True, forbid_external=True
+    ):
+        tag = element.tag.rsplit("}", 1)[-1]
+        if not root_seen:
+            root_seen = True
+            if tag != "worksheet":
+                return
+        if tag == "c":
+            cells += 1
+            if cells > MAX_SHEET_CELLS:
+                raise ServiceError("INPUT_LIMIT", RANGE_MESSAGE)
+        elif tag in RANGE_ELEMENTS and element.get("ref"):
+            refs += 1
+            if refs > MAX_RANGE_REFS:
+                raise ServiceError(
+                    "INPUT_LIMIT", "대상 시트의 병합·수식 범위 수가 한도를 초과했습니다."
+                )
+            if _range_area(element.get("ref")) > MAX_SHEET_CELLS:
+                raise ServiceError("INPUT_LIMIT", RANGE_MESSAGE)
+        element.clear()
 
 
 def _check_archive(data: bytes) -> None:
@@ -107,18 +134,27 @@ def _check_archive(data: bytes) -> None:
                     and entry.file_size / max(entry.compress_size, 1) > 1000
                 ):
                     raise ServiceError("INPUT_LIMIT", "비정상적으로 높은 압축률의 XLSX입니다.")
-                if WORKSHEET_ENTRY.fullmatch(name):
+                if XML_ENTRY.fullmatch(name):
+                    # 시트 부품의 이름·위치는 rels가 정하므로 이름으로 고르지 않고 XML 전부를 본다
                     if entry.file_size > MAX_SHEET_XML_BYTES:
-                        raise ServiceError(
-                            "INPUT_LIMIT", "대상 시트 XML이 처리 한도를 초과했습니다."
-                        )
-                    _check_sheet_xml(archive.read(name))
-    except (BadZipFile, OSError, ValueError, RuntimeError, LookupError) as exc:
+                        raise ServiceError("INPUT_LIMIT", "대상 XML이 처리 한도를 초과했습니다.")
+                    with archive.open(name) as stream:
+                        _check_sheet_xml(stream)
+    except (
+        BadZipFile,
+        OSError,
+        ValueError,
+        RuntimeError,
+        LookupError,
+        ParseError,
+        DefusedXmlException,
+    ) as exc:
         raise ServiceError("INPUT_UNSUPPORTED", UNSUPPORTED_MESSAGE) from exc
 
 
-def _workbook(data: bytes, *, data_only: bool, read_only: bool = False):
-    _check_archive(data)
+def _workbook(data: bytes, *, data_only: bool, read_only: bool = False, checked: bool = False):
+    if not checked:
+        _check_archive(data)
     try:
         return load_workbook(io.BytesIO(data), data_only=data_only, read_only=read_only)
     except Exception as exc:  # openpyxl은 zipfile·xml·자체 예외를 섞어 던진다
@@ -168,18 +204,23 @@ def _blank(raw) -> bool:
 
 
 def _detect_header(values_sheet, max_row: int, max_col: int) -> int:
-    """1~20행 가운데 글자 칸이 가장 많은 첫 행. 숫자가 섞인 데이터 행보다 글자만 있는 제목 행을 고른다."""
-    best_row, best_count = 1, -1
-    for row in range(1, min(max_row, HEADER_SEARCH_ROWS) + 1):
-        count = sum(
-            1
-            for col in range(1, max_col + 1)
-            if isinstance(values_sheet.cell(row, col).value, str)
-            and not _blank(values_sheet.cell(row, col).value)
-        )
-        if count > best_count:
-            best_row, best_count = row, count
-    return best_row
+    """1~20행 가운데, 비지 않은 칸이 가장 많은 행의 절반 이상 채워진 **첫** 행(글자 칸 1개 이상).
+
+    제목 행(칸 1~2개)은 건너뛰고, 헤더에 빈 열이 있어도 꽉 찬 데이터 행에 밀리지 않으며,
+    연도처럼 숫자로 된 헤더도 고른다. 틀리면 header_row 인자로 바꾼다.
+    """
+    rows = range(1, min(max_row, HEADER_SEARCH_ROWS) + 1)
+    counts = {}
+    for row in rows:
+        values = [values_sheet.cell(row, col).value for col in range(1, max_col + 1)]
+        filled = [v for v in values if not _blank(v)]
+        counts[row] = (len(filled), any(isinstance(v, str) for v in filled))
+    widest = max((count for count, _ in counts.values()), default=0)
+    for row in rows:
+        count, has_text = counts[row]
+        if has_text and count * 2 >= widest:
+            return row
+    return next((row for row in rows if counts[row][0] == widest), 1)
 
 
 def _last_data_row(values_sheet, header_row: int, max_row: int, max_col: int) -> int:
@@ -225,8 +266,9 @@ def inspect_target(
     if preview_rows < 0:
         raise ServiceError("INPUT_UNSUPPORTED", "미리보기 행 수는 0 이상이어야 합니다.")
     data = inputs.snapshot("target")
-    formulas = _workbook(data, data_only=False)
-    values = _workbook(data, data_only=True)
+    _check_archive(data)  # 한 번만 검사하고 두 번 연다
+    formulas = _workbook(data, data_only=False, checked=True)
+    values = _workbook(data, data_only=True, checked=True)
     try:
         sheets = tuple(formulas.sheetnames)
         name = sheet if sheet is not None else formulas.active.title
