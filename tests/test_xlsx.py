@@ -217,6 +217,8 @@ BIG = b"A1:Z200000"
         "renamed_part",
         "sheet_qualified",
         "whole_columns",
+        "non_xml_extension",
+        "renamed_root",
     ],
 )
 def test_range_bomb_spellings_are_all_refused_quickly(tmp_path, case):
@@ -259,8 +261,19 @@ def test_range_bomb_spellings_are_all_refused_quickly(tmp_path, case):
             elif case == "renamed_part":
                 payload = merge(payload, b'ref="' + BIG + b'"')
                 name = "xl/worksheets/data1.xml"
-        if case == "renamed_part" and name in ("xl/_rels/workbook.xml.rels", "[Content_Types].xml"):
-            payload = payload.replace(b"worksheets/sheet1.xml", b"worksheets/data1.xml")
+            elif case == "non_xml_extension":  # openpyxl은 rels가 가리키면 확장자를 보지 않는다
+                payload = merge(payload, b'ref="' + BIG + b'"')
+                name = "xl/worksheets/sheet1.dat"
+            elif case == "renamed_root":  # openpyxl의 시트 리더는 루트 이름을 보지 않는다
+                payload = merge(payload, b'ref="' + BIG + b'"')
+                payload = payload.replace(b"<worksheet ", b"<wsheet ", 1).replace(
+                    b"</worksheet>", b"</wsheet>"
+                )
+        if name in ("xl/_rels/workbook.xml.rels", "[Content_Types].xml"):
+            if case == "renamed_part":
+                payload = payload.replace(b"worksheets/sheet1.xml", b"worksheets/data1.xml")
+            if case == "non_xml_extension":
+                payload = payload.replace(b"worksheets/sheet1.xml", b"worksheets/sheet1.dat")
         return name, payload
 
     bomb = _rezip(write_xlsx(tmp_path / "seed.xlsx"), tmp_path / f"{case}.xlsx", transform)
@@ -282,6 +295,36 @@ def test_many_small_cells_are_counted_before_loading(tmp_path, monkeypatch):
     with pytest.raises(ServiceError) as info:
         open_inputs([source], path, tmp_path / "out")
     assert info.value.code == "INPUT_LIMIT"
+
+
+def test_workbook_total_cells_are_limited_across_sheets(tmp_path, monkeypatch):
+    from openpyxl import load_workbook
+
+    from ureonggaksi import xlsx
+
+    path = write_xlsx(tmp_path / "t.xlsx")  # 시트 하나에 9칸
+    book = load_workbook(path)
+    for name in ("둘", "셋"):
+        sheet = book.create_sheet(name)
+        for r in range(1, 4):
+            for c in range(1, 4):
+                sheet.cell(r, c, r * c)
+    book.save(path)
+    source = write_hwpx(tmp_path / "a.hwpx")
+    monkeypatch.setattr(xlsx, "MAX_WORKBOOK_CELLS", 20)  # 시트별 9칸은 한도(500,000) 안
+    with pytest.raises(ServiceError) as info:
+        open_inputs([source], path, tmp_path / "out")
+    assert info.value.code == "INPUT_LIMIT"
+
+
+def test_binary_entries_such_as_images_do_not_break_the_prescan(tmp_path):
+    seed = write_xlsx(tmp_path / "seed.xlsx")
+    with_image = _rezip(seed, tmp_path / "img.xlsx", lambda n, p: (n, p))
+    from zipfile import ZipFile
+
+    with ZipFile(with_image, "a") as archive:
+        archive.writestr("xl/media/image1.png", b"\x89PNG\r\n\x1a\n" + bytes(range(256)))
+    assert view_of(tmp_path, with_image).columns == ("사업코드", "사업명", "2026 예산")
 
 
 def test_numeric_year_headers_below_a_title_row_are_detected(tmp_path):

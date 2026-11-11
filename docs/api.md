@@ -135,7 +135,8 @@ class Inputs:
 def open_inputs(sources: list[Path], target: Path, output_dir: Path) -> Inputs
     # 원본 실패는 status="failed"로 돌려준다(→ 직접 처리 목록의 파일 항목). 대상 실패·경로 충돌·한도 초과는 ServiceError.
     # 한도(OQ-04, 제안값·실측 전): 원본 500개, HWPX 64 MiB, XLSX 32 MiB, 스냅샷 합계 256 MiB,
-    # XLSX 안 ZIP 항목 2048개·해제 128 MiB·시트 XML 64 MiB, 대상 시트 사용 범위 500,000칸(병합·수식 범위 하나도 같은 한도).
+    # XLSX 안 ZIP 항목 2048개·해제 128 MiB·항목 64 MiB, 대상 시트 사용 범위 500,000칸(병합·수식 범위 하나, dimension도 같은 한도),
+    # 통합문서 전체 셀 1,000,000. 한도 검사는 openpyxl에 넘기기 전 ZIP 항목 전부를 XML 파서로 훑어서 한다(이름·확장자로 고르지 않음).
     # 중복은 바이트 SHA-256이 같을 때다. 스냅샷은 대표(먼저 온 것)에만 있으므로 대표를 제외하면 그 중복도 함께 쓰이지 않는다.
     # 실패 이유 문구에는 경로·errno를 넣지 않는다(경로는 InputFile.path).
 def exclude_source(inputs: Inputs, file_id: str) -> Inputs        # 새 run_id
