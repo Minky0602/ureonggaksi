@@ -45,6 +45,9 @@ flowchart LR
 | `workflow.py` | 추출 규칙의 JSON 저장과 검증(버전, 정규식, 이름 중복) |
 | `extract.py` | 규칙(항목명 옆·지정 셀·정규식) 적용과 원본 재검증 |
 | `export.py` | XLSX 출력(취합·출처·실행정보). 수식으로 읽힐 문자열 방어 |
+| `errors.py` | `ServiceError`와 오류 코드. 파일을 쓰기 전의 실패만 예외로 던진다 |
+| `inputs.py` | 원본 HWPX 여러 개·대상 XLSX·출력 폴더를 한 실행으로 묶기. 파일별 상태·SHA-256, 중복, 경로 충돌, 한도. 지문을 계산한 바이트를 스냅샷으로 보관 |
+| `xlsx.py` | 스냅샷의 대상 XLSX를 openpyxl로 읽기. 시트·헤더 행·데이터 범위·열·기존값·막힌 칸(수식·병합·보호). 쓰기는 아직 없다 |
 | `storage.py` | 로컬 경로 검사와 원자적 저장 |
 | `offline.py` | 파이썬 네트워크 차단(audit hook) |
 | `ui/` | PySide6 화면, 작업 스레드, 대화상자 |
@@ -112,8 +115,45 @@ erDiagram
         Rule_list rules
         int version
     }
+    CellValue {
+        str kind
+        str value
+        str unit
+    }
+    InputFile {
+        str file_id
+        Path path
+        str role
+        str_optional sha256
+        str status
+        str reason
+        str_optional duplicate_of
+    }
+    Inputs {
+        str run_id
+        InputFile_list sources
+        InputFile target
+        Path output_dir
+        bytes_map snapshots
+    }
+    TargetCell {
+        str address
+        CellValue value
+        str blocked
+    }
+    TargetView {
+        str sheet
+        str_list sheets
+        int header_row
+        int_pair data_rows
+        str_list columns
+        TargetCell_list cells
+    }
     Document ||--o{ Block : ""
     Workflow ||--|{ Rule : ""
+    Inputs ||--|{ InputFile : ""
+    TargetView ||--o{ TargetCell : ""
+    TargetCell ||--|| CellValue : ""
     DocumentResult ||--o{ ExtractedValue : ""
     Block |o--o{ ExtractedValue : ""
     Block |o--o{ Verification : ""
@@ -128,6 +168,8 @@ erDiagram
 - 한글의 줄바꿈 금지 공백과 고정폭 공백은 일반 공백으로 읽는다. 형광펜·제목 표식은 글자를 바꾸지 않으므로 글자만 잇는다. 변경 추적(삽입·삭제) 표식이 남은 문단이나 셀은 어느 글자가 최종인지 추측하지 않고 글자를 비운 채 `tracked_change`로 표시한다. 셀·항목명 규칙의 값 칸이 그런 블록이면 추출은 값을 고르지 않고 "변경 추적이 남아 있음"으로 알린다(정규식 규칙은 빈 블록을 그냥 건너뛴다).
 - 항목명은 공백과 끝의 콜론을 빼고 대소문자를 구분하지 않고 비교해서 같아야 한다. 후보가 둘 이상이면 고르지 않고 중복으로 표시한다.
 - 검증은 원본을 다시 읽어 SHA-256 → 블록 위치 → 블록 글자 → 글자 범위 → 값 순서로 확인한다. 인쇄 쪽 번호는 만들지 않는다.
+- 입력 연결은 파일을 한 번 읽어 SHA-256을 계산하고 그 바이트를 스냅샷으로 보관한다. 미리보기와 뒤 단계는 스냅샷만 읽는다. 내용이 같은 원본은 뒤에 온 것이 `duplicate`가 되고, 읽기 검증에 실패한 원본은 `failed`(지문 없음)로 남아 사용자가 제외할 수 있다. 대상 XLSX 실패와 경로 충돌(대상=원본, 출력 폴더=입력 파일)은 실행 전체를 막는다.
+- 취합표의 헤더 행은 사용자가 주지 않으면 1~20행 가운데 비지 않은 칸이 가장 많은 첫 행이다. 데이터 범위는 그 아래부터 마지막 비지 않은 행까지다. 막힌 칸은 수식(배열 수식은 범위 전체) > 병합(왼쪽 위가 아닌 칸) > 보호(시트 보호 켜짐 + 칸 잠김) 순서로 하나만 표시한다. 기존값의 글자는 해석하지 않고 그대로 둔다("0012"는 글자다).
 
 ## 4. 목표 데이터 모델
 

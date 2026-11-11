@@ -1,7 +1,7 @@
 # 우렁각시 개발 안내 (코딩 에이전트용)
 
 - 사람용 안내는 `CONTRIBUTING.md`, 구조는 `docs/architecture.md`, 함수 계약은 `docs/api.md`, 요구사항은 `docs/requirements.md`다. 설계가 바뀌면 이 문서들을 먼저 고친다.
-- 변경은 PR 단위로 한다. 범위와 완료 조건을 먼저 정하고, 실행한 시험과 결과를 PR 본문에 남긴다. push, PR 생성, 병합은 사람이 한다.
+- 변경은 PR 단위로 한다. 범위와 완료 조건을 먼저 정하고, 실행한 시험과 결과를 PR 본문에 남긴다. 커밋·PR 제목은 `type: 설명`(한국어, 명사형)이고 AI 표기를 넣지 않는다. 병합은 CI가 초록이고 독립 검증을 통과한 뒤에만 한다.
 - Python 3.12+, PySide6 Widgets. 네트워크/웹서버/원격 API/원격 폰트/텔레메트리를 추가하지 않는다.
 - 원본 HWPX는 읽기 전용. 문서 본문을 로그, 설정, 자동 저장에 남기지 않는다. 실제 업무자료와 모델 파일을 저장소에 넣지 않는다.
 - 핵심: `src/ureonggaksi/hwpx.py`(제한된 ZIP/XML 파싱), `workflow.py`(JSON 규칙), `extract.py`(추출/검증), `export.py`(엑셀), `ui/`(화면).

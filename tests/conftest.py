@@ -55,3 +55,36 @@ def write_hwpx(path: Path, sections=None, extra=None):
 @pytest.fixture
 def sample(tmp_path):
     return write_hwpx(tmp_path / "지원서_홍길동.hwpx")
+
+
+def write_xlsx(
+    path: Path, rows=None, *, sheet="사업취합", merged=(), protect=False, extra_sheets=()
+):
+    """합성 취합표. rows는 1행부터의 값 목록이고 None은 빈 칸, "=..." 문자열은 수식이다."""
+    from openpyxl import Workbook
+
+    if rows is None:
+        rows = [
+            ["사업코드", "사업명", "2026 예산"],
+            ["0012", "도서관 리모델링", 3500000],
+            ["0013", "체육관 보수", None],
+        ]
+    book = Workbook()
+    ws = book.active
+    ws.title = sheet
+    for r, row in enumerate(rows, start=1):
+        for c, value in enumerate(row, start=1):
+            if value is not None:
+                ws.cell(r, c, value)
+    for ref in merged:
+        ws.merge_cells(ref)
+    ws.protection.sheet = protect
+    for name in extra_sheets:
+        book.create_sheet(name)
+    book.save(path)
+    return path
+
+
+@pytest.fixture
+def target(tmp_path):
+    return write_xlsx(tmp_path / "사업취합.xlsx")
