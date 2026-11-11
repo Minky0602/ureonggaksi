@@ -221,6 +221,18 @@ def read_hwpx(path: str | Path, *, max_xml_bytes=MAX_XML_BYTES) -> Document:
             raise HwpxError("HWPX 파일만 지원합니다.")
         with path.open("rb") as stream:
             data = stream.read(MAX_FILE_BYTES + 1)
+    except HwpxError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise HwpxError(
+            "문서를 읽을 수 없습니다. 손상 여부, XML 형식, 로컬 경로와 접근 권한을 확인하세요."
+        ) from exc
+    return parse_hwpx(data, path, max_xml_bytes=max_xml_bytes)
+
+
+def parse_hwpx(data: bytes, path: str | Path, *, max_xml_bytes=MAX_XML_BYTES) -> Document:
+    """Parse already-read bytes. Analysis works on the in-memory snapshot, never re-reading disk."""
+    try:
         if len(data) > MAX_FILE_BYTES:
             raise HwpxError("파일이 64 MiB를 초과했습니다.")
         with ZipFile(io.BytesIO(data)) as archive:

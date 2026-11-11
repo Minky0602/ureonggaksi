@@ -62,3 +62,28 @@ class Verification:
     ok: bool
     message: str
     source: Block | None = None
+
+
+@dataclass(frozen=True)
+class CellValue:
+    """값의 의미를 고정한다. 화면 표시는 display()로만 만든다 (api.md 2.1).
+
+    kind: empty · text · number · date · bool
+    value: 정규 표현. number는 지수 없는 Decimal 문자열("3500000"), date는 "2026-11-06",
+           text는 원문 그대로("0012"를 숫자로 바꾸지 않는다), empty는 "".
+    unit: 금액 등의 단위("원"). 대상 셀에는 value만 쓴다.
+    """
+
+    kind: str = "empty"
+    value: str = ""
+    unit: str = ""
+
+    def display(self) -> str:
+        if self.kind == "number":
+            whole, _, fraction = self.value.partition(".")
+            sign = "-" if whole.startswith("-") else ""
+            digits = whole.lstrip("-")
+            grouped = f"{int(digits):,}" if digits.isdigit() else digits
+            number = sign + grouped + (f".{fraction}" if fraction else "")
+            return number + self.unit
+        return self.value + self.unit if self.kind == "text" else self.value
