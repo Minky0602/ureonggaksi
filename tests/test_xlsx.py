@@ -329,6 +329,35 @@ def test_element_floods_without_cells_are_refused_quickly(tmp_path, element, cou
     assert time.monotonic() - began < 15
 
 
+def test_heavy_elements_and_total_merged_area_have_their_own_limits(tmp_path):
+    """조건부 서식은 요소당 비용이 셀의 몇 배라 따로 세고, 병합은 범위 하나가 아니라 합계로 묶는다."""
+    import time
+
+    cf = b"".join(
+        b'<conditionalFormatting sqref="A%d"><cfRule type="expression" priority="1"><formula>1</formula></cfRule></conditionalFormatting>'
+        % i
+        for i in range(1, 30_001)
+    )
+    merges = b"".join(
+        b'<mergeCell ref="A%d:XFD%d"/>' % (i, i) for i in range(1, 60)
+    )  # 59×16,384 > 500,000
+
+    for tag, extra in (("cf", cf), ("merge", b"<mergeCells>" + merges + b"</mergeCells>")):
+
+        def transform(name, payload, extra=extra):
+            if name == "xl/worksheets/sheet1.xml":
+                payload = payload.replace(b"</worksheet>", extra + b"</worksheet>")
+            return name, payload
+
+        bomb = _rezip(write_xlsx(tmp_path / "seed.xlsx"), tmp_path / f"{tag}.xlsx", transform)
+        source = write_hwpx(tmp_path / f"{tag}.hwpx")
+        began = time.monotonic()
+        with pytest.raises(ServiceError) as info:
+            open_inputs([source], bomb, tmp_path / "out")
+        assert info.value.code == "INPUT_LIMIT"
+        assert time.monotonic() - began < 15
+
+
 def test_non_range_ref_attributes_in_other_parts_are_ignored(tmp_path):
     """customXml 같은 부품의 `<f ref="x">`는 범위가 아니다. 열 전체(`A:Z`)와 구분한다."""
     from zipfile import ZipFile
