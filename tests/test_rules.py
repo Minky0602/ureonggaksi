@@ -155,6 +155,8 @@ def test_table_rows_record_uses_column_fields(view):
     assert {i.code for i in validate_rule(mixed, inputs, target_view)} == {"kind_mismatch"}
     with pytest.raises(RuleError):
         FieldRule("사업비", "column", query="")
+    with pytest.raises(RuleError):  # 뜻 없는 필드가 지문을 바꾸지 않도록 기본값만 허용
+        FieldRule("사업비", "column", query="사업비", direction="nowhere")
 
 
 def test_view_mismatch_and_missing_sheet_are_reported(view):
