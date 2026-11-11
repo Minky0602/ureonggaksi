@@ -37,7 +37,9 @@ PREVIEW_ROWS = 50
 UNSUPPORTED_MESSAGE = "대상 XLSX를 읽을 수 없습니다. 손상·암호화 여부와 형식을 확인하세요."
 RANGE_MESSAGE = f"대상 시트의 사용 범위가 {MAX_SHEET_CELLS:,}칸을 초과했습니다."
 RANGE_ELEMENTS = {"mergeCell", "f", "dimension"}
-OBJECT_ELEMENTS = {"c", "row", "hyperlink", "conditionalFormatting", "dataValidation"}
+OBJECT_ELEMENTS = {"c", "row", "hyperlink"}
+HEAVY_ELEMENTS = {"conditionalFormatting", "dataValidation"}
+MAX_HEAVY_ELEMENTS = 20_000
 MAX_XML_NODES = 2_000_000  # 항목 하나의 XML 요소 수. 정상 450,000칸 시트가 약 95만 요소다
 
 Blocked = Literal["", "formula", "merged", "protected"]
@@ -80,7 +82,7 @@ def _check_entry_xml(stream) -> int:
     항목 이름(확장자·위치)이나 루트 이름으로 시트를 고르지 않는다. openpyxl은 rels가 가리키는 항목을 이름과
     상관없이 시트로 읽고 루트 이름도 보지 않기 때문이다(재검수 H1'·H1''). 글자 검색(정규식)도 표기로 우회된다.
     """
-    cells = refs = nodes = 0
+    cells = heavy = refs = nodes = merged_area = 0
     try:
         for _event, element in iterparse(
             stream, events=("start",), forbid_dtd=True, forbid_entities=True, forbid_external=True
@@ -96,13 +98,27 @@ def _check_entry_xml(stream) -> int:
                 cells += 1
                 if cells > MAX_SHEET_CELLS:
                     raise ServiceError("INPUT_LIMIT", RANGE_MESSAGE)
-            elif tag in RANGE_ELEMENTS and element.get("ref"):
+            elif tag in HEAVY_ELEMENTS:
+                # 요소당 비용이 셀의 몇 배(자식 객체·범위 해석)라 따로 센다(5차 Y4: 20만 개 → 103초·568 MiB)
+                heavy += 1
+                if heavy > MAX_HEAVY_ELEMENTS:
+                    raise ServiceError(
+                        "INPUT_LIMIT",
+                        "대상 시트의 조건부 서식·데이터 유효성 수가 한도를 초과했습니다.",
+                    )
+            if tag in RANGE_ELEMENTS and element.get("ref"):
                 refs += 1
                 if refs > MAX_RANGE_REFS:
                     raise ServiceError(
                         "INPUT_LIMIT", "대상 시트의 병합·수식 범위 수가 한도를 초과했습니다."
                     )
-                if _range_area(element.get("ref")) > MAX_SHEET_CELLS:
+                area = _range_area(element.get("ref"))
+                if tag == "mergeCell":
+                    merged_area += (
+                        area  # 겹쳐도 openpyxl은 각각 MergedCell을 만든다 → 합계로 묶는다
+                    )
+                    area = merged_area
+                if area > MAX_SHEET_CELLS:
                     raise ServiceError("INPUT_LIMIT", RANGE_MESSAGE)
             element.clear()
     except ParseError:
