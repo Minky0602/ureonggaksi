@@ -194,6 +194,107 @@ def test_huge_merge_or_array_ref_is_refused_before_openpyxl_expands_it(tmp_path)
         assert time.monotonic() - began < 2
 
 
+def _rezip(seed, out, transform):
+    """seed XLSX의 항목을 transform(name, bytes) -> (name, bytes)로 바꿔 새 ZIP을 만든다."""
+    from zipfile import ZIP_DEFLATED, ZipFile
+
+    with ZipFile(seed) as src, ZipFile(out, "w", ZIP_DEFLATED) as dst:
+        for item in src.infolist():
+            name, payload = transform(item.filename, src.read(item.filename))
+            dst.writestr(name, payload)
+    return out
+
+
+BIG = b"A1:Z200000"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "single_quote",
+        "spaced_equals",
+        "ns_prefix",
+        "renamed_part",
+        "sheet_qualified",
+        "whole_columns",
+    ],
+)
+def test_range_bomb_spellings_are_all_refused_quickly(tmp_path, case):
+    """글자 검색이 아니라 XML 파서로 보므로 따옴표·공백·접두사·부품 이름·시트 한정·열 전체 표기를 모두 잡는다."""
+    import time
+
+    def merge(xml: bytes, ref_attr: bytes, prefix: bytes = b"") -> bytes:
+        tail = (
+            b"<"
+            + prefix
+            + b"mergeCells><"
+            + prefix
+            + b"mergeCell "
+            + ref_attr
+            + b"/></"
+            + prefix
+            + b"mergeCells>"
+        )
+        return xml.replace(b"</worksheet>", tail + b"</worksheet>")
+
+    def transform(name, payload):
+        if name == "xl/worksheets/sheet1.xml":
+            if case == "single_quote":
+                payload = merge(payload, b"ref='" + BIG + b"'")
+            elif case == "spaced_equals":
+                payload = merge(payload, b'ref = "' + BIG + b'"')
+            elif case == "ns_prefix":
+                payload = payload.replace(
+                    b"<worksheet ",
+                    b'<worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ',
+                    1,
+                )
+                payload = merge(payload, b'ref="' + BIG + b'"', prefix=b"x:")
+            elif case == "sheet_qualified":
+                payload = merge(
+                    payload, b"ref=\"'" + "아주 긴 시트 제목 ".encode() * 6 + b"'!" + BIG + b'"'
+                )
+            elif case == "whole_columns":
+                payload = merge(payload, b'ref="A:Z"')
+            elif case == "renamed_part":
+                payload = merge(payload, b'ref="' + BIG + b'"')
+                name = "xl/worksheets/data1.xml"
+        if case == "renamed_part" and name in ("xl/_rels/workbook.xml.rels", "[Content_Types].xml"):
+            payload = payload.replace(b"worksheets/sheet1.xml", b"worksheets/data1.xml")
+        return name, payload
+
+    bomb = _rezip(write_xlsx(tmp_path / "seed.xlsx"), tmp_path / f"{case}.xlsx", transform)
+    source = write_hwpx(tmp_path / "a.hwpx")
+    began = time.monotonic()
+    with pytest.raises(ServiceError) as info:
+        open_inputs([source], bomb, tmp_path / "out")
+    assert info.value.code == "INPUT_LIMIT"
+    assert time.monotonic() - began < 2
+
+
+def test_many_small_cells_are_counted_before_loading(tmp_path, monkeypatch):
+    from ureonggaksi import xlsx
+
+    rows = [["코드"]] + [[f"{i:04d}"] for i in range(30)]
+    path = write_xlsx(tmp_path / "t.xlsx", rows)
+    monkeypatch.setattr(xlsx, "MAX_SHEET_CELLS", 20)
+    source = write_hwpx(tmp_path / "a.hwpx")
+    with pytest.raises(ServiceError) as info:
+        open_inputs([source], path, tmp_path / "out")
+    assert info.value.code == "INPUT_LIMIT"
+
+
+def test_numeric_year_headers_below_a_title_row_are_detected(tmp_path):
+    rows = [
+        ["2026년 취합표", None, None, None],
+        ["사업명", 2024, 2025, 2026],
+        ["도서관", 1, 2, 3],
+        ["체육관", 4, 5, 6],
+    ]
+    view = view_of(tmp_path, write_xlsx(tmp_path / "t.xlsx", rows))
+    assert (view.header_row, view.columns) == (2, ("사업명", "2024", "2025", "2026"))
+
+
 def test_duplicate_zip_entries_are_refused(tmp_path):
     from zipfile import ZIP_DEFLATED, ZipFile
 
