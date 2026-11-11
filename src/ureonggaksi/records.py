@@ -101,21 +101,25 @@ def _table_records(doc: Document, file_id: str, rule: RuleSet) -> tuple[Record, 
         return ()
     header_row = rule.record.header_row
     headers = [b for b in cells if b.row <= header_row < b.row + b.row_span]
-    # 항목 → 열 번호. 머리글이 둘 이상 맞거나 머리글 하나가 여러 열에 걸치면(colSpan) 어느 열인지 알 수 없어
-    # 그 항목은 레코드마다 ambiguous다(검수 H1: 첫 하위 열을 조용히 읽으면 틀린 값이 완료 영역에 들어간다).
+    # 데이터는 머리글 블록이 덮는 행(rowSpan) 다음부터다(검수 M5)
+    data_start = max((h.row + h.row_span for h in headers), default=header_row + 1)
+    data_cells = [b for b in cells if b.row >= data_start]
+    # 항목 → 열 번호. 머리글이 둘 이상 맞으면 ambiguous. 머리글 하나가 여러 열에 걸치면(colSpan) 그 아래 데이터
+    # 칸이 실제로 나뉘는지 본다: 모든 데이터 칸이 머리글과 같은 시작 열·같은 폭이면 한 열(2차 검수 N3),
+    # 하나라도 나뉘면 어느 열인지 알 수 없어 ambiguous(1차 검수 H1: 첫 하위 열을 조용히 읽지 않는다).
     columns: dict[str, list[int]] = {}
     for field in rule.fields:
         wanted = _normalized(field.query if field.kind == COLUMN_KIND else field.name)
-        columns[field.name] = sorted(
-            {
-                col
-                for h in headers
-                if h.text and _normalized(h.text) == wanted
-                for col in range(h.col, h.col + h.col_span)
-            }
-        )
-    # 데이터는 머리글 블록이 덮는 행(rowSpan) 다음부터다(검수 M5)
-    data_start = max((h.row + h.row_span for h in headers), default=header_row + 1)
+        found: set[int] = set()
+        for h in headers:
+            if not h.text or _normalized(h.text) != wanted:
+                continue
+            under = [b for b in data_cells if h.col <= b.col < h.col + h.col_span]
+            if h.col_span == 1 or all((b.col, b.col_span) == (h.col, h.col_span) for b in under):
+                found.add(h.col)
+            else:
+                found.update(range(h.col, h.col + h.col_span))
+        columns[field.name] = sorted(found)
     last_row = max(b.row + b.row_span - 1 for b in cells)
     records = []
     for row in range(data_start, last_row + 1):

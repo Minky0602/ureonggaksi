@@ -488,3 +488,25 @@ def test_zip_bomb_and_encrypted_entries_are_refused_before_openpyxl(tmp_path, mo
     with pytest.raises(ServiceError) as info:
         open_inputs([source], small, tmp_path / "out")
     assert info.value.code == "INPUT_LIMIT"
+
+
+def test_total_formula_range_area_is_limited_before_loading(tmp_path, monkeypatch):
+    """배열·공유 수식 범위는 미리보기가 칸 집합으로 펼치므로 면적 합계를 묶는다(2차 검수 N4)."""
+    from ureonggaksi import xlsx
+
+    formulas = b"".join(
+        b'<c r="C%d"><f t="array" ref="C%d:D%d">1</f></c>' % (i, i, i) for i in range(2, 30)
+    )
+
+    def transform(name, payload):
+        if name == "xl/worksheets/sheet1.xml":
+            payload = payload.replace(
+                b"</sheetData>", b'<row r="40">' + formulas + b"</row></sheetData>"
+            )
+        return name, payload
+
+    path = _rezip(write_xlsx(tmp_path / "seed.xlsx"), tmp_path / "f.xlsx", transform)
+    monkeypatch.setattr(xlsx, "MAX_SHEET_CELLS", 50)  # 범위 하나는 2칸이지만 합계는 56칸
+    with pytest.raises(ServiceError) as info:
+        open_inputs([write_hwpx(tmp_path / "a.hwpx")], path, tmp_path / "out")
+    assert info.value.code == "INPUT_LIMIT"
