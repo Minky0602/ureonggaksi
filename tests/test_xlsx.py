@@ -297,6 +297,51 @@ def test_many_small_cells_are_counted_before_loading(tmp_path, monkeypatch):
     assert info.value.code == "INPUT_LIMIT"
 
 
+@pytest.mark.parametrize(
+    ("element", "count"),
+    [
+        (b'<row r="{i}" ht="15" customHeight="1"/>', 600_000),
+        (b'<hyperlink ref="A{i}" location="Sheet1!A1"/>', 600_000),
+    ],
+)
+def test_element_floods_without_cells_are_refused_quickly(tmp_path, element, count):
+    """<c>가 없어도 openpyxl은 <row>·<hyperlink>마다 객체를 만든다. 셀과 같은 바구니로 센다."""
+    import time
+
+    body = b"".join(element.replace(b"{i}", str(i).encode()) for i in range(1, count + 1))
+
+    def transform(name, payload):
+        if name == "xl/worksheets/sheet1.xml":
+            if b"<row " in element:
+                payload = payload.replace(b"</sheetData>", body + b"</sheetData>")
+            else:
+                payload = payload.replace(
+                    b"</worksheet>", b"<hyperlinks>" + body + b"</hyperlinks></worksheet>"
+                )
+        return name, payload
+
+    bomb = _rezip(write_xlsx(tmp_path / "seed.xlsx"), tmp_path / "flood.xlsx", transform)
+    source = write_hwpx(tmp_path / "a.hwpx")
+    began = time.monotonic()
+    with pytest.raises(ServiceError) as info:
+        open_inputs([source], bomb, tmp_path / "out")
+    assert info.value.code == "INPUT_LIMIT"
+    assert time.monotonic() - began < 15
+
+
+def test_non_range_ref_attributes_in_other_parts_are_ignored(tmp_path):
+    """customXml 같은 부품의 `<f ref="x">`는 범위가 아니다. 열 전체(`A:Z`)와 구분한다."""
+    from zipfile import ZipFile
+
+    seed = write_xlsx(tmp_path / "seed.xlsx")
+    path = _rezip(seed, tmp_path / "custom.xlsx", lambda n, p: (n, p))
+    with ZipFile(path, "a") as archive:
+        archive.writestr(
+            "customXml/item1.xml", b'<root><f ref="x"/><c/><dimension ref="y"/></root>'
+        )
+    assert view_of(tmp_path, path).columns == ("사업코드", "사업명", "2026 예산")
+
+
 def test_workbook_total_cells_are_limited_across_sheets(tmp_path, monkeypatch):
     from openpyxl import load_workbook
 

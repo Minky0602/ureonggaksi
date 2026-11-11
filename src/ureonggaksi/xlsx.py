@@ -37,6 +37,8 @@ PREVIEW_ROWS = 50
 UNSUPPORTED_MESSAGE = "대상 XLSX를 읽을 수 없습니다. 손상·암호화 여부와 형식을 확인하세요."
 RANGE_MESSAGE = f"대상 시트의 사용 범위가 {MAX_SHEET_CELLS:,}칸을 초과했습니다."
 RANGE_ELEMENTS = {"mergeCell", "f", "dimension"}
+OBJECT_ELEMENTS = {"c", "row", "hyperlink", "conditionalFormatting", "dataValidation"}
+MAX_XML_NODES = 2_000_000  # 항목 하나의 XML 요소 수. 정상 450,000칸 시트가 약 95만 요소다
 
 Blocked = Literal["", "formula", "merged", "protected"]
 
@@ -65,7 +67,8 @@ def _range_area(ref: str) -> int:
     except (ValueError, TypeError) as exc:
         raise ServiceError("INPUT_UNSUPPORTED", UNSUPPORTED_MESSAGE) from exc
     if any(b is None for b in bounds):
-        return MAX_SHEET_CELLS + 1
+        # `A:Z`·`1:5`(열·행 전체)는 한도 초과. `x` 같은 단일 토큰은 범위가 아니므로 무시한다
+        return MAX_SHEET_CELLS + 1 if ":" in ref else 0
     min_col, min_row, max_col, max_row = bounds
     return (max_row - min_row + 1) * (max_col - min_col + 1)
 
@@ -77,13 +80,19 @@ def _check_entry_xml(stream) -> int:
     항목 이름(확장자·위치)이나 루트 이름으로 시트를 고르지 않는다. openpyxl은 rels가 가리키는 항목을 이름과
     상관없이 시트로 읽고 루트 이름도 보지 않기 때문이다(재검수 H1'·H1''). 글자 검색(정규식)도 표기로 우회된다.
     """
-    cells = refs = 0
+    cells = refs = nodes = 0
     try:
         for _event, element in iterparse(
             stream, events=("start",), forbid_dtd=True, forbid_entities=True, forbid_external=True
         ):
+            nodes += 1
+            if nodes > MAX_XML_NODES:
+                raise ServiceError(
+                    "INPUT_LIMIT", "대상 XLSX 항목의 XML 요소 수가 한도를 초과했습니다."
+                )
             tag = element.tag.rsplit("}", 1)[-1]
-            if tag == "c":
+            if tag in OBJECT_ELEMENTS:
+                # openpyxl이 요소마다 객체를 만드는 것들을 셀과 같은 바구니로 센다(<c> 없는 <row> 홍수, 재검수 M8)
                 cells += 1
                 if cells > MAX_SHEET_CELLS:
                     raise ServiceError("INPUT_LIMIT", RANGE_MESSAGE)
