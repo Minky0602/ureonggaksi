@@ -155,12 +155,17 @@ def test_failure_reasons_do_not_leak_paths_or_errno(tmp_path, target):
 
 
 def test_path_spelling_variants_still_count_as_the_same_file(tmp_path, target):
+    import os
+
     source = write_hwpx(tmp_path / "a.hwpx")
-    variant = tmp_path / "sub" / ".." / "A.HWPX"  # ..·대소문자(Windows)
     (tmp_path / "sub").mkdir()
-    with pytest.raises(ServiceError) as info:
-        open_inputs([source], target, variant)
-    assert info.value.code == "PATH_CONFLICT"
+    variants = [tmp_path / "sub" / ".." / "a.hwpx"]
+    if os.name == "nt":  # Linux 파일 시스템은 대소문자를 구분하므로 다른 파일이다
+        variants.append(tmp_path / "A.HWPX")
+    for variant in variants:
+        with pytest.raises(ServiceError) as info:
+            open_inputs([source], target, variant)
+        assert info.value.code == "PATH_CONFLICT"
 
 
 def test_excluding_the_representative_leaves_duplicates_inactive(tmp_path, target):
