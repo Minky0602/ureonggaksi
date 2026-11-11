@@ -178,7 +178,7 @@ class RecordRule:                # 사업 레코드 경계 (P02-3에서 확정)
     section: str = ""; table: int = 1; header_row: int = 1   # table_rows일 때 표 위치
 
 @dataclass(frozen=True)
-class FieldRule:                 # 기존 Rule(label/cell/regex)의 필드 + 아래 셋
+class FieldRule:                 # 기존 Rule(label/cell/regex)의 필드 + 아래 셋. record가 table_rows면 kind="column", query=열 머리글 이름
     value_type: Literal["text", "number", "money", "date"] = "text"
     unit: str = ""               # 규칙이 밝힌 원문 단위(표 머리 "단위: 천원"). money에만. 글자에 단위가 있으면 글자가 우선
     target_column: str = ""      # 대상 열 **이름**(열 문자 아님). 실행 때 TargetView.columns에서 위치를 찾는다
@@ -196,14 +196,22 @@ class RuleSet:                   # 직접 선택·AI·가져오기 모두 이 �
     work_type: Literal["fill", "check"]   # 빈칸 채우기 / 값 검토
     policy: Pairs                # 질문으로 정한 값. default_unit: 원·천원·만원·백만원·억원 / rounding: down(절사)·up(절상)·half_up(반올림) /
                                  # date_order: ymd·dmy·mdy. 미정이면 없음. 반올림 선택지는 공공 관행 3가지다(DIF-027)
+                                 # 답이 SKIP이면 "물었고 건너뛰었다"는 뜻이라 재실행 때 다시 묻지 않는다(AT-21). 순서에 뜻이 없다(해시는 정렬)
     # 3판: existing_value 선택지 삭제. 기존값이 다르면 항상 직접 처리(PRD 6.1 기준 6)
-    # 형식 오류(없는 값 종류, 중복 항목 이름 등)는 생성 시 RuleError. 뜻 오류(없는 열 등)는 validate_rule이 목록으로
+    # 형식 오류(없는 값 종류, 중복 항목 이름 등)는 생성 시 RuleError. 뜻 오류(없는 열 등)는 validate_rule이 목록으로.
+    # validate_rule 코드: key_field_missing/unknown · kind_mismatch(레코드 종류와 항목 종류) · sheet_missing/unknown ·
+    #   view_mismatch(view가 규칙의 시트·헤더 행으로 만든 것이 아님) · key_column_missing/unknown · column_ambiguous ·
+    #   data_rows_invalid · unit_not_money · key_not_text · key_target_ignored · target_column_missing/unknown/duplicate ·
+    #   target_is_key · no_value_fields · no_sources. 표의 실제 존재 여부(table_rows)는 analyze가 문서를 읽을 때 판정한다
 
 def normalize(raw: str, value_type, *, unit="", default_unit="", rounding=None, date_order=None) -> Normalized
     # Normalized(value: CellValue | None, reason_code: str, transforms: tuple[str, ...]). reason_code는 5.1절:
-    # missing_value(빈 글자) · parse_failed(숫자·날짜로 못 읽음, "미정", ▲ 부호, 순서 모호한 날짜) ·
-    # ambiguous_unit(단위가 글자·규칙·답 어디에도 없음) · needs_rounding(원 환산이 정수 아님, rounding 답 없음)
-    # text는 양끝 공백만 떼고 그대로("0012"). money는 원으로 환산해 CellValue(number, …, unit="원")
+    # missing_value(빈 글자) · parse_failed(숫자·날짜로 못 읽음, "미정", ▲ 부호, 순서 모호한 날짜, 두 자리 연도,
+    #   쉼표 자릿수가 틀린 숫자, 백분율, 짝이 안 맞는 괄호) · ambiguous_unit(단위가 글자·규칙·답 어디에도 없음) ·
+    #   needs_rounding(원 환산이 정수 아님, rounding 답 없음)
+    # text는 양끝 공백만 떼고 그대로("0012", 전각도 그대로 — 글자 일치 대조용). 숫자·금액·날짜만 전각을 반각으로 바꾼다.
+    # money는 원으로 환산해 CellValue(number, …, unit="원"). 단위는 글자(뒤의 "(천원)" 포함) > 규칙 unit > 답 default_unit.
+    # 뒤의 "(금삼백오십만원)" 괄호 한글은 읽지 않는다. 원칙: 정보를 지어내야 읽을 수 있는 글자는 읽지 않는다
 
 @dataclass(frozen=True)
 class WorkflowVersion:           # ERD Workflow + WorkflowVersion
@@ -229,9 +237,11 @@ class RuleStore:                 # 로컬 폴더 rules/<workflow_id>/<revision>.
     def load(self, workflow_id: str, revision: int | None = None) -> WorkflowVersion
     def save(self, name: str, rule: RuleSet, base: WorkflowVersion | None = None,
              request: str = "") -> WorkflowVersion
-        # 같은 rule_hash가 이미 있으면 그 버전을 돌려준다(멱등). 수정이면 revision+1, 이전 revision은 보존
+        # 같은 rule_hash가 이미 있으면 그 버전을 돌려준다(멱등). base가 있으면 그 작업 안에서만 찾고(다른 작업의
+        # 수정본이 revision을 가로채지 않게), 없으면 전체에서 찾는다. 수정이면 revision+1, 이전 revision은 보존.
+        # 깨진 파일은 problems에 모아 두고 건너뛴다(목록·저장을 막지 않는다). 파일 안 식별자가 폴더·파일 이름과 다르면 거부
     def delete(self, workflow_id: str) -> None      # 결과 파일은 지우지 않는다
-    def import_file(self, path: Path) -> RuleDraft  # 외부 v1·v2 JSON → 확인 전 초안(저장 아님)
+    def import_file(self, path: Path) -> RuleDraft  # 외부 v1(추출만)·v3 JSON → 확인 전 초안(저장 아님). v2는 배포된 적이 없다
 ```
 
 ### 2.5 로컬 AI 후보 (FR-05, 06)
@@ -528,7 +538,7 @@ ManualKind = Literal["existing_differs", "no_row", "source_conflict", "unreadabl
 | 확인필요 `<출력명>_확인필요.txt` | 출력 XLSX 옆(값 검토는 대상 XLSX 옆) | 3절 종류별 형식. 안 채운 칸·차이가 있을 때만 | P03 |
 | CLI 계획 `<이름>.plan.json` | 사용자 지정 | request, 입력 경로·지문, RuleSet, 출력 경로, 미리보기 요약, plan_hash | P04 |
 
-기존 v1 규칙(추출만)은 `RuleStore.import_file`로 가져온다. 대상 매핑이 빈 초안이 되고, 사용자가 채운 뒤 저장한다. v2 규칙의 `existing_value`는 읽을 때 무시한다.
+기존 v1 규칙(추출만)은 `RuleStore.import_file`로 가져온다. 대상 매핑이 빈 초안이 되고, 사용자가 채운 뒤 저장한다. v2 형식은 배포된 적이 없어 받지 않는다.
 
 ## 7. 요구사항 연결
 

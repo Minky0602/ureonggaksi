@@ -74,15 +74,89 @@ def test_non_integer_won_needs_an_explicit_rounding_policy():
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [("1,234", "1234"), ("12.50", "12.5"), ("△7", "-7"), ("(7)", "-7"), ("0", "0"), ("15%", "15")],
+    [
+        ("1,234", "1234"),
+        ("12.50", "12.5"),
+        ("△7", "-7"),
+        ("(7)", "-7"),
+        ("0", "0"),
+        ("+7", "7"),
+        ("007", "7"),
+        ("１，０００", "1000"),
+    ],
 )
 def test_numbers(raw, expected):
     assert normalize(raw, "number").value == CellValue("number", expected)
 
 
-def test_number_does_not_accept_units_or_words():
-    assert normalize("350만원", "number").reason_code == "parse_failed"
-    assert normalize("약 300", "number").reason_code == "parse_failed"
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "350만원",
+        "약 300",
+        "15%",  # 계약에 백분율이 없다. 15로 읽으면 뜻이 바뀐다
+        "3,500,00",  # 쉼표 자릿수가 틀리면 자릿수를 추측해야 한다(검수 H-1)
+        "12,5",
+        "1,2,3",
+        "1,000,",
+        "1 234",
+        "(7",  # 괄호 짝이 안 맞는다
+        "-(7)",
+        "1e6",
+        ".5",
+        "1.",
+    ],
+)
+def test_number_refuses_anything_that_needs_guessing(raw):
+    assert normalize(raw, "number").reason_code == "parse_failed"
+
+
+@pytest.mark.parametrize(
+    ("raw", "unit", "expected"),
+    [
+        (
+            "3,500(천원)",
+            "원",
+            "3500000",
+        ),  # 괄호 안 단위가 규칙 단위보다 우선(검수 H-2, 1,000배 오류)
+        ("3,500 (천원)", "", "3500000"),
+        ("금 3,500,000 원", "", "3500000"),
+        ("3,500,000.00원", "", "3500000"),
+        ("350만 원", "", "3500000"),
+        ("1.0원", "", "1"),
+        ("0.0원", "", "0"),
+    ],
+)
+def test_money_spelling_variants_are_read_correctly(raw, unit, expected):
+    result = normalize(raw, "money", unit=unit)
+    assert result.value == CellValue("number", expected, WON), result
+
+
+@pytest.mark.parametrize(
+    "raw", ["3,500,00원", "1,2,3원", "1,000,원", "3천5백만원", "1,000원 이상", "(금삼백오십만원)"]
+)
+def test_money_refuses_anything_that_needs_guessing(raw):
+    assert normalize(raw, "money", unit="원").reason_code == "parse_failed"
+
+
+def test_long_amounts_keep_every_digit():
+    raw = "123456789012345678901234567890원"
+    assert normalize(raw, "money").value.value == "123456789012345678901234567890"
+    assert normalize("△" + raw, "money").value.value == "-123456789012345678901234567890"
+
+
+def test_half_up_rounds_away_from_zero_at_point_five():
+    assert normalize("2.5원", "money", rounding="half_up").value.value == "3"
+    assert normalize("△2.5원", "money", rounding="half_up").value.value == "-3"
+
+
+def test_invalid_policy_values_are_programming_errors():
+    with pytest.raises(ValueError):
+        normalize("1.5원", "money", rounding="nearest")
+    with pytest.raises(ValueError):
+        normalize("1/2/3", "date", date_order="ydm")
+    with pytest.raises(ValueError):
+        normalize("1", "money", default_unit="달러")
 
 
 def test_text_keeps_leading_zeros_and_inner_spaces():
@@ -103,6 +177,18 @@ def test_ambiguous_date_order_needs_a_policy_answer():
     assert normalize("11/06/2026", "date").reason_code == "parse_failed"
     assert normalize("11/06/2026", "date", date_order="mdy").value.value == "2026-11-06"
     assert normalize("06/11/2026", "date", date_order="dmy").value.value == "2026-11-06"
-    assert normalize("26/11/06", "date", date_order="ymd").value.value == "2026-11-06"
+    # 두 자리 연도에 세기를 붙이는 것은 추측이다(검수 H-3)
+    assert normalize("26/11/06", "date", date_order="ymd").reason_code == "parse_failed"
+    assert normalize("99/12/31", "date", date_order="ymd").reason_code == "parse_failed"
+    assert normalize("11/06/126", "date", date_order="mdy").reason_code == "parse_failed"
     assert normalize("2026-13-01", "date").reason_code == "parse_failed"
+    assert normalize("2026-2-30", "date").reason_code == "parse_failed"
     assert normalize("11월 6일", "date").reason_code == "parse_failed"
+    assert normalize("2026-11", "date").reason_code == "parse_failed"
+    assert normalize("2026/11-06", "date").reason_code == "parse_failed"  # 구분자 혼용
+
+
+def test_text_is_kept_verbatim_including_fullwidth_characters():
+    """FR-11 글자 그대로 일치: 전각·기호를 바꾸면 키 대조가 어긋난다(검수 H-4)."""
+    assert normalize("００１２", "text").value == CellValue("text", "００１２")
+    assert normalize("（주）한빛，２", "text").value == CellValue("text", "（주）한빛，２")
