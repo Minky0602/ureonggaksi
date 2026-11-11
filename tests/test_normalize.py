@@ -1,0 +1,108 @@
+"""값 정규화: 글자 → CellValue (PRD FR-10 수용 조건, api.md 2.1·5.1, DIF-027)."""
+
+import pytest
+
+from ureonggaksi.models import CellValue
+from ureonggaksi.normalize import normalize
+
+WON = "원"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected", "transform"),
+    [
+        ("350만원", "3500000", "단위 만원→원 ×10,000(글자)"),
+        ("3,500,000원", "3500000", None),
+        ("35,000천원", "35000000", "단위 천원→원 ×1,000(글자)"),
+        ("3.5백만원", "3500000", "단위 백만원→원 ×1,000,000(글자)"),
+        ("0.35억원", "35000000", "단위 억원→원 ×100,000,000(글자)"),
+        ("350만", "3500000", "단위 만원→원 ×10,000(글자)"),  # 금액 종류라 '원'이 빠져도 단위다
+        (
+            "금3,500,000원(금삼백오십만원)",
+            "3500000",
+            None,
+        ),  # 공문서 표기(행정업무 운영 규정 시행규칙 §2)
+        ("３５０만원", "3500000", None),  # 전각 숫자
+        ("△1,000원", "-1000", None),  # 회계 음수
+        ("(1,000)원", "-1000", None),
+        ("0원", "0", None),
+    ],
+)
+def test_money_is_converted_to_won(raw, expected, transform):
+    result = normalize(raw, "money")
+    assert result.ok and result.value == CellValue("number", expected, WON)
+    if transform:
+        assert transform in result.transforms
+
+
+def test_money_without_unit_needs_rule_unit_or_policy_answer():
+    assert normalize("3,500,000", "money").reason_code == "ambiguous_unit"
+    by_rule = normalize("3,500", "money", unit="천원")
+    assert by_rule.value == CellValue("number", "3500000", WON)
+    assert "단위 천원→원 ×1,000(규칙)" in by_rule.transforms
+    by_answer = normalize("3,500", "money", default_unit="원")
+    assert by_answer.value == CellValue("number", "3500", WON) and by_answer.transforms == ()
+    # 글자의 단위가 규칙·답보다 우선한다
+    assert normalize("350만원", "money", unit="천원").value.value == "3500000"
+
+
+def test_zero_empty_and_undecided_are_distinguished():
+    assert normalize("0", "money", unit="원").value == CellValue("number", "0", WON)
+    empty = normalize("   ", "money", unit="원")
+    assert (empty.value, empty.reason_code) == (CellValue(), "missing_value")
+    assert normalize("미정", "money", unit="원").reason_code == "parse_failed"
+    assert normalize("-", "money", unit="원").reason_code == "parse_failed"
+    assert normalize("▲1,000원", "money").reason_code == "parse_failed"  # ▲는 뜻이 갈린다
+
+
+def test_non_integer_won_needs_an_explicit_rounding_policy():
+    pending = normalize("1.5원", "money")
+    assert (pending.value, pending.reason_code) == (None, "needs_rounding")
+    assert normalize("3.4567백만원", "money").value.value == "3456700"  # 정수면 그대로
+    assert normalize("3.4567891백만원", "money").reason_code == "needs_rounding"
+    # 공공 관행 3가지(DIF-027): 절사·절상·반올림. 음수는 0에서 먼 쪽이 절상이다
+    assert normalize("1.5원", "money", rounding="down").value.value == "1"
+    assert normalize("1.5원", "money", rounding="up").value.value == "2"
+    assert normalize("1.5원", "money", rounding="half_up").value.value == "2"
+    assert normalize("1.4원", "money", rounding="half_up").value.value == "1"
+    assert normalize("△1.5원", "money", rounding="down").value.value == "-1"
+    assert normalize("△1.5원", "money", rounding="up").value.value == "-2"
+    assert "원 미만 절사" in normalize("1.5원", "money", rounding="down").transforms
+    # 정수면 반올림 정책이 있어도 건드리지 않는다
+    assert normalize("3.5천원", "money", rounding="down").value.value == "3500"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("1,234", "1234"), ("12.50", "12.5"), ("△7", "-7"), ("(7)", "-7"), ("0", "0"), ("15%", "15")],
+)
+def test_numbers(raw, expected):
+    assert normalize(raw, "number").value == CellValue("number", expected)
+
+
+def test_number_does_not_accept_units_or_words():
+    assert normalize("350만원", "number").reason_code == "parse_failed"
+    assert normalize("약 300", "number").reason_code == "parse_failed"
+
+
+def test_text_keeps_leading_zeros_and_inner_spaces():
+    assert normalize(" 0012 ", "text").value == CellValue("text", "0012")
+    assert normalize("한빛  초등학교", "text").value == CellValue("text", "한빛  초등학교")
+    assert normalize("", "text").reason_code == "missing_value"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["2026-11-06", "2026.11.06", "2026. 11. 6.", "2026년 11월 6일", "20261106", "2026/11/6"],
+)
+def test_unambiguous_dates(raw):
+    assert normalize(raw, "date").value == CellValue("date", "2026-11-06")
+
+
+def test_ambiguous_date_order_needs_a_policy_answer():
+    assert normalize("11/06/2026", "date").reason_code == "parse_failed"
+    assert normalize("11/06/2026", "date", date_order="mdy").value.value == "2026-11-06"
+    assert normalize("06/11/2026", "date", date_order="dmy").value.value == "2026-11-06"
+    assert normalize("26/11/06", "date", date_order="ymd").value.value == "2026-11-06"
+    assert normalize("2026-13-01", "date").reason_code == "parse_failed"
+    assert normalize("11월 6일", "date").reason_code == "parse_failed"
