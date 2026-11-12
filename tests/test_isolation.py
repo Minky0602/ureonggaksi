@@ -169,3 +169,38 @@ def test_sheet_names_read_only_real_sheets_and_require_their_parts(tmp_path):
     missing_part = rewrite(lambda n, p: (None, p) if n == "xl/worksheets/sheet1.xml" else (n, p))
     with pytest.raises(ServiceError):
         sheet_names(missing_part)
+
+
+def _unpicklable_result():
+    return lambda: None
+
+
+def test_unpicklable_result_is_reported_as_a_transfer_error():
+    with pytest.raises(ServiceError) as info:
+        isolation.run(_unpicklable_result)
+    assert info.value.code == "INPUT_UNSUPPORTED" and "전달" in info.value.message
+
+
+def test_worker_result_equals_in_process_result_for_a_rich_sheet(tmp_path):
+    """격리 경로(spawn·피클)가 직접 호출과 같은 미리보기를 낸다. 수식·병합·보호·날짜·큰 정수·오류값 칸."""
+    import datetime as dt
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Protection
+
+    from ureonggaksi import xlsx
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "사업취합"
+    sheet.append(["코드", "금액", "합계", "날짜", "비고"])
+    sheet.append(["0012", 12345678901234567890, "=B2*2", dt.date(2026, 11, 6), "#DIV/0!"])
+    sheet.append(["0013", 1.5, "=B3*2", dt.datetime(2026, 11, 6, 9, 30), None])
+    sheet.merge_cells("E3:E4")
+    sheet.protection.sheet = True
+    sheet["B3"].protection = Protection(locked=False)
+    path = tmp_path / "rich.xlsx"
+    book.save(path)
+    data = path.read_bytes()
+    args = (data, None, None, None, 50, xlsx.MAX_SHEET_CELLS)
+    assert isolation.run(xlsx._inspect, *args) == xlsx._inspect(*args)

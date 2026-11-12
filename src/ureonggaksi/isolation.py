@@ -107,8 +107,19 @@ def _worker(conn, func: Callable, args: tuple, memory: int) -> None:
         )
     try:
         conn.send(("error", failure) if failure is not None else ("ok", result))
-    except Exception:  # noqa: BLE001 - 결과를 보내지 못하면 부모가 '작업자 종료'로 본다
-        pass
+    except Exception as exc:  # noqa: BLE001 - 결과를 보낼 수 없다(피클 불가 등): 프로그램 오류로 알린다
+        try:
+            conn.send(
+                (
+                    "error",
+                    ServiceError(
+                        "INPUT_UNSUPPORTED",
+                        f"작업 결과를 전달하지 못했습니다({type(exc).__name__}).",
+                    ),
+                )
+            )
+        except Exception:  # noqa: BLE001 - 이것도 못 보내면 부모가 '비정상 종료'로 본다
+            pass
     finally:
         conn.close()
 
@@ -128,7 +139,12 @@ def run(func: Callable, *args, timeout: float | None = None, memory: int | None 
     )  # 모든 OS에서 같은 방식(스레드와 fork를 섞지 않는다)
     receiver, sender = context.Pipe(duplex=False)
     process = context.Process(target=_worker, args=(sender, func, args, memory), daemon=True)
-    process.start()
+    try:
+        process.start()
+    except OSError as exc:
+        receiver.close()
+        sender.close()
+        raise ServiceError("INPUT_UNSUPPORTED", "작업자 프로세스를 시작하지 못했습니다.") from exc
     sender.close()  # 부모 쪽 송신 끝을 닫아야 작업자가 죽었을 때 EOF를 받는다
     try:
         ready = wait([receiver, process.sentinel], timeout)
