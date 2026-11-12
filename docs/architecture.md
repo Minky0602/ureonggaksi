@@ -47,7 +47,8 @@ flowchart LR
 | `export.py` | XLSX 출력(취합·출처·실행정보). 수식으로 읽힐 문자열 방어 |
 | `errors.py` | `ServiceError`와 오류 코드. 파일을 쓰기 전의 실패만 예외로 던진다 |
 | `inputs.py` | 원본 HWPX 여러 개·대상 XLSX·출력 폴더를 한 실행으로 묶기. 파일별 상태·SHA-256, 중복, 경로 충돌, 한도. 지문을 계산한 바이트를 스냅샷으로 보관 |
-| `xlsx.py` | 스냅샷의 대상 XLSX를 openpyxl로 읽기. 시트·헤더 행·데이터 범위·열·기존값·막힌 칸(수식·병합·보호). 쓰기는 아직 없다 |
+| `isolation.py` | 파서를 별도 작업자 프로세스에서 시간(60초)·메모리(2 GiB) 상한 안에 돌린다. 넘으면 작업자를 죽이고 `INPUT_LIMIT`. 작업자도 네트워크 가드를 건다 |
+| `xlsx.py` | 스냅샷의 대상 XLSX를 openpyxl로 읽기(작업자 안에서). 시트 이름은 `workbook.xml`을 직접 읽는다. 시트·헤더 행·데이터 범위·열·기존값·막힌 칸(수식·병합·보호). 쓰기는 아직 없다 |
 | `normalize.py` | 문서 글자 → `CellValue`(text·number·money·date). 단위 환산, 못 읽는 이유 코드, 변환 기록. 추측하지 않는다 |
 | `rules.py` | 규칙 v3(`RuleSet`: 레코드 경계·항목·대상 매핑·작업 종류·질문 답), 형식·뜻 검사, 정규 JSON 지문, 로컬 `RuleStore`, v1 가져오기 |
 | `records.py` | 문서 → 레코드(사업). document는 기존 추출기 재사용, table_rows는 표의 열 머리글로 각 행을 레코드로. 두 곳이면 ambiguous, 변경 추적이면 tracked |
