@@ -35,3 +35,7 @@ class ServiceError(Exception):
         self.code = code
         self.message = message
         self.detail = detail
+
+    def __reduce__(self):
+        # 작업자 프로세스에서 던진 오류가 코드·문구·detail을 잃지 않고 부모로 오게 한다
+        return (ServiceError, (self.code, self.message, self.detail))

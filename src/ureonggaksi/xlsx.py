@@ -13,11 +13,12 @@ from xml.etree.ElementTree import ParseError
 from zipfile import BadZipFile, ZipFile
 
 from defusedxml.common import DefusedXmlException
-from defusedxml.ElementTree import iterparse
+from defusedxml.ElementTree import fromstring, iterparse
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 
+from . import isolation
 from .errors import ServiceError
 from .models import CellValue
 
@@ -188,18 +189,31 @@ def _workbook(data: bytes, *, data_only: bool, read_only: bool = False, checked:
         _check_archive(data)
     try:
         return load_workbook(io.BytesIO(data), data_only=data_only, read_only=read_only)
+    except MemoryError:
+        raise  # 작업자의 메모리 상한 → isolation이 INPUT_LIMIT로 바꾼다
     except Exception as exc:  # openpyxl은 zipfile·xml·자체 예외를 섞어 던진다
         raise ServiceError("INPUT_UNSUPPORTED", UNSUPPORTED_MESSAGE) from exc
 
 
 def sheet_names(data: bytes) -> tuple[str, ...]:
-    book = _workbook(data, data_only=True, read_only=True)
+    """사전 검사 뒤 xl/workbook.xml의 <sheet name>만 읽는다. openpyxl을 쓰지 않아 상한이 필요 없다."""
+    _check_archive(data)
     try:
-        if not book.sheetnames:
-            raise ServiceError("INPUT_UNSUPPORTED", "대상 XLSX에 시트가 없습니다.")
-        return tuple(book.sheetnames)
-    finally:
-        book.close()
+        with ZipFile(io.BytesIO(data)) as archive:
+            root = fromstring(
+                archive.read("xl/workbook.xml"),
+                forbid_dtd=True,
+                forbid_entities=True,
+                forbid_external=True,
+            )
+    except (KeyError, BadZipFile, OSError, ValueError, ParseError, DefusedXmlException) as exc:
+        raise ServiceError("INPUT_UNSUPPORTED", UNSUPPORTED_MESSAGE) from exc
+    names = tuple(
+        node.get("name", "") for node in root.iter() if node.tag.rsplit("}", 1)[-1] == "sheet"
+    )
+    if not names or not all(names):
+        raise ServiceError("INPUT_UNSUPPORTED", "대상 XLSX에 시트가 없습니다.")
+    return names
 
 
 def _number_text(number: int | float | Decimal) -> str:
@@ -297,7 +311,16 @@ def inspect_target(
     if preview_rows < 0:
         raise ServiceError("INPUT_UNSUPPORTED", "미리보기 행 수는 0 이상이어야 합니다.")
     data = inputs.snapshot("target")
-    _check_archive(data)  # 한 번만 검사하고 두 번 연다
+    _check_archive(
+        data
+    )  # 알려진 패턴은 여기서(부모, 싸다). 모르는 패턴은 작업자의 시간·메모리 상한이 막는다
+    return isolation.run(
+        _inspect, data, sheet, header_row, data_rows, preview_rows, MAX_SHEET_CELLS
+    )
+
+
+def _inspect(data, sheet, header_row, data_rows, preview_rows, max_sheet_cells) -> TargetView:
+    """작업자 프로세스에서 돈다. 한도 값은 인자로 받는다(작업자는 부모의 모듈 상태를 보지 않는다)."""
     formulas = _workbook(data, data_only=False, checked=True)
     values = _workbook(data, data_only=True, checked=True)
     try:
@@ -309,9 +332,9 @@ def inspect_target(
             )
         formula_sheet, values_sheet = formulas[name], values[name]
         max_row, max_col = formula_sheet.max_row, formula_sheet.max_column
-        if max_row * max_col > MAX_SHEET_CELLS:
+        if max_row * max_col > max_sheet_cells:
             raise ServiceError(
-                "INPUT_LIMIT", f"대상 시트의 사용 범위가 {MAX_SHEET_CELLS:,}칸을 초과했습니다."
+                "INPUT_LIMIT", f"대상 시트의 사용 범위가 {max_sheet_cells:,}칸을 초과했습니다."
             )
         header = (
             header_row if header_row is not None else _detect_header(values_sheet, max_row, max_col)

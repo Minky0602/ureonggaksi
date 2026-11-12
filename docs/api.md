@@ -163,6 +163,7 @@ def inspect_target(inputs: Inputs, sheet: str | None = None, header_row: int | N
     # sheet 기본값은 통합문서의 활성 시트. header_row 기본값은 1~20행 중 가장 넓은 행의 절반 이상 채워지고 글자 칸이 있는 첫 행,
     # data_rows 기본값은 (header_row+1, 마지막 비지 않은 행). 데이터가 없으면 (header_row+1, header_row).
     # blocked는 formula(배열·공유 수식은 범위 전체) > merged(병합의 왼쪽 위가 아닌 칸) > protected(시트 보호 + 칸 잠김) 순서로 하나.
+    # openpyxl 로드는 별도 작업자 프로세스에서 시간 60초·메모리 2 GiB 상한 안에 돈다(넘으면 INPUT_LIMIT).
     # 기존값은 openpyxl 타입을 그대로 CellValue로 옮긴다. 수식 칸의 기존값은 파일에 저장된 캐시값이고 없으면 empty.
     # int는 자릿수 그대로(반올림 없음). time·timedelta·오류값("#DIV/0!")은 text다(계약에 그 종류가 없다).
 def inspect_source(inputs: Inputs, file_id: str) -> Document        # 기존 hwpx.Document 재사용
