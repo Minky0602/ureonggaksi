@@ -330,14 +330,30 @@ def _blocked(
     병합 면적 합계는 사전 검사가 500,000칸으로 묶으므로 펼쳐도 메모리가 안전하다(검수 M6: 범위 3,000개 ×
     칸 50,000개를 선형 탐색하면 30초가 걸렸다).
     """
+    exists = (row, col) in formula_sheet._cells  # cell()은 없는 칸을 만들므로 먼저 본다
     source = formula_sheet.cell(row, col)
     if source.data_type == "f" or (row, col) in array_ranges:
         return "formula"
     if (row, col) in merged_followers:
         return "merged"
-    if protected and source.protection.locked:
+    locked = source.protection.locked if exists else _inherited_locked(formula_sheet, row, col)
+    if protected and locked:
         return "protected"
     return ""
+
+
+def _inherited_locked(sheet, row: int, col: int) -> bool:
+    """XML에 없는 칸의 잠금: 행 서식(customFormat) → 열 서식 → 기본(잠김).
+
+    patch.py의 서식 상속과 같은 규칙이다(P03-1 검수 M3: 분석과 쓰기가 다르게 판정하지 않게).
+    """
+    row_dim = sheet.row_dimensions.get(row)
+    if row_dim is not None and row_dim.customFormat:
+        return row_dim.protection.locked
+    for dim in sheet.column_dimensions.values():
+        if dim.min and dim.max and dim.min <= col <= dim.max:
+            return dim.protection.locked
+    return True
 
 
 def inspect_target(

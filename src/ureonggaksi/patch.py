@@ -27,7 +27,10 @@ REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 MAX_TEXT = 32_767  # Excel 칸 글자 한도
 MAX_DIGITS = 15  # Excel 숫자 유효 자릿수. 넘으면 Excel이 끝자리를 바꾼다
-DATE_FORMAT_IDS = set(range(14, 23)) | {45, 46, 47}
+DATE_FORMAT_IDS = {14, 15, 16, 17, 22}  # 18~21·45~47은 시각 전용이라 날짜로 보지 않는다
+ADDRESS = re.compile(r"[A-Z]{1,3}[1-9][0-9]{0,6}\Z")
+NUMBER_TEXT = re.compile(r"-?(0|[1-9][0-9]*)(\.[0-9]+)?\Z")
+X_ESCAPE = re.compile(r"_(x[0-9A-Fa-f]{4}_)")
 ILLEGAL_XML = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff￾￿]")
 # calcPr는 CT_Workbook 순서상 이 요소들보다 앞에 온다(없을 때 끼울 자리)
 AFTER_CALC_PR = (
@@ -108,7 +111,7 @@ def _styles(archive: ZipFile) -> tuple[list[bool], list[bool]]:
     for node in root.iter():
         if _local(node.tag) == "numFmt":
             code = re.sub(r'"[^"]*"|\[[^\]]*\]|\\.', "", node.get("formatCode", "")).lower()
-            if re.search(r"[ymd]", code):
+            if re.search(r"[yd]", code):  # m은 분일 수 있어 y·d가 있어야 날짜
                 custom_dates.add(int(node.get("numFmtId", "-1")))
     dates, unlocked = [], []
     for container in root.iter():
@@ -155,8 +158,10 @@ class _Element:
 
 def _scan(data: bytes) -> dict:
     """sheetData·row·c·dimension·mergeCell·sheetProtection의 바이트 위치를 모은다."""
-    if not data.startswith((b"<?xml", b"<")) or re.match(
-        rb"<\?xml[^>]*encoding=\"(?!utf-8|UTF-8)", data
+    head = data[3:] if data.startswith(b"\xef\xbb\xbf") else data
+    declared = re.match(rb"<\?xml[^>]*?encoding\s*=\s*[\"']([^\"']+)[\"']", head)
+    if not head.startswith(b"<") or (
+        declared and declared.group(1).lower() not in (b"utf-8", b"utf8")
     ):
         raise PatchError("UTF-8이 아닌 시트 XML은 쓰지 않습니다.")
     parser = expat.ParserCreate()  # 이름공간 처리 없이 원래 이름(접두사 포함)을 본다
@@ -168,6 +173,8 @@ def _scan(data: bytes) -> dict:
         "merges": [],
         "protected": False,
         "formula_cells": set(),
+        "array_refs": [],
+        "cols": [],  # (min, max, style)
     }
     stack: list[_Element] = []
 
@@ -194,6 +201,11 @@ def _scan(data: bytes) -> dict:
                 found["dimension"] = element
             elif local == "f" and stack and stack[-1].name.rsplit(":", 1)[-1] == "c":
                 found["formula_cells"].add(stack[-1].attrs.get("r"))
+                if attrs.get("t") == "array" and attrs.get("ref"):
+                    found["array_refs"].append(attrs["ref"])
+        if local == "col" and attrs.get("min") and attrs.get("style"):
+            low = int(attrs["min"])
+            found["cols"].append((low, int(attrs.get("max", low)), attrs["style"]))
         if local == "mergeCell" and attrs.get("ref"):
             found["merges"].append(attrs["ref"])
         if local == "sheetProtection" and attrs.get("sheet") in ("1", "true"):
@@ -259,6 +271,8 @@ def _cell_xml(
     s_attr = f" s={quoteattr(style)}" if style is not None else ""
     head = f"<{prefix}c r={quoteattr(address)}{s_attr}"
     if value.kind == "number":
+        if not NUMBER_TEXT.match(value.value):  # NaN·Infinity·지수·밑줄은 쓰지 않는다
+            raise PatchError(f"{address}: 숫자 표기가 올바르지 않습니다.")
         try:
             number = Decimal(value.value)
         except InvalidOperation as exc:
@@ -271,18 +285,31 @@ def _cell_xml(
     elif value.kind == "date":
         body = f"><{prefix}v>{_serial(value.value, date1904)}</{prefix}v></{prefix}c>"
     elif value.kind == "bool":
+        if value.value not in ("TRUE", "FALSE"):
+            raise PatchError(f"{address}: 참/거짓 값이 올바르지 않습니다.")
         body = f' t="b"><{prefix}v>{1 if value.value == "TRUE" else 0}</{prefix}v></{prefix}c>'
     elif value.kind == "text":
-        if len(value.value) > MAX_TEXT or ILLEGAL_XML.search(value.value):
+        if (
+            len(value.value) > MAX_TEXT
+            or ILLEGAL_XML.search(value.value)
+            or "\r" in value.value  # XML이 \n으로 바꿔 다른 값이 된다
+            or not value.value.strip()
+        ):
             raise PatchError(f"{address}: Excel 칸에 쓸 수 없는 글자이거나 너무 깁니다.")
-        # 인라인 문자열: 공유 문자열 표를 건드리지 않고, '='로 시작해도 수식이 되지 않는다
+        # 인라인 문자열: 공유 문자열 표를 건드리지 않고, '='로 시작해도 수식이 되지 않는다.
+        # "_x0041_" 같은 글자는 Excel이 문자 코드로 풀므로 ECMA-376 규칙대로 "_x005F_"로 감싼다(검수 H2)
         body = (
-            f' t="inlineStr"><{prefix}is><{prefix}t xml:space="preserve">{escape(value.value)}'
+            f' t="inlineStr"><{prefix}is><{prefix}t xml:space="preserve">{escape(escape_x(value.value))}'
             f"</{prefix}t></{prefix}is></{prefix}c>"
         )
     else:
         raise PatchError(f"{address}: 빈 값은 쓰지 않습니다.")
     return (head + body).encode("utf-8")
+
+
+def escape_x(text: str) -> str:
+    """ECMA-376 문자 이스케이프: 글자 그대로의 "_xHHHH_"를 "_x005F_xHHHH_"로."""
+    return X_ESCAPE.sub(r"_x005F_\1", text)
 
 
 # ---------- 쓰기 ----------
@@ -339,7 +366,31 @@ def _worksheet_parts(archive: ZipFile) -> list[str]:
 
 
 def _has_formula(sheet_xml: bytes) -> bool:
-    return re.search(rb"<(?:\w+:)?f[\s>/]", sheet_xml) is not None
+    try:
+        return bool(_scan(sheet_xml)["formula_cells"])
+    except PatchError:
+        return True  # 판단할 수 없으면 다시 계산하도록 표시한다(무해)
+
+
+def _in_ranges(address: str, refs: list[str]) -> bool:
+    from openpyxl.utils.cell import range_boundaries
+
+    row, col = _split(address)
+    for ref in refs:
+        min_col, min_row, max_col, max_row = range_boundaries(ref)
+        if min_row <= row <= max_row and min_col <= col <= max_col:
+            return True
+    return False
+
+
+def _inherited_style(found: dict, row, col: int) -> str | None:
+    """XML에 없는 칸이 Excel에서 받는 서식: 행 서식(customFormat) → 열 서식 → 없음(검수 M3)."""
+    if row is not None and row.attrs.get("customFormat") in ("1", "true") and row.attrs.get("s"):
+        return row.attrs["s"]
+    for low, high, style in found["cols"]:
+        if low <= col <= high:
+            return style
+    return None
 
 
 def _in_merge_follower(address: str, merges: list[str]) -> bool:
@@ -362,14 +413,21 @@ def _patch_sheet(data: bytes, writes, date1904, date_styles, unlocked_styles) ->
     prefix = _prefix(found["sheetData"].name)
     splices: list[tuple[int, int, bytes]] = []
     by_row: dict[int, list[tuple[int, str]]] = {}
+    rows = {int(r.attrs["r"]): r for r in found["rows"]}
+    styles: dict[str, str | None] = {}
     for address, value in writes.items():
+        if not ADDRESS.match(address):
+            raise PatchError(f"칸 주소 형식이 올바르지 않습니다: {address}")
         row, col = _split(address)
         by_row.setdefault(row, []).append((col, address))
         cell = found["cells"].get(address)
-        style = cell.attrs.get("s") if cell is not None else None
+        style = (
+            cell.attrs.get("s") if cell is not None else _inherited_style(found, rows.get(row), col)
+        )
+        styles[address] = style
         style_index = int(style) if style is not None and style.isdigit() else 0
         # 막힌 칸은 분석이 이미 걸렀지만, 쓰기 직전에 다시 확인한다
-        if address in found["formula_cells"]:
+        if address in found["formula_cells"] or _in_ranges(address, found["array_refs"]):
             raise PatchError(f"{address}: 수식 칸에는 쓰지 않습니다.")
         if _in_merge_follower(address, found["merges"]):
             raise PatchError(f"{address}: 병합 칸에는 쓰지 않습니다.")
@@ -383,7 +441,6 @@ def _patch_sheet(data: bytes, writes, date1904, date_styles, unlocked_styles) ->
             raise PatchError(
                 f"{address}: 날짜 서식이 아닌 칸에는 날짜를 쓰지 않습니다(숫자로 보인다)."
             )
-    rows = {int(r.attrs["r"]): r for r in found["rows"]}
     sheet_data = found["sheetData"]
     new_rows: dict[int, list[bytes]] = {}
     for row_number, targets in sorted(by_row.items()):
@@ -391,7 +448,7 @@ def _patch_sheet(data: bytes, writes, date1904, date_styles, unlocked_styles) ->
         row = rows.get(row_number)
         if row is None:
             new_rows[row_number] = [
-                _cell_xml(prefix, a, None, writes[a], date1904) for _, a in targets
+                _cell_xml(prefix, a, styles[a], writes[a], date1904) for _, a in targets
             ]
             continue
         cells_in_row = sorted(
@@ -419,7 +476,7 @@ def _patch_sheet(data: bytes, writes, date1904, date_styles, unlocked_styles) ->
             else:
                 position = data.rindex(b"</", row.start, row.end)
             inserts.setdefault(position, []).append(
-                _cell_xml(prefix, address, None, writes[address], date1904)
+                _cell_xml(prefix, address, styles[address], writes[address], date1904)
             )
         for position, chunks in inserts.items():
             if position == -1:
@@ -429,9 +486,18 @@ def _patch_sheet(data: bytes, writes, date1904, date_styles, unlocked_styles) ->
                 splices.append((row.start, row.end, opened + b"".join(chunks) + closing))
             else:
                 splices.append((position, position, b"".join(chunks)))
+    if new_rows and sheet_data.self_closing:
+        opened = data[sheet_data.start : sheet_data.start_end][:-2].rstrip() + b">"
+        body = b"".join(
+            f'<{prefix}row r="{n}">'.encode() + b"".join(new_rows[n]) + f"</{prefix}row>".encode()
+            for n in sorted(new_rows)
+        )
+        closing = f"</{sheet_data.name}>".encode()
+        splices.append((sheet_data.start, sheet_data.end, opened + body + closing))
+        new_rows = {}
     if new_rows:
         ordered = sorted(rows)
-        for row_number, chunks in new_rows.items():
+        for row_number, chunks in sorted(new_rows.items()):
             row_xml = (
                 f'<{prefix}row r="{row_number}">'.encode()
                 + b"".join(chunks)
@@ -544,38 +610,70 @@ def _without(xml: bytes, spans: list[tuple[int, int]]) -> bytes:
 def compare_packages(
     original: bytes, patched: bytes, sheet: str, writes: dict[str, CellValue]
 ) -> tuple[Check, ...]:
-    """원본과 결과를 비교한다. 허용되는 차이: 대상 시트의 작성 칸(끼운 행·dimension 포함)과 workbook.xml의 calcPr."""
+    """원본과 결과를 비교한다. 허용되는 차이는 대상 시트의 작성 칸(끼운 행·dimension, 빈 요소를
+    여닫는 형태로 바꾼 것 포함)과 workbook.xml calcPr의 fullCalcOnLoad뿐이다. 그 밖은 모두 실패다."""
     checks: list[Check] = []
 
     def fail(scope, message, change_id=None, expected=None, actual=None):
         checks.append(Check(scope, change_id, expected, actual, False, message))
 
-    with ZipFile(io.BytesIO(original)) as a, ZipFile(io.BytesIO(patched)) as b:
-        if a.namelist() != b.namelist():
-            fail("preserve", "패키지 항목 목록이 원본과 다릅니다.")
-            return tuple(checks)
-        part = sheet_part(a, sheet)
-        for name in a.namelist():
-            left, right = a.read(name), b.read(name)
-            if name == part:
-                _compare_sheet(left, right, writes, fail)
-            elif name == "xl/workbook.xml":
-                if _without_calc(left) != _without_calc(right):
-                    fail("preserve", "workbook.xml이 재계산 표시 말고도 바뀌었습니다.")
-            elif left != right:
-                fail("preserve", f"{name} 항목이 원본과 다릅니다.")
+    try:
+        with ZipFile(io.BytesIO(original)) as a, ZipFile(io.BytesIO(patched)) as b:
+            if a.namelist() != b.namelist():
+                fail("preserve", "패키지 항목 목록이 원본과 다릅니다.")
+                return tuple(checks)
+            part = sheet_part(a, sheet)
+            for name in a.namelist():
+                left, right = a.read(name), b.read(name)
+                if name == part:
+                    _compare_sheet(left, right, writes, fail)
+                elif name == "xl/workbook.xml":
+                    if _without_calc(left) != _without_calc(right):
+                        fail("preserve", "workbook.xml이 재계산 표시 말고도 바뀌었습니다.")
+                elif left != right:
+                    fail("preserve", f"{name} 항목이 원본과 다릅니다.")
+    except (PatchError, ValueError, KeyError, OSError) as exc:
+        fail("file", f"결과 파일 구조를 확인할 수 없습니다: {exc}")
+        return tuple(checks)
     checks.extend(_reopen_checks(patched, sheet, writes))
     if not any(not c.passed for c in checks):
         checks.append(Check("file", None, None, None, True, "작성한 칸 말고는 원본과 같습니다."))
     return tuple(checks)
 
 
+CALC_PR = re.compile(rb"<(?:\w+:)?calcPr\b[^>]*?/?>")
+
+
 def _without_calc(workbook_xml: bytes) -> bytes:
-    return re.sub(rb'\sfullCalcOnLoad="1"|<(?:\w+:)?calcPr fullCalcOnLoad="1"/>', b"", workbook_xml)
+    """calcPr의 fullCalcOnLoad 속성만 지우고, 그 결과 속성이 없는 calcPr은 빼고 비교한다(검수 M4)."""
+
+    def strip(match):
+        tag = re.sub(rb"""\sfullCalcOnLoad\s*=\s*(["'])[^"']*\1""", b"", match.group(0))
+        return b"" if re.fullmatch(rb"<(?:\w+:)?calcPr\s*/?>", tag) else tag
+
+    return CALC_PR.sub(strip, workbook_xml)
+
+
+def _rows_layout(found: dict) -> list[tuple[int, list[str], tuple[int, int]]]:
+    """(행 번호, 그 행 안 칸 주소의 문서 순서, 행 위치)를 문서 순서로."""
+    layout = []
+    for row in found["rows"]:
+        inside = sorted(
+            (e.start, a) for a, e in found["cells"].items() if row.start < e.start < row.end
+        )
+        layout.append((int(row.attrs["r"]), [a for _, a in inside], (row.start, row.end)))
+    return layout
+
+
+def _normalize_empty(xml: bytes) -> bytes:
+    """<row .../>·<sheetData/>를 여닫는 형태로 맞춘다(쓰기가 빈 요소를 그렇게 바꾸므로, 검수 M1)."""
+    return re.sub(rb"<((?:\w+:)?(?:row|sheetData))(\s[^>]*?)?\s*/>", rb"<\1\2></\1>", xml)
 
 
 def _compare_sheet(left: bytes, right: bytes, writes, fail) -> None:
-    before, after = _cell_map(left), _cell_map(right)
+    left_found, right_found = _scan(left), _scan(right)
+    before = {a: left[e.start : e.end] for a, e in left_found["cells"].items()}
+    after = {a: right[e.start : e.end] for a, e in right_found["cells"].items()}
     changed = {a for a in set(before) | set(after) if before.get(a) != after.get(a)}
     if changed != set(writes):
         extra = sorted(changed - set(writes))
@@ -584,17 +682,44 @@ def _compare_sheet(left: bytes, right: bytes, writes, fail) -> None:
             "preserve",
             f"대상 시트에서 바뀐 칸이 작성 칸과 다릅니다(더 바뀜 {extra[:5]}, 안 바뀜 {missing[:5]}).",
         )
+    # 구조(검수 H3): 결과의 행은 오름차순, 각 칸은 자기 행 번호의 행 안에 열 오름차순으로 있다
+    left_rows = {number for number, _, _ in _rows_layout(left_found)}
+    layout = _rows_layout(right_found)
+    numbers = [number for number, _, _ in layout]
+    if numbers != sorted(numbers) or len(set(numbers)) != len(numbers):
+        fail("preserve", "결과 시트의 행 순서가 올바르지 않습니다.")
+    inserted_spans = []
+    for number, addresses, span in layout:
+        positions = [_split(a) for a in addresses]
+        columns = [c for _, c in positions]
+        if any(r != number for r, _ in positions) or columns != sorted(columns):
+            fail("preserve", f"{number}행의 칸 소속이나 순서가 올바르지 않습니다.")
+        if number not in left_rows:
+            if not addresses or not set(addresses) <= set(writes):
+                fail("preserve", f"끼운 {number}행에 작성하지 않은 칸이 있습니다.")
+            inserted_spans.append(span)
+    # dimension은 원본 범위를 작성 칸까지 넓힌 값이어야 하고 다른 속성은 같아야 한다
+    left_dim, right_dim = left_found["dimension"], right_found["dimension"]
+    if (left_dim is None) != (right_dim is None):
+        fail("preserve", "dimension 요소가 추가되거나 사라졌습니다.")
+    elif left_dim is not None:
+        left_ref = left_dim.attrs.get("ref")
+        expected_ref = _widen(left_ref, writes) if left_ref else left_ref
+        others_left = {k: v for k, v in left_dim.attrs.items() if k != "ref"}
+        others_right = {k: v for k, v in right_dim.attrs.items() if k != "ref"}
+        if others_left != others_right or right_dim.attrs.get("ref") != expected_ref:
+            fail("preserve", "dimension이 예상과 다릅니다.")
 
-    # 칸 바깥(행 속성·병합·서식·확장 등)은 바이트까지 같아야 한다: 칸과 끼운 행, dimension을 빼고 비교
-    def outside(xml: bytes) -> bytes:
-        found = _scan(xml)
-        spans = [(e.start, e.end) for e in found["cells"].values()]
+    # 칸 바깥(행 속성·병합·서식·확장 등)은 바이트까지 같아야 한다: 칸·dimension·끼운 행만 빼고 비교
+    def outside(xml: bytes, found: dict, extra_spans: list) -> bytes:
+        inside_extra = lambda e: any(lo <= e.start < hi for lo, hi in extra_spans)  # noqa: E731
+        spans = [(e.start, e.end) for e in found["cells"].values() if not inside_extra(e)]
+        spans += extra_spans
         if found["dimension"] is not None:
             spans.append((found["dimension"].start, found["dimension"].end))
-        stripped = _without(xml, spans)
-        return re.sub(rb'<(?:\w+:)?row r="\d+"></(?:\w+:)?row>', b"", stripped)
+        return _normalize_empty(_without(xml, spans))
 
-    if outside(left) != outside(right):
+    if outside(left, left_found, []) != outside(right, right_found, inserted_spans):
         fail("preserve", "대상 시트의 칸 바깥 내용이 바뀌었습니다.")
 
 
@@ -618,7 +743,8 @@ def _reopen_checks(patched: bytes, sheet: str, writes) -> list[Check]:
     checks = []
     for address, expected in writes.items():
         got = actual.get(address)
-        ok = got is not None and (got.kind, got.value) == (expected.kind, expected.value)
+        want = escape_x(expected.value) if expected.kind == "text" else expected.value
+        ok = got is not None and (got.kind, got.value) == (expected.kind, want)
         checks.append(
             Check(
                 "cell",
