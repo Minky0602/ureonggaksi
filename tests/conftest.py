@@ -94,7 +94,7 @@ def target(tmp_path):
 def _inline_isolation(request, monkeypatch):
     """작업자 프로세스 격리는 test_isolation.py가 검증한다. 다른 시험은 같은 함수를 바로 불러 시간을 줄인다.
 
-    격리 실행과 직접 실행의 결과가 같음은 독립 검수가 192건으로 확인했다(2026-11-12).
+    격리 실행과 직접 실행의 결과가 같음은 test_isolation.py의 종단 시험이 확인한다.
     """
     if request.module.__name__.endswith("test_isolation"):
         return
