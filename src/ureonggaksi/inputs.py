@@ -77,7 +77,9 @@ def _read_target(path: Path) -> tuple[Path, bytes, str]:
         raise ServiceError(
             "INPUT_UNSUPPORTED", "대상 파일을 읽을 수 없습니다. 경로와 접근 권한을 확인하세요."
         ) from exc
-    xlsx.sheet_names(data)  # 손상·암호화·형식 오류는 여기서 INPUT_UNSUPPORTED로 바뀐다
+    xlsx.sheet_names(
+        data
+    )  # ZIP·암호화·시트 연결이 깨졌으면 여기서 INPUT_UNSUPPORTED. 그 밖의 부품(서식 등) 손상은 분석 때 거부
     return resolved, data, _fingerprint(data)
 
 

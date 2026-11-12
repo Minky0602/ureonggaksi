@@ -2,23 +2,18 @@
 
 The pre-scan in xlsx.py blocks known malicious patterns. This module bounds the worst case for
 patterns nobody has found yet: the worker is killed after a timeout and cannot allocate past a
-memory limit. One worker is reused; a killed worker is replaced on the next call.
+memory limit. Each call gets a fresh worker that exits afterwards, so no memory or broken state carries over.
 """
 
 import multiprocessing
 import os
-import threading
 from collections.abc import Callable
-from multiprocessing.pool import Pool
+from multiprocessing.connection import wait
 
 from .errors import ServiceError
 
 TIMEOUT_SECONDS = 60  # 정상 10만 행 시트 분석 18.7초 실측의 약 3배
 MEMORY_BYTES = 2 * 1024**3  # 정상 45만 칸 시트 1회 로드 166 MiB 실측, 두 번 열기 + 여유
-
-_lock = threading.Lock()
-_pool: Pool | None = None
-_pool_memory: int | None = None
 
 
 def _limit_memory(limit: int) -> None:
@@ -81,55 +76,84 @@ def _initialize(memory: int) -> None:
     _limit_memory(memory)
 
 
-def _call(func: Callable, args: tuple):
+def _worker(conn, func: Callable, args: tuple, memory: int) -> None:
+    """작업자 본체. 결과·오류를 파이프로 한 번 보낸다. 피클할 수 없는 예외도 ServiceError로 바꿔 보낸다."""
     try:
-        return func(*args)
-    except MemoryError as exc:
-        raise ServiceError(
+        _initialize(memory)
+    except Exception as exc:  # noqa: BLE001 - 어떤 이유든 작업자를 준비하지 못한 것이다
+        conn.send(
+            (
+                "error",
+                ServiceError(
+                    "INPUT_UNSUPPORTED", f"작업자를 준비하지 못했습니다({type(exc).__name__})."
+                ),
+            )
+        )
+        return
+    failure = None
+    try:
+        result = func(*args)
+    except ServiceError as exc:
+        failure = exc
+    except MemoryError:
+        failure = "memory"  # except 블록을 벗어나 traceback이 잡던 객체를 놓은 뒤 보낸다
+    except Exception as exc:  # noqa: BLE001 - 원문은 넘기지 않고 종류만 알린다
+        failure = ServiceError(
+            "INPUT_UNSUPPORTED", f"대상 XLSX를 읽을 수 없습니다({type(exc).__name__})."
+        )
+    if failure == "memory":
+        failure = ServiceError(
             "INPUT_LIMIT", "대상 XLSX를 여는 데 메모리 한도를 넘었습니다. 파일을 나눠 주세요."
-        ) from exc
-
-
-def _get_pool(memory: int) -> Pool:
-    global _pool, _pool_memory
-    if _pool is None or _pool_memory != memory:
-        if _pool is not None:
-            _pool.terminate()
-        context = multiprocessing.get_context(
-            "spawn"
-        )  # 모든 OS에서 같은 방식(스레드와 fork를 섞지 않는다)
-        _pool = context.Pool(1, initializer=_initialize, initargs=(memory,))
-        _pool_memory = memory
-    return _pool
-
-
-def shutdown() -> None:
-    global _pool, _pool_memory
-    with _lock:
-        if _pool is not None:
-            _pool.terminate()
-            _pool.join()
-        _pool, _pool_memory = None, None
+        )
+    try:
+        conn.send(("error", failure) if failure is not None else ("ok", result))
+    except Exception:  # noqa: BLE001 - 결과를 보내지 못하면 부모가 '작업자 종료'로 본다
+        pass
+    finally:
+        conn.close()
 
 
 def run(func: Callable, *args, timeout: float | None = None, memory: int | None = None):
-    """func(*args)를 작업자에서 돌린다. 시간·메모리를 넘으면 ServiceError(INPUT_LIMIT).
+    """func(*args)를 새 작업자 프로세스에서 돌린다. 호출마다 작업자를 새로 만들고 끝나면 없앤다.
 
-    func와 인자·결과는 피클할 수 있어야 한다. 작업자가 던진 ServiceError는 그대로 전달된다.
+    - 시간을 넘으면 작업자를 죽이고 ServiceError(INPUT_LIMIT, "N초").
+    - 작업자가 결과 없이 끝나면(메모리 한도에서 죽음 등) 바로 ServiceError(INPUT_LIMIT, "비정상 종료").
+    - 작업자가 던진 ServiceError는 그대로 전달된다.
+    func와 인자·결과는 피클할 수 있어야 한다.
     """
     timeout = TIMEOUT_SECONDS if timeout is None else timeout
     memory = MEMORY_BYTES if memory is None else memory
-    with _lock:  # 작업자가 하나라 한 번에 하나씩
-        pool = _get_pool(memory)
-        pending = pool.apply_async(_call, (func, args))
-        try:
-            return pending.get(timeout)
-        except multiprocessing.TimeoutError as exc:
-            # 멈춘 작업자를 죽인다. 다음 호출이 새로 만든다
-            global _pool
-            pool.terminate()
-            _pool = None
+    context = multiprocessing.get_context(
+        "spawn"
+    )  # 모든 OS에서 같은 방식(스레드와 fork를 섞지 않는다)
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(target=_worker, args=(sender, func, args, memory), daemon=True)
+    process.start()
+    sender.close()  # 부모 쪽 송신 끝을 닫아야 작업자가 죽었을 때 EOF를 받는다
+    try:
+        ready = wait([receiver, process.sentinel], timeout)
+        if receiver in ready:
+            try:
+                kind, payload = receiver.recv()
+            except (EOFError, OSError):
+                kind, payload = "died", None
+        elif ready:
+            kind, payload = "died", None
+        else:
             raise ServiceError(
                 "INPUT_LIMIT",
                 f"대상 XLSX를 여는 데 {timeout:g}초를 넘었습니다. 파일을 나누거나 불필요한 시트를 지워 주세요.",
-            ) from exc
+            )
+        if kind == "ok":
+            return payload
+        if kind == "error":
+            raise payload
+        raise ServiceError(
+            "INPUT_LIMIT",
+            "대상 XLSX를 여는 작업이 비정상으로 끝났습니다(메모리 한도 초과 등). 파일을 나눠 주세요.",
+        )
+    finally:
+        if process.is_alive():
+            process.kill()
+        process.join(5)
+        receiver.close()

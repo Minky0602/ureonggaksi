@@ -5,6 +5,7 @@ Writing is not here yet: the minimal-change patch arrives with the save step (P0
 
 import datetime as dt
 import io
+import posixpath
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import PurePosixPath
@@ -38,6 +39,9 @@ PREVIEW_ROWS = 50
 UNSUPPORTED_MESSAGE = "대상 XLSX를 읽을 수 없습니다. 손상·암호화 여부와 형식을 확인하세요."
 RANGE_MESSAGE = f"대상 시트의 사용 범위가 {MAX_SHEET_CELLS:,}칸을 초과했습니다."
 RANGE_ELEMENTS = {"mergeCell", "f", "dimension"}
+MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 OBJECT_ELEMENTS = {"c", "row", "hyperlink"}
 HEAVY_ELEMENTS = {"conditionalFormatting", "dataValidation"}
 MAX_HEAVY_ELEMENTS = 20_000
@@ -196,24 +200,59 @@ def _workbook(data: bytes, *, data_only: bool, read_only: bool = False, checked:
 
 
 def sheet_names(data: bytes) -> tuple[str, ...]:
-    """사전 검사 뒤 xl/workbook.xml의 <sheet name>만 읽는다. openpyxl을 쓰지 않아 상한이 필요 없다."""
+    """사전 검사 뒤 통합문서의 시트 목록을 openpyxl 없이 읽는다(작업자 상한이 필요 없게).
+
+    _rels/.rels가 가리키는 통합문서 부품의 {main}sheets/{main}sheet만 본다. 각 시트의 r:id가
+    통합문서 rels를 거쳐 실제 부품을 가리켜야 한다(끊긴 시트는 손상으로 거부, 1차 검수 H1).
+    """
     _check_archive(data)
     try:
         with ZipFile(io.BytesIO(data)) as archive:
-            root = fromstring(
-                archive.read("xl/workbook.xml"),
-                forbid_dtd=True,
-                forbid_entities=True,
-                forbid_external=True,
+            names = set(archive.namelist())
+            workbook = _office_document(archive)
+            root = _parse(archive.read(workbook))
+            rels_path = posixpath.join(
+                posixpath.dirname(workbook), "_rels", posixpath.basename(workbook) + ".rels"
             )
+            targets = {}
+            for node in _parse(archive.read(rels_path)):
+                if node.tag == f"{{{PKG_REL_NS}}}Relationship":
+                    target = node.get("Target", "")
+                    targets[node.get("Id")] = (
+                        target.lstrip("/")
+                        if target.startswith("/")
+                        else posixpath.normpath(posixpath.join(posixpath.dirname(workbook), target))
+                    )
     except (KeyError, BadZipFile, OSError, ValueError, ParseError, DefusedXmlException) as exc:
         raise ServiceError("INPUT_UNSUPPORTED", UNSUPPORTED_MESSAGE) from exc
-    names = tuple(
-        node.get("name", "") for node in root.iter() if node.tag.rsplit("}", 1)[-1] == "sheet"
-    )
-    if not names or not all(names):
+    sheets = root.find(f"{{{MAIN_NS}}}sheets")
+    result = []
+    for node in sheets if sheets is not None else ():
+        if node.tag != f"{{{MAIN_NS}}}sheet":
+            continue
+        name, rid = node.get("name", ""), node.get(f"{{{REL_NS}}}id")
+        if not name or targets.get(rid) not in names:
+            raise ServiceError("INPUT_UNSUPPORTED", "대상 XLSX의 시트 연결이 끊겨 있습니다.")
+        result.append(name)
+    if not result:
         raise ServiceError("INPUT_UNSUPPORTED", "대상 XLSX에 시트가 없습니다.")
-    return names
+    return tuple(result)
+
+
+def _parse(xml: bytes):
+    return fromstring(xml, forbid_dtd=True, forbid_entities=True, forbid_external=True)
+
+
+def _office_document(archive: ZipFile) -> str:
+    """패키지 rels(_rels/.rels)가 가리키는 통합문서 부품 경로. 없으면 xl/workbook.xml."""
+    try:
+        rels = _parse(archive.read("_rels/.rels"))
+    except KeyError:
+        return "xl/workbook.xml"
+    for node in rels:
+        if node.get("Type", "").endswith("/officeDocument"):
+            return node.get("Target", "").lstrip("/")
+    return "xl/workbook.xml"
 
 
 def _number_text(number: int | float | Decimal) -> str:
