@@ -391,7 +391,8 @@ class Approval:                  # ERD Approval(실행당 1개)
     input_fingerprints: Pairs; rule_hash: str; plan_hash: str; review_hash: str
     output_path: Path; evidence_path: Path; manual_path: Path | None; approved_at: str
 
-def approve(plan: Plan, output_path: Path) -> Approval
+def approve(plan: Plan, output_path: Path | None = None) -> Approval   # None이면 기본 출력 이름
+    # analyze는 완료 영역의 쓸 칸 가운데 Excel에 그대로 넣을 수 없는 칸을 미리 write_unsupported로 돌린다(미리보기 = 실제 쓰기)
     # 예외: PLAN_IS_SAMPLE, NOTHING_TO_WRITE, PATH_CONFLICT
     # manual_path = <출력명>_확인필요.txt. 직접 처리 항목이 0건이면 None
 
@@ -417,6 +418,9 @@ class ResultPackage:             # ERD ResultPackage
     error: ErrorCode | None; cleanup_failed: tuple[Path, ...]   # 지우지 못한 임시·부분 파일
 
 def save_result(plan: Plan, approval: Approval, *, progress: Progress, cancel: Cancel) -> ResultPackage
+    # (P03-2 구현 `save.py`) 기본 출력 이름 <대상명>_우렁각시_<YYYYMMDD-HHMM>.xlsx(값 검토는 _검토_), 근거 <출력명>.evidence.json,
+    # 확인필요 <출력명>_확인필요.txt. ResultPackage.error는 코드 문자열로 시작한다("VERIFY_FAILED: …").
+    # 근거 JSON에는 문서 원문값이 들어간다(OQ-05 기본값, 2026-11-12 사용자 확인). 첫머리 notice에 그 사실을 적는다.
     # 예외(파일 쓰기 시작 전): APPROVAL_INVALID, PATH_CONFLICT
     # 그 뒤의 실패·취소는 예외 없이 ResultPackage(status="failed"|"cancelled")로 돌려준다.
 
@@ -547,7 +551,7 @@ ManualKind = Literal["existing_differs", "no_row", "source_conflict", "unreadabl
 | `no_row` 들어갈 행을 못 정함 | `no_target` · `multi_target` | 4 | 같은 키의 행이 없음 / 여러 개임 (후보 주소). 키가 문서와 다르면 파일 오류 의심 | 파일의 키를 확인하거나 맞는 행에 직접 입력 | 아니오 |
 | `source_conflict` 원본끼리 값이 다름 | `conflict` | 7 | 같은 칸에 문서마다 다른 값 (원본별 값) | 원본을 확인해 직접 입력 | 아니오 |
 | `unreadable_value` 값을 확실히 못 읽음 | `missing_value` · `ambiguous_field` · `ambiguous_unit` · `parse_failed` · `needs_rounding` · `tracked_change` | 2·3 | 값을 찾지 못함 / 여러 곳 / 단위 불명 / 숫자·날짜로 못 읽음 / 반올림 필요 / 변경 추적 남음 | 원문을 확인해 직접 입력 | `default_unit`·`date_order`·`rounding`만 |
-| `blocked_cell` 쓰면 안 되는 칸 | `blocked_formula` · `blocked_merged` · `blocked_protected` | 5 | 수식·병합·보호 칸 | 칸 구조를 확인해 직접 입력 | 아니오 |
+| `blocked_cell` 쓰면 안 되는 칸 | `blocked_formula` · `blocked_merged` · `blocked_protected` · `write_unsupported` | 5 | 수식·병합·보호 칸 / 이 칸에 그대로 넣을 수 없음(날짜 서식이 아닌 칸의 날짜, 15자리 초과 숫자 등, 2026-11-12 사용자 결정) | 칸 구조를 확인해 직접 입력 | 아니오 |
 | `unreadable_file` 파일을 읽지 못함 | `source_failed` | – | 파일을 읽지 못함 (사유) | 파일을 확인해 다시 넣기 | 아니오 |
 | `no_document` 문서가 없는 행 | `target_without_source` | – | 이 행의 값을 가진 문서가 입력에 없음 (행 주소·키) | 문서가 빠졌는지 확인 | 아니오 |
 | `check_diff` 값 검토 차이 | `mismatch` · `missing_in_sheet` | 6 | 표와 문서가 다름 / 표가 비어 있음 (표값 · 문서값) | 맞는 값을 확인해 직접 고치기 | 아니오 |

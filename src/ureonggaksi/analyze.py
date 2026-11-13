@@ -6,7 +6,7 @@ becomes the cell's reason. A cell enters the "done" area only when all seven hol
 
 import hashlib
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal, Protocol
 
 from openpyxl.utils import get_column_letter
@@ -16,6 +16,7 @@ from .inputs import Inputs, inspect_source
 from .manual import ManualItem, action_of, describe, kind_of, sort_key
 from .models import CellValue
 from .normalize import normalize
+from .patch import unsupported_writes
 from .records import Record, extract_records
 from .rules import RuleSet, WorkflowVersion, canonical_json, rule_hash, validate_rule
 from .xlsx import TargetCell, inspect_target
@@ -235,6 +236,7 @@ def analyze(
         for field_name in value_fields
     ]
     items = _merge(judged, ruleset, cells, column_index, names)
+    items = _mark_unsupported(items, inputs, view.sheet)
     # 문서가 연결된 행: 확정된 행과 복수 후보 행 모두. 표본(Sample) 분석에서는 세지 않는다(문서를 다 읽지 않았다)
     matched_rows = {j.target_row for j in judged if j.target_row is not None} | {
         c.row for j in judged for c in j.candidates
@@ -443,6 +445,30 @@ def _merge(judged_list, ruleset, cells, column_index, names) -> list[ChangeItem]
         )
     items.sort(key=lambda i: (_address_order(i.target_ref), i.record_key, i.field))
     return items
+
+
+def _mark_unsupported(items: list[ChangeItem], inputs: Inputs, sheet: str) -> list[ChangeItem]:
+    """완료 영역의 쓸 칸 가운데 Excel에 그대로 넣을 수 없는 칸(날짜 서식이 아닌 칸의 날짜, 15자리 초과 숫자 등)을
+    직접 처리로 돌린다. 미리보기의 완료 영역 = 실제로 쓰는 칸(FR-13). 사용자 결정 2026-11-12."""
+    writes = {i.target_ref: i.proposed for i in items if i.write_selected and i.target_ref}
+    if not writes:
+        return items
+    problems = unsupported_writes(inputs.snapshot("target"), sheet, writes)
+    if not problems:
+        return items
+    return [
+        replace(
+            item,
+            status="needs_review",
+            reason_code="write_unsupported",
+            reason=describe("write_unsupported", detail=problems[item.target_ref]),
+            resolved=False,
+            write_selected=False,
+        )
+        if item.write_selected and item.target_ref in problems
+        else item
+        for item in items
+    ]
 
 
 def manual_items(plan: Plan) -> tuple[ManualItem, ...]:

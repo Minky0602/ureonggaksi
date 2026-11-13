@@ -70,7 +70,7 @@ KINDS: tuple[KindInfo, ...] = (
         "blocked_cell",
         "쓰면 안 되는 칸",
         "칸 구조를 확인해 직접 입력",
-        ("blocked_formula", "blocked_merged", "blocked_protected"),
+        ("blocked_formula", "blocked_merged", "blocked_protected", "write_unsupported"),
     ),
     KindInfo(
         "unreadable_file",
@@ -104,6 +104,7 @@ REASONS = {
     "blocked_formula": "수식 칸",
     "blocked_merged": "병합 칸",
     "blocked_protected": "보호 칸",
+    "write_unsupported": "이 칸에 그대로 넣을 수 없음 ({detail})",
     "source_failed": "파일을 읽지 못함 ({detail})",
     "no_records": "문서에서 레코드(규칙이 가리키는 표)를 찾지 못함",
     "target_without_source": "이 행의 값을 가진 문서가 입력에 없음 (키 {key})",
