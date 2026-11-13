@@ -24,7 +24,7 @@ adapters: hwpx(기존) · xlsx(신규: 읽기는 openpyxl, 쓰기는 최소 변�
 **두 층 구조:** 기본 흐름은 함수 두 개다. 세부 함수(2.1~2.7)는 그대로 남아 있고 `prepare`·`commit`은 그것들을 정해진 순서로 묶은 것이다(Facade). 그래서 시험은 세부 함수 단위로, 화면은 두 함수로 한다.
 
 ```
-prepare(요청, 파일, 답) = open_inputs → (저장 규칙 | suggest_rule → validate_rule) → analyze(all) → 자동 처리 판정
+prepare(요청, 파일, 답) = open_inputs → (저장 규칙 | interpret → build_rule → validate_rule) → analyze(all) → 자동 처리 판정
                          → 규칙이 서지 않거나 공통 문제가 기준을 넘으면 question만 돌려줌
 [저장] → commit(Prepared) = RuleStore.save(같은 규칙이면 생략) → 채우기: approve → save_result / 검토: save_check
 ```
@@ -254,10 +254,20 @@ class SourceScope:               # AI에 넘기는 범위. prepare는 자동으�
     file_id: str; locators: tuple[str, ...]
 
 @dataclass(frozen=True)
-class AiSelection:               # 모델 출력 전체. 규칙을 쓰지 않고 주어진 목록에서 고르기만 한다(DIF-009)
+class FieldCandidate:            # 문서에서 찾은 항목 하나(여러 문서의 같은 위치에 반복되는 항목명, DIF-010)
+    name: str; rule: FieldRule; samples: tuple[str, ...]   # samples: 문서(명단이면 행)마다 읽은 값
+
+@dataclass(frozen=True)
+class Interpretation:            # 요청 해석 결과. 규칙 초안의 재료(P04 개정, DIF-030)
     work_type: Literal["fill", "check"] | None
-    key_block: int | None; key_column: str | None      # 블록 번호 범위·열 이름 enum으로 스키마 제한
-    fields: tuple[tuple[str, int, str], ...]           # (항목 이름, 값 블록 번호, 대상 열 이름)
+    record: RecordRule
+    key: tuple[str, str] | None                  # (문서 항목, 대상 열)
+    fields: tuple[tuple[str, str, str], ...]     # (문서 항목, 대상 열, 출처 "match"|"model")
+    questions: tuple[tuple[str, tuple[str, ...]], ...]   # (슬롯 work_type|key_column|target_column, 후보)
+    excluded: tuple[str, ...]                    # 요청했지만 짝을 못 찾은 이름(질문 없이 빼고 소명)
+    candidates: tuple[FieldCandidate, ...]
+
+Chooser = Callable[[str, tuple[str, ...]], str | None]   # (질문 글, 선택지) → 선택지 하나 또는 None
 
 @dataclass(frozen=True)
 class AiStatus:
@@ -272,15 +282,19 @@ class RuleDraft:
     issues: tuple[RuleIssue, ...]
 
 def ai_status() -> AiStatus
-def suggest_rule(instruction: str, scope: tuple[SourceScope, ...], view: TargetView,
-                 *, cancel: Cancel, timeout_s: int = 60) -> RuleDraft
-    # 범위의 텍스트와 대상 헤더만 모델에 보낸다. 모델은 AiSelection만 낸다(스키마 평탄화 + 파이썬에서 재검증).
-    # RuleSet은 build_rule이 코드로 만든다.
-    # AI 신뢰도 점수로 규칙·쓰기를 확정하지 않는다. 항상 validate_rule과 [저장]을 거친다.
-    # prepare의 자동 범위: 정상 원본 최대 3개의 표 제목·헤더·라벨 칸(상한은 P04에서 실측으로 정함)
-def build_rule(selection: AiSelection, documents: tuple[Document, ...], view: TargetView) -> RuleDraft
-    # 결정적 코드. 고른 위치로 규칙을 만들고, 다시 추출해 그 위치에 도달하는지 자기 대조한다.
-    # 항목명은 여러 문서의 같은 위치에 반복되는 글자만 인정한다(DIF-010). 대조 실패 후보는 버린다.
+def interpret(request: str, documents: tuple[Document, ...], view: TargetView,
+              *, choose: Chooser | None = None) -> Interpretation
+    # 결정적 코드가 먼저 정한다(S01 실측: 모델이 한 번에 고르면 4B 12.5%, DIF-030).
+    # 작업 종류: 요청 동사("채워"·"넣어" / "확인"·"대조"·"같은지"…; "확인서"의 확인은 동사가 아님). 둘 다·없음 → 질문.
+    # 키: 'X로 찾아·X 기준'으로 말한 이름 → 문서 값이 그 열에 글자 그대로 있는 (항목, 열).
+    #     말하지 않았으면 값이 거의 서로 다른 열 가운데 일치가 가장 많은 쌍이 하나일 때만. 아니면 질문.
+    # 넣을 칸: 요청에 나온 이름마다 열·항목을 같은 이름 → 하나뿐인 포함 관계(발급일↔발급일자)로 정한다.
+    #     한쪽만 정해진 이름끼리는 나온 순서대로 짝짓는다("A를 B 칸에"). "X는 빼고"는 뺀다.
+    # 그래도 남은 이름만 choose로 하나씩 묻는다(선택지 = 열 또는 항목 목록 + "없음"). 목록 밖 답은 버린다.
+    # 명단 표(머리글이 모든 문서에서 같고 헤더와 둘 이상 맞음)에 요청 항목이 있으면 record는 table_rows.
+def build_rule(result: Interpretation, view: TargetView) -> RuleSet | None
+    # 질문이 남았으면 None. RuleSet은 validate_rule과 analyze(자기 대조)를 거친다.
+    # 기존 AiSelection(블록 번호 전체 선택)·suggest_rule은 폐기했다(2026-11-13 사용자 승인, P04).
 ```
 
 ### 2.6 분석 → 자동 처리 판정 → 검토 (FR-09~13, 21)
@@ -528,7 +542,7 @@ ureonggaksi commit --plan 계획.plan.json --plan-hash <값>
 | `APPROVAL_INVALID` | save ① | 예외 | 다시 prepare 후 저장 |
 | `INPUT_CHANGED` · `WRITE_FAILED` · `VERIFY_FAILED` · `EVIDENCE_FAILED` · `PUBLISH_FAILED` | save ②~⑦ | `ResultPackage.error` | 사유 표시, 재시도 |
 | `CANCELLED` | prepare·analyze·suggest(예외), save(결과) | 위와 같음 | 원본·기존 결과 보존 |
-| `AI_UNAVAILABLE` · `AI_TIMEOUT` · `AI_BAD_OUTPUT` | prepare·suggest_rule | 예외 | 재시도, 최근 작업 사용, 또는 자세히의 직접 선택 |
+| `AI_UNAVAILABLE` · `AI_TIMEOUT` · `AI_BAD_OUTPUT` | prepare(모델 선택) | 예외 | 재시도, 최근 작업 사용, 또는 자세히의 직접 선택 |
 
 **받는 방식의 원칙:** 파일을 쓰기 시작하기 전에는 예외로 던진다. 쓰기를 시작한 뒤에는 정리 결과까지 담아 결과값으로 돌려준다.
 
@@ -571,7 +585,7 @@ ManualKind = Literal["existing_differs", "no_row", "source_conflict", "unreadabl
 | 01·02 | `open_inputs`, `exclude_source`, `InputFile` | 01, 17 |
 | 03 | `inspect_target`(셀 주소·기존값), `inspect_source` | 05 |
 | 04 | `RuleSet`, `validate_rule`, `analyze(scope=Sample)` (자세히) | 01 |
-| 05·06 | `prepare`(`Question`), `ai_status`, `suggest_rule`, `AiSelection`, `build_rule`, `RuleDraft` | 02, 03, 04, 16, 19, 21 |
+| 05·06 | `prepare`(`Question`), `ai_status`, `interpret`, `Interpretation`, `build_rule`, `RuleDraft` | 02, 03, 04, 16, 19, 21 |
 | 07 | `describe_rule`, `Prepared.samples`, `Prepared.warnings` | 02, 19 |
 | 08 | `RuleStore`(멱등 save, revision 보존, `import_file`), `prepare(workflow=)`, `RuleSet.policy` | 02, 15, 21 |
 | 09~11 | `analyze`, `TargetCandidate` | 05, 06, 07 |
@@ -656,7 +670,7 @@ ERD 11개 객체의 대응(3판에서 객체·관계 변화 없음):
 | 문서가 없는 행 | `no_document`로 보고(문서 출발 분석의 구멍 보완) | 보고하지 않음: 비어 있는 행이 끝난 것처럼 보인다 |
 | 규칙 저장 시점 | 결과 파일 작성 전 유지(권고 유지, 사용자 이견 없음) | 결과 성공 뒤 저장: 저장 실패를 결과값과 섞어야 한다 |
 | 작업 방향 | HWPX → XLSX 채우기와 양쪽 읽기 대조만(사용자 확정) | XLSX → HWPX 채우기: HWPX 최소 변경 저장이 추가로 필요해 MVP에서 제외 |
-| AI 역할 | 모델은 `AiSelection`만, 규칙은 `build_rule`이 코드로(DIF-009) | 모델이 RuleSet 직접 작성: 실측 5/12(2B·4B), 선택 방식은 4B에서 12/12(개발 PC, 사례 12개) |
+| AI 역할 | 코드가 작업 종류·키·이름이 맞는 짝을 정하고, 모델은 남은 짝을 선택지에서 하나씩만 고른다. 규칙은 `build_rule`이 코드로(DIF-009·030) | 모델이 RuleSet 직접 작성: 실측 5/12(2B·4B), 선택 방식은 4B에서 12/12(개발 PC, 사례 12개) |
 | CLI 승인 | `prepare`가 낸 plan_hash를 `commit`에 넘겨야 저장(2.9절) | `--yes` 플래그: 내용을 보지 않고도 승인되어 "쓰는 내용 = 승인한 내용"이 깨진다 |
 
 ## 9. 남은 결정 (구현 PR에서 확정)
