@@ -11,16 +11,16 @@ import json
 import os
 import tempfile
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
 from .analyze import Cancel, ChangeItem, Plan, PlanCounts, manual_items
 from .errors import Pairs, ServiceError
-from .manual import KINDS, ManualItem
+from .manual import KIND_WHY, KINDS, ManualItem
 from .models import CellValue
-from .patch import Check, PatchError, compare_packages, patch_xlsx
+from .patch import Check, PatchError, compare_packages, has_formulas, patch_xlsx
 from .rules import canonical_json, rule_to_dict
 from .storage import local_path
 
@@ -122,10 +122,17 @@ def review_hash(plan: Plan) -> str:
 
 
 def default_output_path(plan: Plan, *, now: datetime | None = None) -> Path:
+    """<대상명>_우렁각시_<YYYYMMDD-HHMM>.xlsx. 결과·근거·확인필요 가운데 하나라도 있으면 _2, _3…을 붙인다."""
     stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M")
     target = plan.inputs.target.path
     suffix = "검토" if plan.rule.work_type == "check" else "우렁각시"
-    return plan.inputs.output_dir / f"{target.stem}_{suffix}_{stamp}.xlsx"
+    base = f"{target.stem}_{suffix}_{stamp}"
+    for number in range(1, 1000):
+        path = plan.inputs.output_dir / (base + ("" if number == 1 else f"_{number}") + ".xlsx")
+        evidence, manual = _companions(path, True)
+        if not any(p.exists() for p in (path, evidence, manual)):
+            return path
+    raise ServiceError("PATH_CONFLICT", "결과 이름을 정하지 못했습니다. 출력 폴더를 정리하세요.")
 
 
 def _companions(output_path: Path, has_manual: bool) -> tuple[Path, Path | None]:
@@ -150,13 +157,17 @@ def _check_paths(plan: Plan, paths: list[Path | None]) -> None:
             raise ServiceError("PATH_CONFLICT", "결과를 저장할 폴더가 없습니다.")
 
 
+def _approved_ids(plan: Plan) -> tuple[str, ...]:
+    return tuple(i.change_id for i in plan.items if i.area == "done" and i.write_selected)
+
+
 def approve(plan: Plan, output_path: Path | None = None) -> Approval:
     """[저장]을 누른 순간 보이는 계획을 묶는다. 예외: PLAN_IS_SAMPLE · NOTHING_TO_WRITE · PATH_CONFLICT."""
     if plan.scope != "all":
         raise ServiceError(
             "PLAN_IS_SAMPLE", "표본 분석으로는 저장할 수 없습니다. 전체를 분석한 뒤 저장하세요."
         )
-    writes = tuple(i.change_id for i in plan.items if i.area == "done" and i.write_selected)
+    writes = _approved_ids(plan)
     check = plan.rule.work_type == "check"
     if not check and not writes:
         raise ServiceError(
@@ -164,6 +175,8 @@ def approve(plan: Plan, output_path: Path | None = None) -> Approval:
             "쓸 칸이 없습니다. 직접 처리 목록만 확인하세요(결과 파일을 만들지 않습니다).",
         )
     base = local_path(output_path) if output_path is not None else default_output_path(plan)
+    if base.suffix.lower() != ".xlsx":
+        raise ServiceError("PATH_CONFLICT", "결과 파일 이름은 .xlsx로 끝나야 합니다.")
     evidence, manual = _companions(base, bool(manual_items(plan)))
     xlsx = None if check else base
     _check_paths(plan, [xlsx, evidence, manual])
@@ -188,6 +201,10 @@ def manual_text(plan: Plan, result_name: str | None) -> str:
     """확인필요 파일(api 3절 형식). 종류 순서로 묶고 묶음마다 왜·할 일·항목."""
     items = manual_items(plan)
     counts = plan.counts
+    locations = {
+        i.change_id: ", ".join(dict.fromkeys(e.location for e in i.evidence if e.location))
+        for i in plan.items
+    }
     lines = [f"[안내] {NOTICE}", ""]
     if result_name:
         lines.append(f"결과 파일: {result_name}")
@@ -212,9 +229,17 @@ def manual_text(plan: Plan, result_name: str | None) -> str:
         if not group:
             continue
         number += 1
-        lines += ["", f"[{number}] {info.title} ({len(group)})", f"할 일: {info.action}"]
+        lines += [
+            "",
+            f"[{number}] {info.title} ({len(group)})",
+            f"왜: {KIND_WHY[info.kind]}",
+            f"할 일: {info.action}",
+        ]
         for item in group:
-            lines.append(f"  - {item.where}: {item.reason}")
+            places = locations.get(item.change_id or "", "")
+            lines.append(
+                f"  - {item.where}: {item.reason}" + (f" [근거 {places}]" if places else "")
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -261,6 +286,7 @@ def evidence_json(
     status: str,
     output_sha: str | None,
     manual_sha: str | None,
+    summary: "ResultSummary",
 ) -> bytes:
     data = {
         "schema_version": SCHEMA_VERSION,
@@ -281,6 +307,7 @@ def evidence_json(
         ],
         "rule": rule_to_dict(plan.rule),
         "rule_hash": plan.rule_hash,
+        "interpretation": None,  # 해석 한 줄(describe_rule)은 P04 prepare가 채운다
         "approval": {
             "plan_hash": approval.plan_hash,
             "review_hash": approval.review_hash,
@@ -289,6 +316,15 @@ def evidence_json(
         },
         "sheet": plan.sheet,
         "counts": asdict(plan.counts),
+        "summary": {
+            "excluded_sources": list(summary.excluded_sources),
+            "failed_sources": list(summary.failed_sources),
+            "manual": [
+                {"kind": m.kind, "where": m.where, "reason": m.reason, "change_id": m.change_id}
+                for m in summary.manual
+            ],
+            "has_formulas": summary.has_formulas,
+        },
         "items": [_item_json(i) for i in plan.items],
         "unmatched_rows": [{"row": r, "key": k} for r, k in plan.unmatched_rows],
         "checks": [
@@ -318,7 +354,10 @@ def evidence_json(
 
 
 def publish_new(temp: Path, final: Path) -> None:
-    """덮어쓰지 않는 공개: 같은 볼륨이면 하드 링크(대상이 있으면 실패), 안 되면 배타적 생성 + 복사 + fsync."""
+    """덮어쓰지 않는 공개: 같은 볼륨이면 하드 링크(대상이 있으면 실패), 안 되면 배타적 생성 + 복사 + fsync.
+
+    대체 경로에서 복사가 실패하면 방금 배타적으로 만든 final(우리 파일)을 지우고 예외를 다시 낸다(검수 M3).
+    """
     try:
         os.link(temp, final)
         return
@@ -327,10 +366,16 @@ def publish_new(temp: Path, final: Path) -> None:
     except OSError:
         pass  # 하드 링크를 지원하지 않는 파일 시스템
     with temp.open("rb") as source, open(final, "xb") as target:
-        while chunk := source.read(1024 * 1024):
-            target.write(chunk)
-        target.flush()
-        os.fsync(target.fileno())
+        try:
+            while chunk := source.read(1024 * 1024):
+                target.write(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+        except BaseException:
+            target.close()
+            with contextlib.suppress(OSError):
+                final.unlink()
+            raise
 
 
 def _write_temp(folder: Path, data: bytes, suffix: str) -> Path:
@@ -396,17 +441,23 @@ def save_result(
     cancel: Cancel | None = None,
 ) -> ResultPackage:
     """api 3절 ①~⑦. 쓰기 시작 전의 실패는 예외, 그 뒤는 ResultPackage(status="failed"|"cancelled")."""
-    # ① 사전 확인(예외)
-    if approval.plan_hash != plan_hash(
-        plan, approval.output_path, approval.evidence_path, approval.manual_path
+    # ① 사전 확인(예외). 승인 객체의 모든 필드를 계획에서 다시 계산해 비교한다(검수 M1·M4)
+    expected = plan_hash(plan, approval.output_path, approval.evidence_path, approval.manual_path)
+    if (
+        approval.plan_hash != expected
+        or approval.run_id != plan.run_id
+        or approval.approved_change_ids != _approved_ids(plan)
+        or approval.review_hash != review_hash(plan)
+        or approval.rule_hash != plan.rule_hash
     ):
         raise ServiceError(
             "APPROVAL_INVALID", "승인한 뒤 계획이 바뀌었습니다. 다시 미리보기한 뒤 저장하세요."
         )
-    snapshot_prints = {
-        f.file_id: f.sha256 or "" for f in (*plan.inputs.sources, plan.inputs.target)
-    }
-    if snapshot_prints != dict(approval.input_fingerprints):
+    prints = {f.file_id: f.sha256 or "" for f in (*plan.inputs.sources, plan.inputs.target)}
+    target = plan.inputs.target
+    if prints != dict(approval.input_fingerprints) or _sha(
+        plan.inputs.snapshot("target")
+    ) != prints.get(target.file_id):
         raise ServiceError(
             "APPROVAL_INVALID", "승인과 입력 파일 지문이 다릅니다. 다시 미리보기하세요."
         )
@@ -415,7 +466,17 @@ def save_result(
             "APPROVAL_INVALID", "미리보기 뒤 입력 파일이 바뀌었습니다. 다시 미리보기하세요."
         )
     _check_paths(plan, [approval.output_path, approval.evidence_path, approval.manual_path])
-    return _save(plan, approval, progress, cancel)
+    temps: list[Path] = []
+    package = _save(plan, approval, progress, cancel, temps)
+    leftover = []
+    for temp in temps:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            leftover.append(temp)
+    if leftover:
+        package = replace(package, cleanup_failed=(*package.cleanup_failed, *leftover))
+    return package
 
 
 def save_check(
@@ -429,17 +490,22 @@ def save_check(
 
 
 def _save(
-    plan: Plan, approval: Approval, progress: Progress, cancel: Cancel | None
+    plan: Plan,
+    approval: Approval,
+    progress: Progress,
+    cancel: Cancel | None,
+    temps: list[Path],
 ) -> ResultPackage:
+    """임시 파일은 호출한 쪽이 지운다(지우지 못한 것을 cleanup_failed로 알리려고)."""
     folder = approval.evidence_path.parent
-    temps: list[Path] = []
     published: list[tuple[Path, str]] = []
-    checks: tuple[Check, ...] = ()
+    checks: list[Check] = []
     snapshot = plan.inputs.snapshot("target")
-    has_formulas = b"<f" in snapshot  # 안내용. 정확한 판정은 patch가 workbook.xml에 표시한다
+    summary = _summary(plan, has_formulas(snapshot, plan.sheet))
 
-    def result(status, error=None, output_sha=None, evidence_sha=None, cleanup=()):
+    def result(status, error=None, output_sha=None, evidence_sha=None):
         done = status in ("completed", "partial")
+        cleanup = () if done else tuple(p for p, d in published if not _remove_if_same(p, d))
         return ResultPackage(
             plan.run_id,
             status,
@@ -448,32 +514,31 @@ def _save(
             approval.evidence_path if done else None,
             evidence_sha if done else None,
             approval.manual_path if done else None,
-            checks,
-            _summary(plan, has_formulas),
+            tuple(checks),
+            summary,
             error,
-            tuple(cleanup),
+            cleanup,
         )
 
     def cancelled() -> bool:
         return cancel is not None and cancel.is_set()
 
+    stage = "WRITE_FAILED"
     try:
         output_sha = manual_sha = None
         # ② 최소 변경 작성 ③ 재열기·비교 검증
         if approval.output_path is not None:
             progress("결과 작성", 1, 4)
-            writes = {
-                i.target_ref: i.final_value
-                for i in plan.items
-                if i.change_id in set(approval.approved_change_ids)
-            }
+            approved = set(approval.approved_change_ids)
+            writes = {i.target_ref: i.final_value for i in plan.items if i.change_id in approved}
             try:
                 patched = patch_xlsx(snapshot, plan.sheet, writes)
             except PatchError as exc:
                 return result("failed", f"WRITE_FAILED: {exc}")
             temps.append(_write_temp(folder, patched, ".xlsx"))
             progress("결과 검증", 2, 4)
-            checks = compare_packages(snapshot, patched, plan.sheet, writes)
+            stage = "VERIFY_FAILED"
+            checks += compare_packages(snapshot, patched, plan.sheet, writes)
             if any(not c.passed for c in checks):
                 return result("failed", "VERIFY_FAILED: 결과 파일 검증에 실패했습니다.")
             output_sha = _sha(patched)
@@ -481,44 +546,34 @@ def _save(
             return result("cancelled", "CANCELLED")
         status = _status(plan)
         # ④' 확인필요 ④ 근거
+        stage = "EVIDENCE_FAILED"
         if approval.manual_path is not None:
-            text = manual_text(
-                plan, approval.output_path.name if approval.output_path else None
-            ).encode("utf-8")
+            name = approval.output_path.name if approval.output_path else None
+            text = manual_text(plan, name).encode("utf-8")
             temps.append(_write_temp(folder, text, ".txt"))
             manual_sha = _sha(text)
-        evidence = evidence_json(plan, approval, checks, status, output_sha, manual_sha)
+        # ⑤ 공개 직전 확인(결과는 근거 JSON의 checks에도 남긴다)
+        progress("입력 재확인", 3, 4)
+        same = _disk_fingerprints_match(plan, approval)
+        checks.append(Check("inputs", None, None, None, same, "입력 파일 지문 재확인"))
+        if not same:
+            return result("failed", "INPUT_CHANGED: 저장 중에 입력 파일이 바뀌었습니다.")
+        evidence = evidence_json(plan, approval, checks, status, output_sha, manual_sha, summary)
         temps.append(_write_temp(folder, evidence, ".json"))
         evidence_sha = _sha(evidence)
-        # ⑤ 공개 직전 확인
-        progress("입력 재확인", 3, 4)
-        if not _disk_fingerprints_match(plan, approval):
-            return result("failed", "INPUT_CHANGED: 저장 중에 입력 파일이 바뀌었습니다.")
         if cancelled():
             return result("cancelled", "CANCELLED")
         # ⑥ XLSX → ⑥' TXT → ⑦ JSON(커밋 기록). ⑥부터는 취소를 받지 않는다
         progress("공개", 4, 4)
-        order = []
-        index = 0
-        if approval.output_path is not None:
-            order.append((temps[index], approval.output_path, output_sha))
-            index += 1
-        if approval.manual_path is not None:
-            order.append((temps[index], approval.manual_path, manual_sha))
-            index += 1
-        order.append((temps[index], approval.evidence_path, evidence_sha))
-        for temp, final, sha in order:
-            try:
-                publish_new(temp, final)
-            except OSError as exc:
-                cleanup = [path for path, digest in published if not _remove_if_same(path, digest)]
-                return result("failed", f"PUBLISH_FAILED: {type(exc).__name__}", cleanup=cleanup)
+        stage = "PUBLISH_FAILED"
+        finals = [
+            (approval.output_path, output_sha),
+            (approval.manual_path, manual_sha),
+            (approval.evidence_path, evidence_sha),
+        ]
+        for temp, (final, sha) in zip(temps, [f for f in finals if f[0] is not None], strict=True):
+            publish_new(temp, final)
             published.append((final, sha))
         return result(status, None, output_sha, evidence_sha)
-    except OSError as exc:
-        cleanup = [path for path, digest in published if not _remove_if_same(path, digest)]
-        return result("failed", f"WRITE_FAILED: {type(exc).__name__}", cleanup=cleanup)
-    finally:
-        for temp in temps:
-            with contextlib.suppress(OSError):
-                temp.unlink()
+    except Exception as exc:  # 쓰기 시작 뒤의 실패는 예외가 아니라 failed 결과다(api 5절)
+        return result("failed", f"{stage}: {type(exc).__name__}")

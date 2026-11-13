@@ -11,8 +11,7 @@ from test_analyze import SHEET, fill_rule, plan_doc
 from ureonggaksi import save as save_module
 from ureonggaksi.analyze import analyze
 from ureonggaksi.errors import ServiceError
-from ureonggaksi.inputs import open_inputs
-from ureonggaksi.models import CellValue
+from ureonggaksi.inputs import exclude_source, open_inputs
 from ureonggaksi.rules import FieldRule, RuleSet
 from ureonggaksi.save import approve, plan_hash, save_check, save_result
 
@@ -159,6 +158,49 @@ def test_evidence_publish_failure_rolls_back_the_result(tmp_path, monkeypatch):
     assert package.status == "failed" and package.error.startswith("PUBLISH_FAILED")
     assert not approval.output_path.exists() and not approval.manual_path.exists()
     assert package.cleanup_failed == ()
+    assert not list(tmp_path.glob(".ureonggaksi-*"))
+
+
+def test_rollback_that_cannot_delete_is_reported(tmp_path, monkeypatch):
+    """FR-18: 먼저 공개한 파일을 지우지 못하면 경로를 cleanup_failed로 알린다."""
+    plan, _, _ = make_plan(tmp_path, [("a", plan_doc("0012", "350만원"))])
+    approval = approve(plan, output(tmp_path))
+    real = save_module.publish_new
+
+    def fail_on_json(temp, final):
+        if final.suffix == ".json":
+            raise PermissionError("잠김")
+        real(temp, final)
+
+    monkeypatch.setattr(save_module, "publish_new", fail_on_json)
+    monkeypatch.setattr(save_module, "_remove_if_same", lambda path, sha: False)
+    package = save_result(plan, approval)
+    assert package.status == "failed"
+    assert set(package.cleanup_failed) == {approval.output_path, approval.manual_path}
+
+
+def test_fallback_copy_failure_leaves_no_partial_file(tmp_path, monkeypatch):
+    """하드 링크가 안 되는 볼륨에서 복사 중 실패하면 반쯤 쓴 결과 파일을 남기지 않는다(검수 M3)."""
+    temp, final = tmp_path / "t.bin", tmp_path / "f.bin"
+    temp.write_bytes(b"x" * 3_000_000)
+
+    def no_link(a, b):
+        raise OSError("hard links not supported")
+
+    def no_fsync(fd):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(save_module.os, "link", no_link)
+    monkeypatch.setattr(save_module.os, "fsync", no_fsync)
+    with pytest.raises(OSError):
+        save_module.publish_new(temp, final)
+    assert not final.exists()
+    monkeypatch.undo()
+    final.write_bytes(b"keep")
+    monkeypatch.setattr(save_module.os, "link", no_link)
+    with pytest.raises(FileExistsError):  # 대체 경로도 기존 파일을 덮어쓰지 않는다
+        save_module.publish_new(temp, final)
+    assert final.read_bytes() == b"keep"
 
 
 def test_cancel_before_publishing_leaves_no_files(tmp_path):
@@ -204,12 +246,104 @@ def test_unwritable_value_is_moved_to_manual_before_approval(tmp_path):
     (item,) = plan.items
     assert (item.reason_code, item.write_selected) == ("write_unsupported", False)
     assert "날짜 서식" in item.reason
-    with pytest.raises(ServiceError):  # 쓸 칸이 없으니 결과 파일을 만들지 않는다
+    with pytest.raises(ServiceError) as info:  # 쓸 칸이 없으니 결과 파일을 만들지 않는다
         approve(plan, output(tmp_path))
+    assert info.value.code == "NOTHING_TO_WRITE"
 
 
 def test_default_output_name_uses_target_name_and_time(tmp_path):
     plan, _, _ = make_plan(tmp_path, [("a", plan_doc("0012", "350만원"))])
     name = save_module.default_output_path(plan, now=datetime(2026, 11, 12, 9, 5)).name
     assert name == "사업취합_우렁각시_20261112-0905.xlsx"
-    assert CellValue("number", "1").kind == "number"
+    # 같은 분에 다시 저장해도 겹치지 않는다(결과·근거·확인필요 중 하나라도 있으면 _2)
+    (tmp_path / "사업취합_우렁각시_20261112-0905.evidence.json").write_bytes(b"x")
+    again = save_module.default_output_path(plan, now=datetime(2026, 11, 12, 9, 5)).name
+    assert again == "사업취합_우렁각시_20261112-0905_2.xlsx"
+
+
+def test_forged_approval_fields_are_refused(tmp_path):
+    """검수 M1·M4: 승인 객체의 쓰기 목록·검토 지문·규칙 지문·스냅샷 바이트가 계획과 다르면 쓰지 않는다."""
+    from dataclasses import replace
+
+    docs = [("정상", plan_doc("0012", "350만원")), ("다름", plan_doc("0013", "350만원"))]
+    plan, _, _ = make_plan(tmp_path, docs)
+    approval = approve(plan, output(tmp_path))
+    differs = next(i.change_id for i in plan.items if i.reason_code == "existing_differs")
+    forged = [
+        replace(approval, approved_change_ids=(*approval.approved_change_ids, differs)),
+        replace(approval, review_hash="0" * 64),
+        replace(approval, rule_hash="0" * 64),
+    ]
+    for bad in forged:
+        with pytest.raises(ServiceError) as info:
+            save_result(plan, bad)
+        assert info.value.code == "APPROVAL_INVALID"
+    swapped = replace(plan.inputs, snapshots={**dict(plan.inputs.snapshots), "target": b"PK other"})
+    with pytest.raises(ServiceError) as info:
+        save_result(replace(plan, inputs=swapped), approval)
+    assert info.value.code == "APPROVAL_INVALID"
+    assert not output(tmp_path).exists()
+
+
+def test_input_changed_while_saving_publishes_nothing(tmp_path):
+    """⑤: 쓰는 동안 입력이 바뀌면 INPUT_CHANGED로 실패하고 아무 파일도 공개하지 않는다."""
+    plan, _, target = make_plan(tmp_path, [("a", plan_doc("0012", "350만원"))])
+    approval = approve(plan, output(tmp_path))
+
+    def touch(stage, current, total):
+        if stage == "입력 재확인":
+            target.write_bytes(target.read_bytes() + b"\0")
+
+    package = save_result(plan, approval, progress=touch)
+    assert package.status == "failed" and package.error.startswith("INPUT_CHANGED")
+    assert not output(tmp_path).exists() and not approval.evidence_path.exists()
+    assert not list(tmp_path.glob(".ureonggaksi-*"))
+
+
+def test_excluded_sources_make_the_result_partial_and_are_named(tmp_path):
+    """AT-12: 제외한 원본이 있으면 쓸 칸이 모두 끝나도 부분 완료이고, 제외한 파일 이름을 보여 준다."""
+    sheet = [["사업코드", "사업명", "2026 예산"], ["0012", "정상", None]]
+    rule = fill_rule(target=fill_rule().target.__class__("사업취합", 1, (2, 2), "사업코드"))
+    docs = [
+        ("a", plan_doc("0012", "350만원")),
+        ("b", plan_doc("0099", "1원")),
+        ("c", plan_doc("0098", "1원")),
+    ]
+    paths = [write_hwpx(tmp_path / f"{n}.hwpx", body) for n, body in docs]
+    target = write_xlsx(tmp_path / "사업취합.xlsx", sheet)
+    inputs = open_inputs(paths, target, tmp_path)
+    for source in inputs.sources[1:]:
+        inputs = exclude_source(inputs, source.file_id)
+    plan = analyze(inputs, rule)
+    package = save_result(plan, approve(plan, output(tmp_path)))
+    assert package.status == "partial"
+    assert package.summary.excluded_sources == ("b.hwpx", "c.hwpx")
+    evidence = json.loads(package.evidence_path.read_text(encoding="utf-8"))
+    assert evidence["summary"]["excluded_sources"] == ["b.hwpx", "c.hwpx"]
+
+
+def test_summary_reports_formulas_and_files_follow_the_contract(tmp_path):
+    """FR-15 안내(수식이 있으면 표시)와 api 3·6절 형식(왜·할 일·근거 위치, interpretation·summary)."""
+    sheet = [
+        ["사업코드", "사업명", "2026 예산", "합계"],
+        ["0012", "정상", None, "=C2*2"],
+        ["0013", "다름", 1, "=C3*2"],
+    ]
+    docs = [("a", plan_doc("0012", "350만원")), ("b", plan_doc("0013", "350만원"))]
+    plan, _, _ = make_plan(tmp_path, docs, sheet=sheet)
+    package = save_result(plan, approve(plan, output(tmp_path)))
+    assert package.summary.has_formulas is True
+    text = package.manual_path.read_text(encoding="utf-8")
+    assert "\n왜: 칸에 이미 다른 값이 있어 덮어쓰지 않았습니다." in text
+    assert "할 일: 맞는 값을 확인해 직접 고치기" in text and "[근거 " in text
+    evidence = json.loads(package.evidence_path.read_text(encoding="utf-8"))
+    assert {"interpretation", "summary"} <= evidence.keys()
+    assert evidence["summary"]["has_formulas"] is True
+    assert [c["scope"] for c in evidence["checks"]][-1] == "inputs"
+
+
+def test_output_name_must_be_xlsx(tmp_path):
+    plan, _, _ = make_plan(tmp_path, [("a", plan_doc("0012", "350만원"))])
+    with pytest.raises(ServiceError) as info:
+        approve(plan, tmp_path / "결과.hwpx")
+    assert info.value.code == "PATH_CONFLICT"

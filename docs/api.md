@@ -389,11 +389,15 @@ def review(plan: Plan, change_id: str,
 class Approval:                  # ERD Approval(실행당 1개)
     run_id: str; approved_change_ids: tuple[str, ...]   # area=="done"이고 write_selected인 칸만
     input_fingerprints: Pairs; rule_hash: str; plan_hash: str; review_hash: str
-    output_path: Path; evidence_path: Path; manual_path: Path | None; approved_at: str
+    output_path: Path | None      # 값 검토는 None(XLSX를 만들지 않음)
+    evidence_path: Path; manual_path: Path | None; approved_at: str
+    # save_result ①은 승인 객체의 모든 필드(plan_hash·run_id·approved_change_ids·review_hash·rule_hash·입력 지문)를
+    # 계획에서 다시 계산해 비교하고, 대상 스냅샷 바이트의 지문도 계산해 비교한다
 
 def approve(plan: Plan, output_path: Path | None = None) -> Approval   # None이면 기본 출력 이름
     # analyze는 완료 영역의 쓸 칸 가운데 Excel에 그대로 넣을 수 없는 칸을 미리 write_unsupported로 돌린다(미리보기 = 실제 쓰기)
-    # 예외: PLAN_IS_SAMPLE, NOTHING_TO_WRITE, PATH_CONFLICT
+    # 예외: PLAN_IS_SAMPLE, NOTHING_TO_WRITE, PATH_CONFLICT(이미 있음·입력과 같음·폴더 없음·.xlsx가 아님)
+    # 기본 이름이 결과·근거·확인필요 중 하나와 겹치면 _2, _3…을 붙인다
     # manual_path = <출력명>_확인필요.txt. 직접 처리 항목이 0건이면 None
 
 @dataclass(frozen=True)
@@ -466,9 +470,9 @@ ureonggaksi commit --plan 계획.plan.json --plan-hash <값>
 | ① 사전 확인 | `approval.plan_hash == hash(plan)`, 스냅샷 지문 == 승인 지문, 디스크 입력 지문 == 승인 지문, 출력 경로가 모두 없음 | 예외(파일 생성 없음) |
 | ② 최소 변경 작성 | **스냅샷 바이트**에서 대상 시트 XML의 작성할 `<c>`만 고치고 나머지 패키지 항목은 내용 그대로 복사해 임시 XLSX 작성(아래) | failed, 임시 파일 정리 |
 | ③ 재열기·비교 검증 | 작성 값 대조 + 원본과 패키지 비교(아래) | failed(부분 완료로 낮추지 않음) |
-| ④' 확인필요 작성 | 직접 처리 항목이 있으면 임시 TXT 작성(UTF-8) | failed |
-| ④ 근거 작성 | 임시 JSON 작성. XLSX·TXT sha256 포함 | failed |
-| ⑤ 공개 직전 확인 | 디스크 입력 지문을 다시 계산(FR-14·15) | failed `INPUT_CHANGED` |
+| ④' 확인필요 작성 | 직접 처리 항목이 있으면 임시 TXT 작성(UTF-8) | failed `EVIDENCE_FAILED` |
+| ④ 근거 작성 | 임시 JSON 작성. XLSX·TXT sha256 포함(구현은 ⑤ 결과를 담으려고 ⑤ 뒤에 작성) | failed `EVIDENCE_FAILED` |
+| ⑤ 공개 직전 확인 | 디스크 입력 지문을 다시 계산(FR-14·15). 결과는 `Check(scope="inputs")`로 근거에 남긴다 | failed `INPUT_CHANGED` |
 | ⑥ XLSX 공개 | 덮어쓰기 없는 공개. 이미 있으면 실패 | failed |
 | ⑥' TXT 공개 | 덮어쓰기 없는 공개 | ⑥의 XLSX를 지문 확인 후 삭제 |
 | ⑦ JSON 공개 | 덮어쓰기 없는 공개. **JSON이 커밋 기록이다** | ⑥·⑥' 파일을 지문 확인 후 삭제, 못 지우면 `cleanup_failed` |
@@ -562,7 +566,7 @@ ManualKind = Literal["existing_differs", "no_row", "source_conflict", "unreadabl
 | 파일 | 위치 | 핵심 내용 | Schema 작성 |
 |---|---|---|---|
 | 규칙 `rules/<id>/<rev>.json` | 사용자 로컬 | `schema_version: 3`, name, revision, request, `RuleSet`(work_type·policy 포함), rule_hash. 원본 경로·원문값은 넣지 않는다 | P02 |
-| 근거 `<출력명>.evidence.json` | 출력 XLSX 옆 | run_id, 입력 file_id·경로·지문, 규칙 스냅샷, 해석 한 줄, 승인 해시, ChangeItem 전체(근거·보정·area 포함), checks, summary, XLSX·TXT sha256 | P03 |
+| 근거 `<출력명>.evidence.json` | 출력 XLSX 옆 | 첫머리 notice(원문값 포함 안내), run_id, 입력 file_id·경로·지문, 규칙 스냅샷, 해석 한 줄(`interpretation`, P04 전에는 null), 승인 해시, ChangeItem 전체(근거·보정·area 포함), checks, summary, XLSX·TXT sha256 | P03 |
 | 확인필요 `<출력명>_확인필요.txt` | 출력 XLSX 옆(값 검토는 대상 XLSX 옆) | 3절 종류별 형식. 안 채운 칸·차이가 있을 때만 | P03 |
 | CLI 계획 `<이름>.plan.json` | 사용자 지정 | request, 입력 경로·지문, RuleSet, 출력 경로, 미리보기 요약, plan_hash | P04 |
 

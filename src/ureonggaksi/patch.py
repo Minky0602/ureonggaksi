@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from xml.parsers import expat
 from xml.sax.saxutils import escape, quoteattr
-from zipfile import ZipFile, ZipInfo
+from zipfile import BadZipFile, ZipFile, ZipInfo
 
 from defusedxml.ElementTree import fromstring
 from openpyxl.utils import column_index_from_string, get_column_letter
@@ -363,6 +363,15 @@ def _worksheet_parts(archive: ZipFile) -> list[str]:
             if path in archive.namelist():
                 parts.append(path)
     return parts
+
+
+def has_formulas(data: bytes, sheet: str) -> bool:
+    """대상 시트에 수식이 있는가(결과 안내용, FR-15). 판단할 수 없으면 True."""
+    try:
+        with ZipFile(io.BytesIO(data)) as archive:
+            return _has_formula(archive.read(sheet_part(archive, sheet)))
+    except (PatchError, KeyError, ValueError, BadZipFile):
+        return True
 
 
 def _has_formula(sheet_xml: bytes) -> bool:

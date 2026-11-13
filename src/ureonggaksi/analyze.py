@@ -450,7 +450,8 @@ def _merge(judged_list, ruleset, cells, column_index, names) -> list[ChangeItem]
 def _mark_unsupported(items: list[ChangeItem], inputs: Inputs, sheet: str) -> list[ChangeItem]:
     """완료 영역의 쓸 칸 가운데 Excel에 그대로 넣을 수 없는 칸(날짜 서식이 아닌 칸의 날짜, 15자리 초과 숫자 등)을
     직접 처리로 돌린다. 미리보기의 완료 영역 = 실제로 쓰는 칸(FR-13). 사용자 결정 2026-11-12."""
-    writes = {i.target_ref: i.proposed for i in items if i.write_selected and i.target_ref}
+    # 저장은 final_value(보정값 우선)를 쓰므로 같은 값으로 검사한다(P03-2 검수 L2)
+    writes = {i.target_ref: i.final_value for i in items if i.write_selected and i.target_ref}
     if not writes:
         return items
     problems = unsupported_writes(inputs.snapshot("target"), sheet, writes)
