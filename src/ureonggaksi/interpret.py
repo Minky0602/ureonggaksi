@@ -8,6 +8,7 @@ wrong cells):
   key only when one identifier-like column clearly wins.
 - fields ↔ columns only when names are equal after normalization (DIF-010 labels vs headers), or when the
   user points at the cell ("A를 B 칸에").
+- a request with any "leave out / don't" wording confirms no field pair at all; it is asked instead.
 Everything else goes to the model, one name at a time, as a choice from an enum; without a model it is
 left out and reported.
 """
@@ -26,7 +27,7 @@ FILL = re.compile(r"채워|채우|채움|넣어|넣기|넣고|넣을|입력|기�
 FILL_NEGATED = re.compile(r"(채우|넣|입력하|기입하|적|옮기)지\s*(마|말|않)")  # "아직 채우지 마"
 CHECK = re.compile(
     r"확인(?!서)|대조|검토(?!서)|비교|맞는지|맞나|같은지|일치|검증|틀린|다른지|차이|체크"
-    r"|괜찮은지|됐나|됐는지|제대로|봐\s?줘|살펴|없나"
+    r"|괜찮은지|됐나|됐는지|제대로|봐\s?줘|살펴|없나|맞아|됐어|있어|있나|\?"
 )  # "기입 상태 봐줘"·"입력 누락 없나": 채우기 낱말이 명사로 쓰인 검토 요청(P04 ① 2차 검수)
 # 이름 바로 뒤(공백 제거) 글자로 읽는 표현
 KEY_AFTER = re.compile(
@@ -37,6 +38,13 @@ NEGATED = re.compile(
     r"(빼(?!놓지|먹지)|제외|말고|그대로(?!옮|넣|채|입력|적|기입|반영)|손대지|건드리지|하지마|하지말|두고|놔두|참고|비워|비우"
     r"|채우지마|채우지말|넣지마|넣지말)"
 )  # "번호 칸은 비워 둬", "비고 칸에 넣지 말고"
+# 요청 어디에든 빼기·하지 않기 표현이 있으면 코드는 항목 짝을 확정하지 않는다(P04 ① 3차 검수).
+# 이름별 부정(NEGATED)은 어휘·조사·구분자를 다 셀 수 없어 빈틈이 계속 나왔다. 여기서는 넓게 걸고 묻는다
+RESTRICTION = re.compile(
+    r"않|안\s*(채|넣|써|쓰|적|해|돼|되)|지\s*(는|도|만|를|을)?\s*(마|말)|말고|말\s*것|빼|제외|손대|건드|건들"
+    r"|놔두|놔둬|냅두|냅둬|두고|그냥\s*둬|비워|비우|필요\s*없"
+    r"|그대로(?!\s*(옮|넣|채|입력|적|기입|반영))"
+)
 JOINED = re.compile(r"^(이랑|랑|하고|와|과|,|및|그리고)")  # 나열: 부정이 앞 이름까지 걸린다
 SLOT = re.compile(r"^(칸|열|란)에")  # "A를 B 칸에 넣어"
 OBJECT = re.compile(r"^(을|를)")  # 지목 규칙의 A: 목적격 조사가 붙은 이름만
@@ -109,19 +117,9 @@ def _document_fields(documents: tuple[Document, ...]) -> list[FieldCandidate]:
             label_like = all(v == values[0] for v in values) and len(documents) > 1
             if label_like or not any(values):
                 continue  # 이웃도 모든 문서에서 같으면 그것도 항목명이다
-            unique = label_counts.get(_norm(text), 0) == 1
-            rule = (
-                FieldRule(text, "label", query=text, direction=direction)
-                if unique
-                else FieldRule(
-                    text,
-                    "cell",
-                    section=neighbours[0].section,
-                    table=neighbours[0].table,
-                    row=neighbours[0].row,
-                    col=neighbours[0].col,
-                )
-            )
+            if label_counts.get(_norm(text), 0) > 1:
+                break  # 같은 라벨이 둘(추천인 성명·피추천인 성명)이면 어느 것인지 모른다(3차 D01)
+            rule = FieldRule(text, "label", query=text, direction=direction)
             found.setdefault(_norm(text), FieldCandidate(text, rule, values))
             break
     # 본문의 "항목: 값" 문단
@@ -310,6 +308,12 @@ def _column_values(view: TargetView, column: str) -> list[str]:
     ]
 
 
+def _covers_all_rows(view: TargetView) -> bool:
+    """미리보기가 데이터 행 끝까지 담았나. 일부만 보고 값을 비교하면 51행 아래 사람을 놓친다(3차 K04)."""
+    last = max((int(re.sub(r"\D", "", c.address)) for c in view.cells), default=view.header_row)
+    return last >= view.data_rows[1]
+
+
 def _numeric(value: str) -> bool:
     """날짜·금액·번호처럼 숫자와 구분 기호뿐인 값."""
     return bool(re.fullmatch(r"[\d\s.,:/\-]+", value))
@@ -420,12 +424,21 @@ def interpret(
             for c in _key_candidates(fields, view, named=True)
             if column in (None, c[2]) and field in (None, c[1])
         ]
-        if picked and (len(picked) == 1 or picked[0][0] > picked[1][0]):
+        if len(picked) == 1:
             key = (picked[0][1], picked[0][2])
     else:  # 키를 말하지 않았다
         candidates = _key_candidates(fields, view)
         if candidates and (len(candidates) == 1 or candidates[0][0] > 2 * candidates[1][0]):
             key = (candidates[0][1], candidates[0][2])
+    if key is not None and not _same(key[0], key[1]):
+        # 값으로 이은 키: 행 전체를 봤고, 그 열에 값이 맞는 다른 문서 항목이 없을 때만(3차 H1: 성명·추천인)
+        rivals = [
+            c
+            for c in _key_candidates(fields, view, named=True)
+            if c[2] == key[1] and c[1] != key[0]
+        ]
+        if rivals or not _covers_all_rows(view):
+            key = None
     if key is None:
         options = tuple(dict.fromkeys(c[2] for c in _key_candidates(fields, view, named=True)))
         questions.append(("key_column", options[:3]))
@@ -469,6 +482,10 @@ def interpret(
     pairs = [p for p in dict.fromkeys(pairs) if p[0] not in unclear and p[1] not in unclear]
     only_fields = [n for n in only_fields if n not in unclear]
     only_columns = [n for n in only_columns if n not in unclear]
+    held: list[str] = []
+    if RESTRICTION.search(request):  # 빼기·하지 않기가 섞인 요청: 짝을 정하지 않고 모두 묻는다
+        held = [*(p[0] for p in pairs), *(p[1] for p in pairs), *only_fields, *only_columns]
+        pairs, only_fields, only_columns = [], [], []
     off_limits = skip | set(unclear)  # 빼라고 한 열·이름은 모델 선택지에도 넣지 않는다
     for field in only_fields:
         taken = {p[1] for p in pairs}
@@ -499,6 +516,7 @@ def interpret(
         *only_fields,
         *only_columns,
         *unclear,
+        *held,
         *(p[0] for p in pairs),
         *(p[1] for p in pairs),
     ]

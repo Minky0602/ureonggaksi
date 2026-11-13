@@ -239,8 +239,8 @@ def test_unnamed_key_is_not_guessed_from_serial_numbers(tmp_path):
         ("이름 기준으로 직원번호 채우고 번호 칸은 비워 둬", ()),
         ("이름 기준으로 연락처 넣어줘 번호 칸 말고", ()),
         ("이름 기준으로 연락처 채우고 비고란은 그대로", ()),
-        # 부정한 칸은 버리고 다음 지목을 쓴다
-        ("이름 기준으로 연락처를 비고 칸에 넣지 말고 번호 칸에 넣어줘", (("연락처", "번호"),)),
+        # 부정이 섞이면 지목도 확정하지 않는다(3차 검수 fail-safe)
+        ("이름 기준으로 연락처를 비고 칸에 넣지 말고 번호 칸에 넣어줘", ()),
         # 같은 이름 짝보다 지목한 칸이 이긴다
         ("이름 기준으로 이수시간을 점수 칸에 넣어줘", (("이수시간", "점수"),)),
         # 한 칸에 둘을 지목하면 어느 것도 정하지 않는다
@@ -361,3 +361,96 @@ def test_same_name_with_a_different_unit_is_not_offered_to_the_model(tmp_path):
     asked = []
     interpret("이름 기준으로 예산 채워줘", documents, view, choose=first_option(asked))
     assert all("예산(원)" not in options for _, options in asked)
+
+
+# ---------- 3차 독립 검수: 부정 fail-safe·키 경쟁·의문문 ----------
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "이름 기준으로 이수시간 채워줘. 직급은 건들지 마",
+        "이름 기준으로 이수시간 채워줘. 직급은 놔둬",
+        "이름 기준으로 이수시간 채워줘. 직급엔 손대지 마",
+        "이름 기준으로 이수시간 채워줘. 직급은 안 채워도 돼",
+        "이름 기준으로 이수시간 채워줘. 직급은 필요 없어",
+        "이름 기준으로 이수시간 채워줘. 직급은 냅둬",
+        "이름 기준으로 이수시간 채워줘. 제외: 직급",
+        "이름 기준으로 이수시간 채우고 직급·비고는 빼줘",
+        "이름 기준으로 이수시간 채우고 직급이나 비고는 그대로",
+        "이름 기준으로 이수시간 채우고, 직급은 이미 맞으니 그냥 둬",
+        "이름 기준으로 이수시간 채워줘. 직급은 쓰지 마",
+        "이름 기준으로 이수시간 채워줘. 직급은 넣지는 마",
+        "이름 기준으로 이수시간 채우고, 직원번호를 번호 칸에 넣지는 마",
+        "이름 기준으로 이수시간 채우고, 직원번호를 번호 칸에 넣으면 안 돼",
+        "이름 기준으로 이수시간 채우고 연락처를 비고 칸에 쓰지 말 것",
+        "이름 기준으로 직원번호를 번호 칸에서 빼고 이수시간 채워줘",
+        "이름 기준으로 직급도 빼지 말고 이수시간이랑 채워줘",
+    ],
+)
+def test_any_restriction_in_the_request_confirms_no_pair(setup, request_text):
+    """부정 어휘를 다 셀 수 없으므로, 빼기·하지 않기가 섞인 요청은 짝을 정하지 않고 묻는다."""
+    asked = []
+    result = run(setup, request_text, choose=first_option(asked))
+    assert result.fields == () and asked == []
+    assert "target_column" in [q[0] for q in result.questions]
+    assert result.excluded  # 말한 항목은 소명 목록에 남는다
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    ["이름 기준으로 이수시간 입력된 거 맞아?", "이름 기준으로 이수시간 기입 잘 됐어?"],
+)
+def test_questions_are_not_fill_requests(setup, request_text):
+    assert run(setup, request_text).work_type is None
+
+
+def _recommendation(name, referrer, hours):
+    rows = [("성명", name), ("추천인", referrer), ("이수시간", hours)]
+    body = table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
+    return ["<hp:p><hp:run>" + body + "</hp:run></hp:p>"]
+
+
+def test_key_is_not_set_when_two_document_fields_match_the_key_column(tmp_path):
+    """3차 H1: 성명과 추천인이 모두 이름 열과 맞으면 어느 쪽이 키인지 묻는다(남의 행에 쓰지 않는다)."""
+    docs = [
+        _recommendation("가나다", "사아자", "12"),
+        _recommendation("라마바", "차카타", "8"),
+        _recommendation("신규자", "가나다", "16"),
+    ]
+    sheet = [
+        ["이름", "이수시간"],
+        ["가나다", None],
+        ["라마바", None],
+        ["사아자", None],
+        ["차카타", None],
+    ]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    for request in ("이름 기준으로 이수시간 채워줘", "이수시간 채워줘"):
+        result = interpret(request, documents, view)
+        assert result.key is None and build_rule(result, view) is None
+
+
+def test_key_is_not_linked_by_values_when_the_preview_misses_rows(tmp_path):
+    """3차 K04: 미리보기 밖(51행 아래)에 있는 사람은 비교되지 않으므로 값으로 키를 정하지 않는다."""
+    docs = [_recommendation(n, r, "8") for n, r in (("가나다", "사아자"), ("라마바", "차카타"))]
+    filler = [[f"사람{i:02d}", None] for i in range(60)]
+    sheet = [["이름", "이수시간"], ["사아자", None], ["차카타", None], *filler, ["가나다", None]]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("이름 기준으로 이수시간 채워줘", documents, view)
+    assert result.key is None
+
+
+def test_repeated_label_is_not_a_candidate(tmp_path):
+    """3차 D01: 한 문서에 '성명'이 두 번(추천인·피추천인) 나오면 어느 것도 항목으로 쓰지 않는다."""
+
+    def doc(a, b, hours):
+        rows = [("성명", a), ("성명", b), ("이수시간", hours)]
+        body = table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
+        return ["<hp:p><hp:run>" + body + "</hp:run></hp:p>"]
+
+    docs = [doc("가나다", "라마바", "12"), doc("사아자", "차카타", "8")]
+    sheet = [["성명", "이수시간"], ["가나다", None], ["라마바", None], ["사아자", None]]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("성명 기준으로 이수시간 채워줘", documents, view)
+    assert result.key is None and build_rule(result, view) is None
