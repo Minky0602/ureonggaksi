@@ -55,6 +55,7 @@ flowchart LR
 | `records.py` | 문서 → 레코드(사업). document는 기존 추출기 재사용, table_rows는 표의 열 머리글로 각 행을 레코드로. 두 곳이면 ambiguous, 변경 추적이면 tracked |
 | `analyze.py` | 레코드 값 정규화 → 키 글자 일치로 대상 행 → 6.1 기준 7개를 순서대로 적용 → `Plan`(ChangeItem·Evidence·집계·문서 없는 행). 쓰기 없음 |
 | `interpret.py` | 한 줄 요청 → 규칙 초안. 작업 종류는 동사, 키는 요청에서 말한 이름과 데이터 일치, 넣을 칸은 같은 이름·포함 관계로 코드가 정하고, 남은 짝만 모델에 선택지로 묻는다(`Chooser`). 질문이 남으면 규칙을 만들지 않는다 |
+| `ai.py` | 로컬 모델 실행기. `llama-completion`을 질문마다 자식 프로세스로 실행(`--offline`, HTTP 서버·포트 없음)하고 JSON 스키마 enum으로 답을 선택지 하나로 제한한다. 실행 불가·시간 초과는 예외, 목록 밖 답은 버림. `ai_status`는 실행 파일·모델 파일 유무 |
 | `manual.py` | 6.3절 소명 종류·문장 틀을 데이터로. `manual_items`가 화면과 확인필요 파일이 함께 쓰는 목록을 만든다 |
 | `storage.py` | 로컬 경로 검사와 원자적 저장 |
 | `offline.py` | 파이썬 네트워크 차단(audit hook) |
