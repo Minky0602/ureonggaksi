@@ -1,11 +1,15 @@
 """Turn a one-line request into a rule draft — code first, the local model only for leftovers (P04, DIF-030).
 
-S01 showed a 4B model mixes up roles when it picks work type, key and fields at once (12.5%). Most of
-that is decidable from data, so code decides:
-- work type from verbs ("채워" vs "확인"); unclear → ask.
-- the key from data: a document field whose values appear verbatim in a target column of distinct values.
-- fields ↔ columns by label text that repeats across documents (DIF-010) and equals a header.
-Only fields that no rule can place go to the model, one at a time, as a choice from an enum.
+S01 showed a 4B model mixes up roles when it picks work type, key and fields at once (12.5%). Code
+decides only what it can decide without guessing (independent review of P04 ① found guesses that wrote
+wrong cells):
+- work type from verbs ("채워" vs "확인"); both, neither or a negated fill → ask.
+- the key the user named ("이름으로 찾아"), linked by values that appear verbatim in the column; an unnamed
+  key only when one identifier-like column clearly wins.
+- fields ↔ columns only when names are equal after normalization (DIF-010 labels vs headers), or when the
+  user points at the cell ("A를 B 칸에").
+Everything else goes to the model, one name at a time, as a choice from an enum; without a model it is
+left out and reported.
 """
 
 import re
@@ -19,12 +23,19 @@ from .xlsx import TargetView
 
 # 작업 종류 동사. "확인서"·"검토서"처럼 문서 이름에 든 글자는 동사가 아니다
 FILL = re.compile(r"채워|채우|채움|넣어|넣기|넣고|넣을|입력|기입|적어|옮겨|반영|써\s?줘")
+FILL_NEGATED = re.compile(r"(채우|넣|입력하|기입하|적|옮기)지\s*(마|말|않)")  # "아직 채우지 마"
 CHECK = re.compile(
     r"확인(?!서)|대조|검토(?!서)|비교|맞는지|맞나|같은지|일치|검증|틀린|다른지|차이|체크"
+    r"|괜찮은지|됐나|됐는지|제대로"
 )
-ALL_WORDS = ("전부", "전체", "모두", "모든")
+# 이름 바로 뒤(공백 제거) 글자로 읽는 표현
 KEY_AFTER = re.compile(r"^(기준|으로|로|별)")  # "이름으로 찾아", "요청번호 기준"
-NEGATED = re.compile(r"^(은|는|을|를)?(빼|제외)")  # "연번은 빼고"
+NEGATED = re.compile(
+    r"^(은|는|을|를|이|가|도|까지는|까지|만은)?"
+    r"(빼|제외|말고|그대로|손대지|건드리지|하지마|하지말|두고|놔두|참고|채우지마|넣지마)"
+)
+JOINED = re.compile(r"^(이랑|랑|하고|와|과|,|및|그리고)")  # 나열: 부정이 앞 이름까지 걸린다
+SLOT = re.compile(r"^(칸|열|란)")  # "A를 B 칸에 넣어"
 NONE = "없음"
 
 # 모델 호출: (질문 글, 선택지) → 선택지 하나 또는 None
@@ -137,6 +148,14 @@ def _document_fields(documents: tuple[Document, ...]) -> list[FieldCandidate]:
     return list(found.values())
 
 
+def _related(name: str, columns) -> bool:
+    """명단 표를 알아보는 데만 쓰는 느슨한 비교(같은 이름이거나 한쪽이 다른 쪽을 포함). 짝을 확정하지 않는다."""
+    a = _norm(name)
+    return len(a) >= 2 and any(
+        a == _norm(c) or (len(_norm(c)) >= 2 and (a in _norm(c) or _norm(c) in a)) for c in columns
+    )
+
+
 def _roster_table(documents: tuple[Document, ...], view: TargetView):
     """명단형 표: 첫 행이 모든 문서에서 같고(머리글), 그 머리글이 대상 헤더와 둘 이상 맞는 표."""
     first = documents[0]
@@ -169,7 +188,7 @@ def _roster_table(documents: tuple[Document, ...], view: TargetView):
             == names
             for d in documents[1:]
         )
-        overlap = sum(1 for n in names if n and _resolve(n, list(view.columns)))
+        overlap = sum(1 for n in names if n and _related(n, view.columns))
         if same_everywhere and overlap >= 2 and (best is None or overlap > best[0]):
             best = (overlap, section, table, top, names)
     return best
@@ -197,7 +216,8 @@ def _roster_fields(documents, section, table, top, names) -> list[FieldCandidate
 
 
 def _work_type(request: str) -> str | None:
-    fill = bool(FILL.search(request))
+    """채우기·검토 동사가 하나만 있을 때만 정한다. "채우지 마"처럼 부정한 채우기는 채우기가 아니다."""
+    fill = bool(FILL.search(FILL_NEGATED.sub(" ", request)))
     check = bool(CHECK.search(request))
     return "fill" if fill and not check else "check" if check and not fill else None
 
@@ -206,32 +226,55 @@ def _compact(text: str) -> str:
     return re.sub(r"\s+", "", text or "")
 
 
+def _variants(name: str) -> set[str]:
+    """요청에서 찾을 글자: 이름 그대로와 괄호(단위)를 뺀 것."""
+    bare = re.sub(r"\([^)]*\)|（[^）]*）", "", name).strip()
+    return {v for v in (name.strip(), bare) if v}
+
+
 def _mentions(request: str, names: list[str]) -> list[tuple[str, str]]:
-    """요청에 글자 그대로 나온 이름과 그 뒤 몇 글자. 긴 이름 먼저 자리를 잡고, 겹치는 짧은 이름은 버린다."""
-    text = _compact(request)
-    taken: list[tuple[int, int, str]] = []
-    for name in sorted({n for n in names if _compact(n)}, key=lambda n: -len(_compact(n))):
-        needle = _compact(name)
-        start = text.find(needle)
-        while start >= 0:
-            end = start + len(needle)
+    """요청에 단어로 나온 이름과 그 뒤 글자(공백 제거, 12자).
+
+    - 단어 중간은 이름이 아니다("전화번호"의 '번호'). 앞 글자가 한글·영문·숫자면 건너뛴다.
+    - 긴 이름이 먼저 자리를 잡고, 겹치는 짧은 이름은 버린다.
+    - 작업 동사 자리("확인해줘")는 먼저 막아 둔다. 취합표에 '확인' 열이 있어도 동사를 열로 읽지 않는다.
+    """
+    taken: list[tuple[int, int, str]] = [
+        (m.start(), m.end(), "") for verbs in (FILL, CHECK) for m in verbs.finditer(request)
+    ]
+    pairs = sorted(
+        {(v, n) for n in names for v in _variants(n)}, key=lambda p: -len(_compact(p[0]))
+    )
+    for variant, name in pairs:
+        pattern = r"(?<![가-힣A-Za-z0-9])" + r"\s*".join(map(re.escape, _compact(variant)))
+        for match in re.finditer(pattern, request):
+            start, end = match.span()
             if not any(s < end and start < e for s, e, _ in taken):
-                taken.append((start, end, name))
-                break
-            start = text.find(needle, start + 1)
-    return [(name, text[e : e + 6]) for _, e, name in sorted(taken)]
+                taken.append((start, end, name))  # 같은 이름이 여러 번 나오면 모두 읽는다
+    return [(name, _compact(request[e : e + 20])[:12]) for _, e, name in sorted(taken) if name]
 
 
 def _resolve(name: str, pool: list[str]) -> str | None:
-    """같은 이름(정규화) → 하나뿐인 포함 관계(발급일 ↔ 발급일자). 여럿이면 정하지 않는다."""
-    target = _norm(name)
-    exact = [p for p in pool if _norm(p) == target]
-    if exact:
-        return exact[0]
-    if len(target) < 2:
-        return None
-    near = [p for p in pool if len(_norm(p)) >= 2 and (_norm(p) in target or target in _norm(p))]
-    return near[0] if len(near) == 1 else None
+    """정규화(공백·끝 콜론·괄호 단위·대소문자)한 이름이 같은 것이 하나뿐일 때만. 둘 이상이면 정하지 않는다.
+
+    포함 관계(발급일↔발급일자)는 코드가 확정하지 않는다. 짧은 이름이 엉뚱한 열에 붙기 때문이다
+    ('번호'↔'전화번호', P04 ① 검수 H2). 그런 짝은 모델의 선택지나 질문으로 간다.
+    """
+    exact = [p for p in pool if _norm(p) == _norm(name)]
+    return exact[0] if len(exact) == 1 else None
+
+
+def _negated(mentions: list[tuple[str, str]]) -> set[str]:
+    """ "직급이랑 점수는 빼고": 부정 표현이 붙은 이름과, 그 앞에 '랑·하고·,'로 이어진 이름들."""
+    out: set[str] = set()
+    chain: list[str] = []
+    for name, after in mentions:
+        chain.append(name)
+        if NEGATED.match(after):
+            out.update(chain)
+        if not JOINED.match(after):
+            chain = []
+    return out
 
 
 # ---------- 키 ----------
@@ -252,20 +295,35 @@ def _column_values(view: TargetView, column: str) -> list[str]:
     ]
 
 
+def _identifier_like(values: list[str]) -> bool:
+    """키로 추정해도 되는 값: 연번·O/X·작은 수처럼 우연히 겹치기 쉬운 값이 아니다."""
+    return not all(len(v) <= 1 or (v.isdigit() and len(v) <= 3) for v in values)
+
+
 def _key_candidates(
-    fields: list[FieldCandidate], view: TargetView, *, distinct: bool = True
+    fields: list[FieldCandidate], view: TargetView, *, named: bool = False
 ) -> list[tuple[int, str, str]]:
-    """(일치 수, 문서 항목, 대상 열): 문서 값이 그 열에 글자 그대로 있고, 그 열의 값이 서로 다른 쌍."""
+    """(일치 수, 문서 항목, 대상 열): 문서 값이 그 열에 글자 그대로 있는 쌍.
+
+    사용자가 키를 말했으면(named) 일치가 하나라도 있으면 된다. 추정할 때는 열 값이 서로 다르고(90%),
+    식별자처럼 보이고, 문서 값의 80% 이상이 그 열에 있어야 한다(검수 H5: 연번 1·2·3과 차수 1·2·3).
+    """
     result = []
     for column in view.columns:
         values = _column_values(view, column)
-        if not values or (distinct and len(set(values)) < max(2, int(len(values) * 0.9))):
-            continue  # 키로 말하지 않았으면 값이 거의 다른 열만 키 후보다
+        if not values:
+            continue
+        if not named and (
+            len(values) < 2
+            or len(set(values)) < max(2, int(len(values) * 0.9))
+            or not _identifier_like(values)
+        ):
+            continue
         pool = set(values)
         for field in fields:
             samples = [s for s in field.samples if s]
             hits = sum(1 for s in samples if s in pool)
-            if hits and hits * 2 >= len(samples):
+            if hits and (named or hits >= max(2, 0.8 * len(samples))):
                 result.append((hits, field.name, column))
     return sorted(result, key=lambda c: -c[0])
 
@@ -305,114 +363,145 @@ def interpret(
     *,
     choose: Chooser | None = None,
 ) -> Interpretation:
+    """코드가 확정하는 것은 이름이 정규화 후 완전히 같은 짝과, 사용자가 지목한 키뿐이다(P04 ① 검수).
+
+    그 밖의 짝(이름이 다른 것)은 모델이 선택지에서 고르고, 모델이 없거나 '없음'이면 빼고 소명한다.
+    """
     questions: list[tuple[str, tuple[str, ...]]] = []
     columns = list(view.columns)
     probe = _mentions(request, columns + [f.name for f in _document_fields(documents)])
     record, fields = _pick_record(documents, view, probe)
     names = [f.name for f in fields]
     by_name = {f.name: f for f in fields}
-    mentions = [
-        (name, after)
-        for name, after in _mentions(request, columns + names)
-        if not NEGATED.match(after)
-    ]
+    found = _mentions(request, columns + names)
+    skip = _negated(found)
+    mentions = [(n, a) for n, a in found if n not in skip]
     work_type = _work_type(request)
     if work_type is None:
         questions.append(("work_type", ("fill", "check")))
 
-    # 키: 요청에서 'X로 찾아·X 기준'으로 말한 것 → 데이터 일치 후보 가운데 하나뿐인 것
-    candidates = _key_candidates(fields, view)
+    # 키: 'X로 찾아·X 기준'으로 말한 이름 → 없으면 엄격한 데이터 일치에서 1위가 뚜렷할 때만
     key = None
     hint = next((n for n, after in mentions if KEY_AFTER.match(after)), None)
     if hint:
         column, field = _resolve(hint, columns), _resolve(hint, names)
-        # 사용자가 키를 말했으면 열 값이 겹쳐도(명단의 접수번호처럼) 받는다
-        loose = _key_candidates(fields, view, distinct=False)
-        picked = [c for c in loose if column in (None, c[2]) and field in (None, c[1])]
-        if picked:
+        picked = [
+            c
+            for c in _key_candidates(fields, view, named=True)
+            if column in (None, c[2]) and field in (None, c[1])
+        ]
+        if picked and (len(picked) == 1 or picked[0][0] > picked[1][0]):
             key = (picked[0][1], picked[0][2])
-    if key is None and candidates:
-        best = {(c[1], c[2]) for c in candidates if c[0] == candidates[0][0]}
-        if len(best) == 1:
-            key = next(iter(best))
+    else:
+        candidates = _key_candidates(fields, view)
+        if candidates and (len(candidates) == 1 or candidates[0][0] > 2 * candidates[1][0]):
+            key = (candidates[0][1], candidates[0][2])
     if key is None:
-        questions.append(("key_column", tuple(dict.fromkeys(c[2] for c in candidates))[:3]))
+        options = tuple(dict.fromkeys(c[2] for c in _key_candidates(fields, view, named=True)))
+        questions.append(("key_column", options[:3]))
     key_field, key_column = key if key else (None, None)
 
-    # 넣을 칸: 요청에 나온 이름마다 (문서 항목, 열)을 정한다. 한쪽만 정해지면 짝을 찾는다
+    # 넣을 칸
     pairs: list[tuple[str, str, str]] = []
     only_fields: list[str] = []
     only_columns: list[str] = []
-    for name, _after in mentions:
+    linked: dict[str, str] = {}  # "A를 B 칸에": 바로 뒤에 '칸·열'이 붙은 열 → 그 앞의 문서 항목
+    previous_field = None
+    for name, after in mentions:
         if name == hint:
             continue
         column = _resolve(name, [c for c in columns if c != key_column])
         field = _resolve(name, [n for n in names if n != key_field])
-        if field is not None and column is not None:
+        if column is not None and previous_field and SLOT.match(after):
+            linked[column] = previous_field  # "평가점수를 이수시간 칸에": 지목한 칸이 이긴다
+        elif field is not None and column is not None:
             pairs.append((field, column, "match"))
         elif field is not None:
-            only_fields.append(field)
-        elif column is not None:
+            if field not in only_fields:
+                only_fields.append(field)
+            previous_field = field
+            continue
+        elif column is not None and column not in only_columns:
             only_columns.append(column)
-    if only_fields and len(only_fields) == len(only_columns):
-        # "A를 B 칸에 넣어", "표 B가 문서 A와 맞는지": 한쪽 이름만 맞은 것끼리 나온 순서대로 짝짓는다
-        pairs += [(f, c, "match") for f, c in zip(only_fields, only_columns, strict=True)]
-        only_fields, only_columns = [], []
-    excluded: list[str] = []
+        previous_field = None
+    for column, field in linked.items():  # 사용자가 칸을 지목했다
+        pairs = [p for p in pairs if p[0] != field]
+        if field in only_fields:
+            only_fields.remove(field)
+        pairs.append((field, column, "match"))
+    pairs = list(dict.fromkeys(pairs))
     for field in only_fields:
         taken = {p[1] for p in pairs}
-        options = tuple(c for c in columns if c != key_column and c not in taken)
-        answer = _ask_model(choose, _column_prompt(request, by_name[field], options), options)
+        options = _order(field, tuple(c for c in columns if c != key_column and c not in taken))
+        answer = _ask_model(choose, _column_prompt(request, by_name[field], options, view), options)
         if answer:
             pairs.append((field, answer, "model"))
-        else:
-            excluded.append(field)
     for column in only_columns:
         taken = {p[0] for p in pairs}
-        options = tuple(n for n in names if n != key_field and n not in taken)
-        answer = _ask_model(choose, _field_prompt(request, column, options, by_name), options)
+        options = _order(column, tuple(n for n in names if n != key_field and n not in taken))
+        answer = _ask_model(choose, _field_prompt(request, column, options, by_name, view), options)
         if answer:
             pairs.append((answer, column, "model"))
-        else:
-            excluded.append(column)
-    if not pairs and any(w in request for w in ALL_WORDS):
-        for column in columns:
-            field = _resolve(column, names)
-            if column != key_column and field not in (None, key_field):
-                pairs.append((field, column, "match"))
-    seen: set[str] = set()
-    mapped = []
-    for field, column, source in pairs:
-        if column not in seen:
-            seen.add(column)
-            mapped.append((field, column, source))
+
+    # 한 열에 둘 이상이 몰리면 어느 것도 확정하지 않는다(검수 H7)
+    count: dict[str, int] = {}
+    for _, column, _ in pairs:
+        count[column] = count.get(column, 0) + 1
+    mapped = tuple(p for p in pairs if count[p[1]] == 1)
+    placed = {p[0] for p in mapped} | {p[1] for p in mapped}
+    requested = [*only_fields, *only_columns, *(p[0] for p in pairs), *(p[1] for p in pairs)]
+    excluded = tuple(dict.fromkeys(n for n in requested if n not in placed))
     if not mapped:
         questions.append(("target_column", tuple(c for c in columns if c != key_column)[:3]))
     record = replace(record, key_field=key_field or "")
-    return Interpretation(
-        work_type, record, key, tuple(mapped), tuple(questions), tuple(excluded), tuple(fields)
-    )
+    return Interpretation(work_type, record, key, mapped, tuple(questions), excluded, tuple(fields))
 
 
-def _field_prompt(request, column, options, by_name) -> str:
+def _examples(values) -> str:
+    shown = ", ".join(dict.fromkeys(v for v in values if v))
+    return f" (예: {shown})" if shown else ""
+
+
+def _similar(name: str, options) -> list[str]:
+    """이름이 포함 관계인 선택지(요청일 ↔ 요청일자). 코드가 확정하지 않고 모델에 단서로만 준다."""
+    a = _norm(name)
+    return [
+        o
+        for o in options
+        if len(a) >= 2 and len(_norm(o)) >= 2 and (a in _norm(o) or _norm(o) in a)
+    ]
+
+
+def _order(name: str, options: tuple[str, ...]) -> tuple[str, ...]:
+    similar = _similar(name, options)
+    return (*similar, *(o for o in options if o not in similar))
+
+
+def _hint(name: str, options) -> list[str]:
+    similar = _similar(name, options)
+    return [f"이름이 비슷한 것: {', '.join(similar)} (뜻이 같을 때만 고르세요)"] if similar else []
+
+
+def _field_prompt(request, column, options, by_name, view) -> str:
     lines = [
         f"요청: {request}",
-        f"취합표 열 '{column}'에 넣을 문서 항목을 고르세요. 맞는 항목이 없으면 '{NONE}'.",
+        f"취합표 열 '{column}'{_examples(_column_values(view, column)[:3])}에 넣을 문서 항목을 고르세요. "
+        f"맞는 항목이 없으면 '{NONE}'.",
     ]
+    lines += _hint(column, options)
     for option in options:
-        sample = ", ".join(s for s in by_name[option].samples[:2] if s)
-        lines.append(f"- {option} (예: {sample})")
+        lines.append(f"- {option}{_examples(by_name[option].samples[:2])}")
     return "\n".join(lines)
 
 
-def _column_prompt(request, field: FieldCandidate, options) -> str:
-    sample = ", ".join(s for s in field.samples[:2] if s)
+def _column_prompt(request, field: FieldCandidate, options, view) -> str:
     lines = [
         f"요청: {request}",
-        f"문서 항목 '{field.name}'(예: {sample})을 넣을 취합표 열을 고르세요. "
+        f"문서 항목 '{field.name}'{_examples(field.samples[:2])}을 넣을 취합표 열을 고르세요. "
         f"맞는 열이 없으면 '{NONE}'.",
     ]
-    lines += [f"- {o}" for o in options]
+    lines += _hint(field.name, options)
+    lines += [f"- {o}{_examples(_column_values(view, o)[:3])}" for o in options]
     return "\n".join(lines)
 
 
