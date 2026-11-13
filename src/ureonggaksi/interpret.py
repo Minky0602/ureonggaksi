@@ -207,9 +207,14 @@ def _compact(text: str) -> str:
 
 
 def _mentions(request: str, names: list[str]) -> list[tuple[str, str]]:
-    """요청에 글자 그대로 나온 이름과 그 뒤 몇 글자. 긴 이름 먼저 자리를 잡고, 겹치는 짧은 이름은 버린다."""
+    """요청에 글자 그대로 나온 이름과 그 뒤 몇 글자. 긴 이름 먼저 자리를 잡고, 겹치는 짧은 이름은 버린다.
+
+    작업 동사 자리("확인해줘")는 먼저 막아 둔다. 취합표에 '확인' 열이 있어도 동사를 열 이름으로 읽지 않는다.
+    """
     text = _compact(request)
-    taken: list[tuple[int, int, str]] = []
+    taken: list[tuple[int, int, str]] = [
+        (m.start(), m.end(), "") for verbs in (FILL, CHECK) for m in verbs.finditer(text)
+    ]
     for name in sorted({n for n in names if _compact(n)}, key=lambda n: -len(_compact(n))):
         needle = _compact(name)
         start = text.find(needle)
@@ -219,7 +224,7 @@ def _mentions(request: str, names: list[str]) -> list[tuple[str, str]]:
                 taken.append((start, end, name))
                 break
             start = text.find(needle, start + 1)
-    return [(name, text[e : e + 6]) for _, e, name in sorted(taken)]
+    return [(name, text[e : e + 6]) for _, e, name in sorted(taken) if name]
 
 
 def _resolve(name: str, pool: list[str]) -> str | None:
@@ -362,7 +367,7 @@ def interpret(
     for field in only_fields:
         taken = {p[1] for p in pairs}
         options = tuple(c for c in columns if c != key_column and c not in taken)
-        answer = _ask_model(choose, _column_prompt(request, by_name[field], options), options)
+        answer = _ask_model(choose, _column_prompt(request, by_name[field], options, view), options)
         if answer:
             pairs.append((field, answer, "model"))
         else:
@@ -370,7 +375,7 @@ def interpret(
     for column in only_columns:
         taken = {p[0] for p in pairs}
         options = tuple(n for n in names if n != key_field and n not in taken)
-        answer = _ask_model(choose, _field_prompt(request, column, options, by_name), options)
+        answer = _ask_model(choose, _field_prompt(request, column, options, by_name, view), options)
         if answer:
             pairs.append((answer, column, "model"))
         else:
@@ -394,25 +399,29 @@ def interpret(
     )
 
 
-def _field_prompt(request, column, options, by_name) -> str:
+def _examples(values) -> str:
+    shown = ", ".join(dict.fromkeys(v for v in values if v))
+    return f" (예: {shown})" if shown else ""
+
+
+def _field_prompt(request, column, options, by_name, view) -> str:
     lines = [
         f"요청: {request}",
-        f"취합표 열 '{column}'에 넣을 문서 항목을 고르세요. 맞는 항목이 없으면 '{NONE}'.",
+        f"취합표 열 '{column}'{_examples(_column_values(view, column)[:3])}에 넣을 문서 항목을 고르세요. "
+        f"맞는 항목이 없으면 '{NONE}'.",
     ]
     for option in options:
-        sample = ", ".join(s for s in by_name[option].samples[:2] if s)
-        lines.append(f"- {option} (예: {sample})")
+        lines.append(f"- {option}{_examples(by_name[option].samples[:2])}")
     return "\n".join(lines)
 
 
-def _column_prompt(request, field: FieldCandidate, options) -> str:
-    sample = ", ".join(s for s in field.samples[:2] if s)
+def _column_prompt(request, field: FieldCandidate, options, view) -> str:
     lines = [
         f"요청: {request}",
-        f"문서 항목 '{field.name}'(예: {sample})을 넣을 취합표 열을 고르세요. "
+        f"문서 항목 '{field.name}'{_examples(field.samples[:2])}을 넣을 취합표 열을 고르세요. "
         f"맞는 열이 없으면 '{NONE}'.",
     ]
-    lines += [f"- {o}" for o in options]
+    lines += [f"- {o}{_examples(_column_values(view, o)[:3])}" for o in options]
     return "\n".join(lines)
 
 
