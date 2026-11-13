@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from xml.parsers import expat
 from xml.sax.saxutils import escape, quoteattr
-from zipfile import ZipFile, ZipInfo
+from zipfile import BadZipFile, ZipFile, ZipInfo
 
 from defusedxml.ElementTree import fromstring
 from openpyxl.utils import column_index_from_string, get_column_letter
@@ -365,6 +365,15 @@ def _worksheet_parts(archive: ZipFile) -> list[str]:
     return parts
 
 
+def has_formulas(data: bytes, sheet: str) -> bool:
+    """대상 시트에 수식이 있는가(결과 안내용, FR-15). 판단할 수 없으면 True."""
+    try:
+        with ZipFile(io.BytesIO(data)) as archive:
+            return _has_formula(archive.read(sheet_part(archive, sheet)))
+    except (PatchError, KeyError, ValueError, BadZipFile):
+        return True
+
+
 def _has_formula(sheet_xml: bytes) -> bool:
     try:
         return bool(_scan(sheet_xml)["formula_cells"])
@@ -408,6 +417,58 @@ def _in_merge_follower(address: str, merges: list[str]) -> bool:
     return False
 
 
+def _check_cell(found, rows, address, value, date1904, date_styles, unlocked_styles) -> str | None:
+    """칸 하나를 쓸 수 있는지 본다. 쓸 수 없으면 PatchError(이유), 쓸 수 있으면 그 칸이 받을 서식을 돌려준다."""
+    if not ADDRESS.match(address):
+        raise PatchError(f"칸 주소 형식이 올바르지 않습니다: {address}")
+    row, col = _split(address)
+    cell = found["cells"].get(address)
+    style = cell.attrs.get("s") if cell is not None else _inherited_style(found, rows.get(row), col)
+    style_index = int(style) if style is not None and style.isdigit() else 0
+    # 막힌 칸은 분석이 이미 걸렀지만, 쓰기 직전에 다시 확인한다
+    if address in found["formula_cells"] or _in_ranges(address, found["array_refs"]):
+        raise PatchError(f"{address}: 수식 칸에는 쓰지 않습니다.")
+    if _in_merge_follower(address, found["merges"]):
+        raise PatchError(f"{address}: 병합 칸에는 쓰지 않습니다.")
+    if found["protected"] and not (
+        style_index < len(unlocked_styles) and unlocked_styles[style_index]
+    ):
+        raise PatchError(f"{address}: 보호된 칸에는 쓰지 않습니다.")
+    if value.kind == "date" and not (style_index < len(date_styles) and date_styles[style_index]):
+        raise PatchError(f"{address}: 날짜 서식이 아닌 칸에는 날짜를 쓰지 않습니다(숫자로 보인다).")
+    if value.kind == "number" and style_index < len(date_styles) and date_styles[style_index]:
+        # 날짜 서식 칸의 숫자는 Excel에서 날짜로 보인다(45000 → 2023-03-15). 날짜 거부와 짝을 맞춘다(P03-1 2차 검수 N-M1)
+        raise PatchError(f"{address}: 날짜 서식 칸에는 숫자를 쓰지 않습니다(날짜로 보인다).")
+    _cell_xml(
+        "", address, style, value, date1904
+    )  # 값 자체를 칸에 쓸 수 있는지(15자리·글자·날짜 범위)
+    return style
+
+
+def unsupported_writes(data: bytes, sheet: str, writes: dict[str, CellValue]) -> dict[str, str]:
+    """쓰기 전에 칸마다 쓸 수 없는 이유를 모은다(주소 → 이유). 분석이 그 칸을 직접 처리로 돌리는 데 쓴다.
+
+    통합문서 전체를 쓸 수 없으면(전자서명, 시트 없음, 읽을 수 없는 시트 XML) 모든 칸에 같은 이유를 단다.
+    """
+    try:
+        with ZipFile(io.BytesIO(data)) as archive:
+            if any(n.startswith("_xmlsignatures/") for n in archive.namelist()):
+                raise PatchError("전자서명이 있는 통합문서는 쓰지 않습니다(서명이 깨진다).")
+            found = _scan(archive.read(sheet_part(archive, sheet)))
+            date1904 = _date1904(archive)
+            date_styles, unlocked_styles = _styles(archive)
+    except PatchError as exc:
+        return {address: str(exc) for address in writes}
+    rows = {int(r.attrs["r"]): r for r in found["rows"]}
+    problems = {}
+    for address, value in writes.items():
+        try:
+            _check_cell(found, rows, address, value, date1904, date_styles, unlocked_styles)
+        except PatchError as exc:
+            problems[address] = str(exc)
+    return problems
+
+
 def _patch_sheet(data: bytes, writes, date1904, date_styles, unlocked_styles) -> bytes:
     found = _scan(data)
     prefix = _prefix(found["sheetData"].name)
@@ -416,34 +477,11 @@ def _patch_sheet(data: bytes, writes, date1904, date_styles, unlocked_styles) ->
     rows = {int(r.attrs["r"]): r for r in found["rows"]}
     styles: dict[str, str | None] = {}
     for address, value in writes.items():
-        if not ADDRESS.match(address):
-            raise PatchError(f"칸 주소 형식이 올바르지 않습니다: {address}")
+        styles[address] = _check_cell(
+            found, rows, address, value, date1904, date_styles, unlocked_styles
+        )
         row, col = _split(address)
         by_row.setdefault(row, []).append((col, address))
-        cell = found["cells"].get(address)
-        style = (
-            cell.attrs.get("s") if cell is not None else _inherited_style(found, rows.get(row), col)
-        )
-        styles[address] = style
-        style_index = int(style) if style is not None and style.isdigit() else 0
-        # 막힌 칸은 분석이 이미 걸렀지만, 쓰기 직전에 다시 확인한다
-        if address in found["formula_cells"] or _in_ranges(address, found["array_refs"]):
-            raise PatchError(f"{address}: 수식 칸에는 쓰지 않습니다.")
-        if _in_merge_follower(address, found["merges"]):
-            raise PatchError(f"{address}: 병합 칸에는 쓰지 않습니다.")
-        if found["protected"] and not (
-            style_index < len(unlocked_styles) and unlocked_styles[style_index]
-        ):
-            raise PatchError(f"{address}: 보호된 칸에는 쓰지 않습니다.")
-        if value.kind == "date" and not (
-            style_index < len(date_styles) and date_styles[style_index]
-        ):
-            raise PatchError(
-                f"{address}: 날짜 서식이 아닌 칸에는 날짜를 쓰지 않습니다(숫자로 보인다)."
-            )
-        if value.kind == "number" and style_index < len(date_styles) and date_styles[style_index]:
-            # 날짜 서식 칸의 숫자는 Excel에서 날짜로 보인다(45000 → 2023-03-15). 날짜 거부와 짝을 맞춘다(2차 검수 N-M1)
-            raise PatchError(f"{address}: 날짜 서식 칸에는 숫자를 쓰지 않습니다(날짜로 보인다).")
     sheet_data = found["sheetData"]
     new_rows: dict[int, list[bytes]] = {}
     for row_number, targets in sorted(by_row.items()):

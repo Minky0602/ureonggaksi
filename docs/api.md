@@ -389,10 +389,16 @@ def review(plan: Plan, change_id: str,
 class Approval:                  # ERD Approval(실행당 1개)
     run_id: str; approved_change_ids: tuple[str, ...]   # area=="done"이고 write_selected인 칸만
     input_fingerprints: Pairs; rule_hash: str; plan_hash: str; review_hash: str
-    output_path: Path; evidence_path: Path; manual_path: Path | None; approved_at: str
+    output_path: Path | None      # 값 검토는 None(XLSX를 만들지 않음)
+    evidence_path: Path; manual_path: Path | None; approved_at: str
+    # save_result ①은 승인 객체의 모든 필드(plan_hash·run_id·approved_change_ids·review_hash·rule_hash·입력 지문)를
+    # 계획에서 다시 계산해 비교하고, 대상 스냅샷 바이트의 지문도 계산해 비교한다
+    # rule_hash는 plan.rule에서 다시 계산하고, 시트 = 규칙의 대상 시트, 경로 정합성(채우기만 XLSX, 확인필요는 직접 처리가 있을 때만)을 본다
 
-def approve(plan: Plan, output_path: Path) -> Approval
-    # 예외: PLAN_IS_SAMPLE, NOTHING_TO_WRITE, PATH_CONFLICT
+def approve(plan: Plan, output_path: Path | None = None) -> Approval   # None이면 기본 출력 이름
+    # analyze는 완료 영역의 쓸 칸 가운데 Excel에 그대로 넣을 수 없는 칸을 미리 write_unsupported로 돌린다(미리보기 = 실제 쓰기)
+    # 예외: PLAN_IS_SAMPLE, NOTHING_TO_WRITE, PATH_CONFLICT(이미 있음·입력과 같음·폴더 없음·.xlsx가 아님)
+    # 기본 이름이 결과·근거·확인필요 중 하나와 겹치면 _2, _3…을 붙인다
     # manual_path = <출력명>_확인필요.txt. 직접 처리 항목이 0건이면 None
 
 @dataclass(frozen=True)
@@ -417,6 +423,9 @@ class ResultPackage:             # ERD ResultPackage
     error: ErrorCode | None; cleanup_failed: tuple[Path, ...]   # 지우지 못한 임시·부분 파일
 
 def save_result(plan: Plan, approval: Approval, *, progress: Progress, cancel: Cancel) -> ResultPackage
+    # (P03-2 구현 `save.py`) 기본 출력 이름 <대상명>_우렁각시_<YYYYMMDD-HHMM>.xlsx(값 검토는 _검토_), 근거 <출력명>.evidence.json,
+    # 확인필요 <출력명>_확인필요.txt. ResultPackage.error는 코드 문자열로 시작한다("VERIFY_FAILED: …").
+    # 근거 JSON에는 문서 원문값이 들어간다(OQ-05 기본값, 2026-11-12 사용자 확인). 첫머리 notice에 그 사실을 적는다.
     # 예외(파일 쓰기 시작 전): APPROVAL_INVALID, PATH_CONFLICT
     # 그 뒤의 실패·취소는 예외 없이 ResultPackage(status="failed"|"cancelled")로 돌려준다.
 
@@ -462,9 +471,9 @@ ureonggaksi commit --plan 계획.plan.json --plan-hash <값>
 | ① 사전 확인 | `approval.plan_hash == hash(plan)`, 스냅샷 지문 == 승인 지문, 디스크 입력 지문 == 승인 지문, 출력 경로가 모두 없음 | 예외(파일 생성 없음) |
 | ② 최소 변경 작성 | **스냅샷 바이트**에서 대상 시트 XML의 작성할 `<c>`만 고치고 나머지 패키지 항목은 내용 그대로 복사해 임시 XLSX 작성(아래) | failed, 임시 파일 정리 |
 | ③ 재열기·비교 검증 | 작성 값 대조 + 원본과 패키지 비교(아래) | failed(부분 완료로 낮추지 않음) |
-| ④' 확인필요 작성 | 직접 처리 항목이 있으면 임시 TXT 작성(UTF-8) | failed |
-| ④ 근거 작성 | 임시 JSON 작성. XLSX·TXT sha256 포함 | failed |
-| ⑤ 공개 직전 확인 | 디스크 입력 지문을 다시 계산(FR-14·15) | failed `INPUT_CHANGED` |
+| ④' 확인필요 작성 | 직접 처리 항목이 있으면 임시 TXT 작성(UTF-8) | failed `EVIDENCE_FAILED` |
+| ④ 근거 작성 | 임시 JSON 작성. XLSX·TXT sha256 포함(구현은 ⑤ 결과를 담으려고 ⑤ 뒤에 작성) | failed `EVIDENCE_FAILED` |
+| ⑤ 공개 직전 확인 | 디스크 입력 지문을 다시 계산(FR-14·15). 결과는 `Check(scope="inputs")`로 근거에 남긴다 | failed `INPUT_CHANGED` |
 | ⑥ XLSX 공개 | 덮어쓰기 없는 공개. 이미 있으면 실패 | failed |
 | ⑥' TXT 공개 | 덮어쓰기 없는 공개 | ⑥의 XLSX를 지문 확인 후 삭제 |
 | ⑦ JSON 공개 | 덮어쓰기 없는 공개. **JSON이 커밋 기록이다** | ⑥·⑥' 파일을 지문 확인 후 삭제, 못 지우면 `cleanup_failed` |
@@ -502,7 +511,7 @@ ureonggaksi commit --plan 계획.plan.json --plan-hash <값>
 | 해시 | 포함하는 것 |
 |---|---|
 | `rule_hash` | `RuleSet` 전체 |
-| `plan_hash` | 입력 지문(file_id 순), rule_hash, scope, change_id 순으로 정렬한 각 항목의 (change_id, target_ref, previous, 최종값, status, write_selected, evidence_id 목록), 출력 경로 3개(XLSX·JSON·TXT 또는 null) |
+| `plan_hash` | 입력 지문(file_id 순), rule_hash, scope, 시트 이름, change_id 순으로 정렬한 각 항목의 (change_id, target_ref, previous, 최종값, status, write_selected, evidence_id 목록), 문서 없는 행 (행, 키), 출력 경로 3개(XLSX·JSON·TXT 또는 null). 시트·문서 없는 행은 P03-2 검수로 추가(쓰는 위치·결과 상태를 바꿈) |
 | `review_hash` | change_id 순으로 정렬한 각 항목의 (corrected, review_reason, resolved, write_selected) |
 
 - **값 변환:** CellValue는 `{kind, value, unit}`으로 바꾼다. Decimal은 지수 없는 정규 문자열, 날짜는 ISO 8601이다.
@@ -547,7 +556,7 @@ ManualKind = Literal["existing_differs", "no_row", "source_conflict", "unreadabl
 | `no_row` 들어갈 행을 못 정함 | `no_target` · `multi_target` | 4 | 같은 키의 행이 없음 / 여러 개임 (후보 주소). 키가 문서와 다르면 파일 오류 의심 | 파일의 키를 확인하거나 맞는 행에 직접 입력 | 아니오 |
 | `source_conflict` 원본끼리 값이 다름 | `conflict` | 7 | 같은 칸에 문서마다 다른 값 (원본별 값) | 원본을 확인해 직접 입력 | 아니오 |
 | `unreadable_value` 값을 확실히 못 읽음 | `missing_value` · `ambiguous_field` · `ambiguous_unit` · `parse_failed` · `needs_rounding` · `tracked_change` | 2·3 | 값을 찾지 못함 / 여러 곳 / 단위 불명 / 숫자·날짜로 못 읽음 / 반올림 필요 / 변경 추적 남음 | 원문을 확인해 직접 입력 | `default_unit`·`date_order`·`rounding`만 |
-| `blocked_cell` 쓰면 안 되는 칸 | `blocked_formula` · `blocked_merged` · `blocked_protected` | 5 | 수식·병합·보호 칸 | 칸 구조를 확인해 직접 입력 | 아니오 |
+| `blocked_cell` 쓰면 안 되는 칸 | `blocked_formula` · `blocked_merged` · `blocked_protected` · `write_unsupported` | 5 | 수식·병합·보호 칸 / 이 칸에 그대로 넣을 수 없음(날짜 서식이 아닌 칸의 날짜, 15자리 초과 숫자 등, 2026-11-12 사용자 결정) | 칸 구조를 확인해 직접 입력 | 아니오 |
 | `unreadable_file` 파일을 읽지 못함 | `source_failed` | – | 파일을 읽지 못함 (사유) | 파일을 확인해 다시 넣기 | 아니오 |
 | `no_document` 문서가 없는 행 | `target_without_source` | – | 이 행의 값을 가진 문서가 입력에 없음 (행 주소·키) | 문서가 빠졌는지 확인 | 아니오 |
 | `check_diff` 값 검토 차이 | `mismatch` · `missing_in_sheet` | 6 | 표와 문서가 다름 / 표가 비어 있음 (표값 · 문서값) | 맞는 값을 확인해 직접 고치기 | 아니오 |
@@ -558,7 +567,7 @@ ManualKind = Literal["existing_differs", "no_row", "source_conflict", "unreadabl
 | 파일 | 위치 | 핵심 내용 | Schema 작성 |
 |---|---|---|---|
 | 규칙 `rules/<id>/<rev>.json` | 사용자 로컬 | `schema_version: 3`, name, revision, request, `RuleSet`(work_type·policy 포함), rule_hash. 원본 경로·원문값은 넣지 않는다 | P02 |
-| 근거 `<출력명>.evidence.json` | 출력 XLSX 옆 | run_id, 입력 file_id·경로·지문, 규칙 스냅샷, 해석 한 줄, 승인 해시, ChangeItem 전체(근거·보정·area 포함), checks, summary, XLSX·TXT sha256 | P03 |
+| 근거 `<출력명>.evidence.json` | 출력 XLSX 옆 | 첫머리 notice(원문값 포함 안내), run_id, 입력 file_id·경로·지문, 규칙 스냅샷, 해석 한 줄(`interpretation`, P04 전에는 null), 승인 해시, ChangeItem 전체(근거·보정·area 포함), checks, summary, XLSX·TXT sha256 | P03 |
 | 확인필요 `<출력명>_확인필요.txt` | 출력 XLSX 옆(값 검토는 대상 XLSX 옆) | 3절 종류별 형식. 안 채운 칸·차이가 있을 때만 | P03 |
 | CLI 계획 `<이름>.plan.json` | 사용자 지정 | request, 입력 경로·지문, RuleSet, 출력 경로, 미리보기 요약, plan_hash | P04 |
 

@@ -70,7 +70,7 @@ KINDS: tuple[KindInfo, ...] = (
         "blocked_cell",
         "쓰면 안 되는 칸",
         "칸 구조를 확인해 직접 입력",
-        ("blocked_formula", "blocked_merged", "blocked_protected"),
+        ("blocked_formula", "blocked_merged", "blocked_protected", "write_unsupported"),
     ),
     KindInfo(
         "unreadable_file",
@@ -87,6 +87,17 @@ KINDS: tuple[KindInfo, ...] = (
     ),
     KindInfo("deselected", "직접 처리로 돌린 칸", "직접 입력", ("deselected",)),
 )
+KIND_WHY = {  # 확인필요 파일의 묶음별 "왜:" 줄(api 3절)
+    "existing_differs": "칸에 이미 다른 값이 있어 덮어쓰지 않았습니다.",
+    "no_row": "문서의 키와 맞는 행이 없거나 여러 개라 넣을 행을 정하지 못했습니다.",
+    "source_conflict": "같은 칸에 넣을 값이 원본마다 달라 하나를 고르지 않았습니다.",
+    "unreadable_value": "값이 비었거나 형식·단위가 애매해 확실히 읽지 못했습니다.",
+    "blocked_cell": "수식·병합·보호 칸이거나 Excel 칸에 그대로 넣을 수 없는 값입니다.",
+    "unreadable_file": "파일을 열지 못했거나 규칙에 맞는 내용을 찾지 못했습니다.",
+    "no_document": "표에는 있지만 맞는 문서가 없습니다.",
+    "check_diff": "표와 문서의 값이 다르거나 표에 빠져 있습니다.",
+    "deselected": "사용자가 직접 처리로 돌렸습니다.",
+}
 KIND_BY_CODE = {code: info for info in KINDS for code in info.codes}
 KIND_ORDER = {info.kind: index for index, info in enumerate(KINDS)}
 
@@ -104,6 +115,7 @@ REASONS = {
     "blocked_formula": "수식 칸",
     "blocked_merged": "병합 칸",
     "blocked_protected": "보호 칸",
+    "write_unsupported": "이 칸에 그대로 넣을 수 없음 ({detail})",
     "source_failed": "파일을 읽지 못함 ({detail})",
     "no_records": "문서에서 레코드(규칙이 가리키는 표)를 찾지 못함",
     "target_without_source": "이 행의 값을 가진 문서가 입력에 없음 (키 {key})",
