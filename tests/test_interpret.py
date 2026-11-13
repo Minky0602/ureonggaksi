@@ -195,9 +195,11 @@ def test_negated_fill_and_mixed_intent_ask_for_the_work_type(setup):
 
 
 def test_units_in_brackets_do_not_make_two_columns_one_name():
-    """H3: '금액(천원)'·'금액(원)'은 '금액'과 하나로 정하지 않는다."""
+    """H3·2차 N01·N02: 괄호 안 단위까지 같아야 같은 이름이다(천원 값을 원 칸에 쓰지 않는다)."""
     assert _resolve("금액", ["금액(천원)", "금액(원)"]) is None
-    assert _resolve("금액", ["금액(원)", "비고"]) == "금액(원)"
+    assert _resolve("금액(원)", ["금액(원)", "비고"]) == "금액(원)"
+    assert _resolve("예산(천원)", ["예산(원)", "비고"]) is None
+    assert _resolve("금액(천원)", ["금액", "비고"]) is None
 
 
 def test_two_names_competing_for_one_column_are_both_reported(setup):
@@ -225,3 +227,137 @@ def test_unnamed_key_is_not_guessed_from_serial_numbers(tmp_path):
     result = interpret("이수시간 채워줘", documents, view)
     assert result.key is None and "key_column" in [q[0] for q in result.questions]
     assert build_rule(result, view) is None
+
+
+# ---------- 2차 독립 검수: 지목 규칙·부정·키 추정·작업 종류 ----------
+
+
+@pytest.mark.parametrize(
+    "request_text, expected",
+    [
+        # 지목은 "A를 B 칸에"뿐이다. "A 채우고 B 칸은 비워 둬"는 지목이 아니다
+        ("이름 기준으로 직원번호 채우고 번호 칸은 비워 둬", ()),
+        ("이름 기준으로 연락처 넣어줘 번호 칸 말고", ()),
+        ("이름 기준으로 연락처 채우고 비고란은 그대로", ()),
+        # 부정한 칸은 버리고 다음 지목을 쓴다
+        ("이름 기준으로 연락처를 비고 칸에 넣지 말고 번호 칸에 넣어줘", (("연락처", "번호"),)),
+        # 같은 이름 짝보다 지목한 칸이 이긴다
+        ("이름 기준으로 이수시간을 점수 칸에 넣어줘", (("이수시간", "점수"),)),
+        # 한 칸에 둘을 지목하면 어느 것도 정하지 않는다
+        ("이름 기준으로 직원번호를 번호 칸에, 연락처를 번호 칸에 넣어줘", ()),
+        # 넣을 것이 문서 항목이 아니면(열 이름 '점수') 그 칸은 정하지 않는다
+        ("이름으로 찾아서 점수를 이수시간 칸에 넣어줘", ()),
+    ],
+)
+def test_pointing_needs_an_object_and_a_cell_and_respects_negation(setup, request_text, expected):
+    result = run(setup, request_text)
+    assert {(f, c) for f, c, _ in result.fields} == set(expected)
+
+
+def test_excluded_columns_are_not_offered_to_the_model(setup):
+    """빼라고 한 열은 모델이 고를 수 없다(2차 검수 E04·X23: 가짜 모델이 '비고'를 골랐다)."""
+    asked = []
+    result = run(setup, "이름 기준으로 직원번호 채우고 비고는 비워둬", choose=first_option(asked))
+    assert all("비고" not in options for _, options in asked)
+    assert all(column != "비고" for _, column, _ in result.fields)
+
+
+def test_keep_as_is_is_not_negation_when_it_modifies_the_verb(setup):
+    """'그대로 옮겨줘'는 빼라는 말이 아니다(2차 검수 E02)."""
+    result = run(setup, "이름 기준으로 이수시간을 그대로 옮겨줘")
+    assert ("이수시간", "이수시간") in {(f, c) for f, c, _ in result.fields}
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "이름 기준으로 이수시간 기입 상태 봐줘",
+        "이름 기준으로 이수시간 반영 여부 봐줘",
+        "이름 기준으로 이수시간 입력 누락 없나 봐줘",
+    ],
+)
+def test_fill_words_used_as_nouns_in_a_check_request_ask_for_the_work_type(setup, request_text):
+    assert run(setup, request_text).work_type is None
+
+
+def _single_table_docs(rows_per_doc):
+    out = []
+    for rows in rows_per_doc:
+        body = table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
+        out.append(["<hp:p><hp:run>" + body + "</hp:run></hp:p>"])
+    return out
+
+
+def test_unnamed_key_is_not_guessed_from_a_differently_named_column(tmp_path):
+    """2차 검수 K01: 문서 발급일과 취합표 교육일이 우연히 같아도 키로 정하지 않는다."""
+    dates = ["2026-11-01", "2026-11-02", "2026-11-03"]
+    docs = _single_table_docs(
+        [
+            [("성명", n), ("발급일", d), ("이수시간", h)]
+            for n, d, h in zip(
+                ["가나다", "라마바", "사아자"], dates, ["12", "8", "16"], strict=True
+            )
+        ]
+    )
+    sheet = [["이름", "교육일", "이수시간"]] + [
+        [o, d, None] for o, d in zip(["김", "이", "박"], dates, strict=True)
+    ]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("이수시간 채워줘", documents, view)
+    assert result.key is None and build_rule(result, view) is None
+
+
+def test_named_key_is_not_linked_by_small_numbers(tmp_path):
+    """2차 검수 K03: '번호로 찾아'라도 번호 1·2·3과 문서 차수 1·2·3의 우연한 일치는 키가 아니다."""
+    docs = _single_table_docs(
+        [
+            [("차수", str(i)), ("성명", n), ("이수시간", "8")]
+            for i, n in enumerate(["가나다", "라마바", "사아자"], 1)
+        ]
+    )
+    sheet = [["번호", "이름", "이수시간"]] + [[str(i), o, None] for i, o in enumerate("김이박", 1)]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("번호로 찾아서 이수시간 채워줘", documents, view)
+    assert result.key is None and build_rule(result, view) is None
+
+
+def test_grouping_word_is_not_a_key(tmp_path):
+    """2차 검수 K04: '직급별로'는 묶기다. 값이 겹치는 직급 열을 키로 정하지 않는다."""
+    docs = _single_table_docs(
+        [
+            [("성명", n), ("직급", t), ("이수시간", "8")]
+            for n, t in zip(
+                ["가나다", "라마바", "사아자"], ["주무관", "주무관", "팀장"], strict=True
+            )
+        ]
+    )
+    sheet = [
+        ["이름", "직급", "이수시간"],
+        ["김", "주무관", None],
+        ["이", "주무관", None],
+        ["박", "팀장", None],
+    ]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("직급별로 이수시간 채워줘", documents, view)
+    assert result.key is None
+
+
+def test_named_key_that_is_then_negated_is_asked_not_replaced(setup):
+    """2차 검수 R03: '이름으로 찾아서 이름 말고'는 충돌이다. 발급번호 같은 다른 키를 추정하지 않는다."""
+    result = run(setup, "이름으로 찾아서 이름 말고 이수시간 채워줘")
+    assert result.key is None and "key_column" in [q[0] for q in result.questions]
+
+
+def test_same_name_with_a_different_unit_is_not_offered_to_the_model(tmp_path):
+    """2차 검수 N01: 예산(천원) 값을 예산(원) 칸에 넣는 선택지는 모델에게도 주지 않는다."""
+    docs = _single_table_docs(
+        [
+            [("성명", n), ("예산(천원)", b)]
+            for n, b in zip(["가나다", "라마바"], ["150", "80"], strict=True)
+        ]
+    )
+    sheet = [["이름", "예산(원)", "비고"], ["가나다", None, None], ["라마바", None, None]]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    asked = []
+    interpret("이름 기준으로 예산 채워줘", documents, view, choose=first_option(asked))
+    assert all("예산(원)" not in options for _, options in asked)
