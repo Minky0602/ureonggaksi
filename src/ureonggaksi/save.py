@@ -21,7 +21,7 @@ from .errors import Pairs, ServiceError
 from .manual import KIND_WHY, KINDS, ManualItem
 from .models import CellValue
 from .patch import Check, PatchError, compare_packages, has_formulas, patch_xlsx
-from .rules import canonical_json, rule_to_dict
+from .rules import canonical_json, rule_hash, rule_to_dict
 from .storage import local_path
 
 Progress = Callable[[str, int, int], None]
@@ -83,7 +83,10 @@ def _sha(data: bytes) -> str:
 
 
 def plan_hash(plan: Plan, output_path, evidence_path, manual_path) -> str:
-    """입력 지문(file_id 순), rule_hash, scope, change_id 순 항목, 출력 경로 3개. run_id는 넣지 않는다."""
+    """입력 지문(file_id 순), rule_hash, scope, 시트, change_id 순 항목, 문서 없는 행, 출력 경로 3개.
+
+    run_id는 넣지 않는다. 시트와 문서 없는 행은 결과 상태·쓰는 위치를 바꾸므로 넣는다(P03-2 2차 검수 M1).
+    """
     files = sorted(
         [(f.file_id, f.sha256 or "") for f in (*plan.inputs.sources, plan.inputs.target)]
     )
@@ -104,7 +107,9 @@ def plan_hash(plan: Plan, output_path, evidence_path, manual_path) -> str:
         files,
         plan.rule_hash,
         scope,
+        plan.sheet,
         items,
+        [[row, key] for row, key in plan.unmatched_rows],
         [_path_key(p) for p in (output_path, evidence_path, manual_path)],
     ]
     return _sha(canonical_json(payload).encode("utf-8"))
@@ -393,6 +398,8 @@ def _remove_if_same(path: Path, sha: str) -> bool:
         if _sha(path.read_bytes()) == sha:
             path.unlink()
         return True
+    except FileNotFoundError:
+        return True  # 이미 없다(2차 검수 L4)
     except OSError:
         return False
 
@@ -433,6 +440,17 @@ def _no_progress(stage: str, current: int, total: int) -> None:
     return None
 
 
+def _paths_consistent(plan: Plan, approval: Approval) -> bool:
+    """채우기는 XLSX가 있고 값 검토는 없다. 근거·확인필요 이름은 결과 이름에서 나오고, 확인필요는 직접 처리가 있을 때만."""
+    if (plan.rule.work_type == "check") != (approval.output_path is None):
+        return False
+    evidence = approval.evidence_path
+    base = approval.output_path or evidence.with_name(
+        evidence.name.removesuffix(".evidence.json") + ".xlsx"
+    )
+    return (evidence, approval.manual_path) == _companions(base, bool(manual_items(plan)))
+
+
 def save_result(
     plan: Plan,
     approval: Approval,
@@ -449,6 +467,9 @@ def save_result(
         or approval.approved_change_ids != _approved_ids(plan)
         or approval.review_hash != review_hash(plan)
         or approval.rule_hash != plan.rule_hash
+        or rule_hash(plan.rule) != plan.rule_hash
+        or (plan.rule.target.sheet and plan.sheet != plan.rule.target.sheet)
+        or not _paths_consistent(plan, approval)
     ):
         raise ServiceError(
             "APPROVAL_INVALID", "승인한 뒤 계획이 바뀌었습니다. 다시 미리보기한 뒤 저장하세요."
@@ -467,13 +488,15 @@ def save_result(
         )
     _check_paths(plan, [approval.output_path, approval.evidence_path, approval.manual_path])
     temps: list[Path] = []
-    package = _save(plan, approval, progress, cancel, temps)
-    leftover = []
-    for temp in temps:
-        try:
-            temp.unlink(missing_ok=True)
-        except OSError:
-            leftover.append(temp)
+    leftover: list[Path] = []
+    try:
+        package = _save(plan, approval, progress, cancel, temps)
+    finally:  # KeyboardInterrupt 같은 BaseException에도 숨김 임시 파일을 남기지 않는다(2차 검수 L2)
+        for temp in temps:
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                leftover.append(temp)
     if leftover:
         package = replace(package, cleanup_failed=(*package.cleanup_failed, *leftover))
     return package
@@ -499,13 +522,16 @@ def _save(
     """임시 파일은 호출한 쪽이 지운다(지우지 못한 것을 cleanup_failed로 알리려고)."""
     folder = approval.evidence_path.parent
     published: list[tuple[Path, str]] = []
+    partial: list[Path] = []  # 공개 도중 실패해 지우지 못하고 출력 이름에 남은 파일
     checks: list[Check] = []
     snapshot = plan.inputs.snapshot("target")
     summary = _summary(plan, has_formulas(snapshot, plan.sheet))
 
     def result(status, error=None, output_sha=None, evidence_sha=None):
         done = status in ("completed", "partial")
-        cleanup = () if done else tuple(p for p, d in published if not _remove_if_same(p, d))
+        cleanup = (
+            () if done else (*(p for p, d in published if not _remove_if_same(p, d)), *partial)
+        )
         return ResultPackage(
             plan.run_id,
             status,
@@ -572,7 +598,14 @@ def _save(
             (approval.evidence_path, evidence_sha),
         ]
         for temp, (final, sha) in zip(temps, [f for f in finals if f[0] is not None], strict=True):
-            publish_new(temp, final)
+            try:
+                publish_new(temp, final)
+            except FileExistsError:
+                raise  # 남의 파일이다. 건드리지 않는다
+            except BaseException:
+                if final.exists():  # 배타적으로 만든 우리 파일인데 publish_new가 지우지 못했다
+                    partial.append(final)
+                raise
             published.append((final, sha))
         return result(status, None, output_sha, evidence_sha)
     except Exception as exc:  # 쓰기 시작 뒤의 실패는 예외가 아니라 failed 결과다(api 5절)

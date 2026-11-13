@@ -347,3 +347,65 @@ def test_output_name_must_be_xlsx(tmp_path):
     with pytest.raises(ServiceError) as info:
         approve(plan, tmp_path / "결과.hwpx")
     assert info.value.code == "PATH_CONFLICT"
+
+
+def test_changed_plan_or_path_fields_after_approval_are_refused(tmp_path):
+    """2차 검수 M1: 승인 뒤 시트·규칙·문서 없는 행이 바뀌거나, 경로 필드가 계획과 맞지 않으면 쓰지 않는다."""
+    from dataclasses import replace
+
+    docs = [("정상", plan_doc("0012", "350만원")), ("없음", plan_doc("0099", "1원"))]
+    plan, _, _ = make_plan(tmp_path, docs)
+    approval = approve(plan, output(tmp_path))
+    changed_plans = [
+        replace(plan, sheet="다른시트"),
+        replace(plan, rule=replace(plan.rule, work_type="check")),
+        replace(plan, unmatched_rows=()),
+    ]
+    for changed in changed_plans:
+        with pytest.raises(ServiceError) as info:
+            save_result(changed, approval)
+        assert info.value.code == "APPROVAL_INVALID"
+
+    def rehash(**fields):
+        forged = replace(approval, **fields)
+        paths = (forged.output_path, forged.evidence_path, forged.manual_path)
+        return replace(forged, plan_hash=plan_hash(plan, *paths))
+
+    for forged in (rehash(output_path=None), rehash(manual_path=None)):
+        with pytest.raises(ServiceError) as info:
+            save_result(plan, forged)
+        assert info.value.code == "APPROVAL_INVALID"
+    assert not list(tmp_path.glob("결과*"))
+
+
+def test_partial_file_left_by_a_failed_publish_is_reported(tmp_path, monkeypatch):
+    """2차 검수 L1: 공개 도중 실패하고 그 파일도 지우지 못하면 cleanup_failed로 알린다."""
+    plan, _, _ = make_plan(tmp_path, [("a", plan_doc("0012", "350만원"))])
+    approval = approve(plan, output(tmp_path))
+
+    def half_written(temp, final):
+        final.write_bytes(b"half")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(save_module, "publish_new", half_written)
+    package = save_result(plan, approval)
+    assert package.status == "failed" and approval.output_path in package.cleanup_failed
+
+
+def test_interrupt_still_removes_temporary_files(tmp_path):
+    """2차 검수 L2: KeyboardInterrupt에도 숨김 임시 파일을 남기지 않는다."""
+    plan, _, _ = make_plan(tmp_path, [("a", plan_doc("0012", "350만원"))])
+    approval = approve(plan, output(tmp_path))
+
+    def interrupt(stage, current, total):
+        if stage == "입력 재확인":
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        save_result(plan, approval, progress=interrupt)
+    assert not list(tmp_path.glob(".ureonggaksi-*"))
+
+
+def test_already_missing_rollback_file_is_not_reported(tmp_path):
+    """2차 검수 L4: 지울 파일이 이미 없으면 정리된 것으로 본다."""
+    assert save_module._remove_if_same(tmp_path / "없음.xlsx", "0" * 64) is True

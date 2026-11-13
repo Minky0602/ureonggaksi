@@ -393,6 +393,7 @@ class Approval:                  # ERD Approval(실행당 1개)
     evidence_path: Path; manual_path: Path | None; approved_at: str
     # save_result ①은 승인 객체의 모든 필드(plan_hash·run_id·approved_change_ids·review_hash·rule_hash·입력 지문)를
     # 계획에서 다시 계산해 비교하고, 대상 스냅샷 바이트의 지문도 계산해 비교한다
+    # rule_hash는 plan.rule에서 다시 계산하고, 시트 = 규칙의 대상 시트, 경로 정합성(채우기만 XLSX, 확인필요는 직접 처리가 있을 때만)을 본다
 
 def approve(plan: Plan, output_path: Path | None = None) -> Approval   # None이면 기본 출력 이름
     # analyze는 완료 영역의 쓸 칸 가운데 Excel에 그대로 넣을 수 없는 칸을 미리 write_unsupported로 돌린다(미리보기 = 실제 쓰기)
@@ -510,7 +511,7 @@ ureonggaksi commit --plan 계획.plan.json --plan-hash <값>
 | 해시 | 포함하는 것 |
 |---|---|
 | `rule_hash` | `RuleSet` 전체 |
-| `plan_hash` | 입력 지문(file_id 순), rule_hash, scope, change_id 순으로 정렬한 각 항목의 (change_id, target_ref, previous, 최종값, status, write_selected, evidence_id 목록), 출력 경로 3개(XLSX·JSON·TXT 또는 null) |
+| `plan_hash` | 입력 지문(file_id 순), rule_hash, scope, 시트 이름, change_id 순으로 정렬한 각 항목의 (change_id, target_ref, previous, 최종값, status, write_selected, evidence_id 목록), 문서 없는 행 (행, 키), 출력 경로 3개(XLSX·JSON·TXT 또는 null). 시트·문서 없는 행은 P03-2 검수로 추가(쓰는 위치·결과 상태를 바꿈) |
 | `review_hash` | change_id 순으로 정렬한 각 항목의 (corrected, review_reason, resolved, write_selected) |
 
 - **값 변환:** CellValue는 `{kind, value, unit}`으로 바꾼다. Decimal은 지수 없는 정규 문자열, 날짜는 ISO 8601이다.
