@@ -323,7 +323,13 @@ def _bounds(ref: str) -> Bounds:
 
 
 def _blocked(
-    formula_sheet, array_ranges, merged_followers: set, protected: bool, row: int, col: int
+    formula_sheet,
+    array_ranges,
+    merged_followers: set,
+    protected: bool,
+    row: int,
+    col: int,
+    custom_rows: frozenset = frozenset(),
 ) -> Blocked:
     """배열 수식 범위는 포함 여부만 보고(보통 몇 개), 병합은 미리 펼친 집합을 본다.
 
@@ -336,19 +342,37 @@ def _blocked(
         return "formula"
     if (row, col) in merged_followers:
         return "merged"
-    locked = source.protection.locked if exists else _inherited_locked(formula_sheet, row, col)
+    if exists:
+        locked = source.protection.locked
+    else:
+        locked = _inherited_locked(formula_sheet, row, col, custom_rows)
     if protected and locked:
         return "protected"
     return ""
 
 
-def _inherited_locked(sheet, row: int, col: int) -> bool:
+def _custom_format_rows(data: bytes, sheet: str) -> frozenset:
+    """대상 시트 XML에서 customFormat="1"인 행 번호. 읽을 수 없으면 빈 집합(행 서식 없음으로 본다)."""
+    from .patch import PatchError, _scan, sheet_part
+
+    try:
+        with ZipFile(io.BytesIO(data)) as archive:
+            found = _scan(archive.read(sheet_part(archive, sheet)))
+    except (PatchError, KeyError, ValueError, BadZipFile):
+        return frozenset()
+    return frozenset(
+        int(r.attrs["r"]) for r in found["rows"] if r.attrs.get("customFormat") in ("1", "true")
+    )
+
+
+def _inherited_locked(sheet, row: int, col: int, custom_rows: frozenset = frozenset()) -> bool:
     """XML에 없는 칸의 잠금: 행 서식(customFormat) → 열 서식 → 기본(잠김).
 
-    patch.py의 서식 상속과 같은 규칙이다(P03-1 검수 M3: 분석과 쓰기가 다르게 판정하지 않게).
+    patch.py의 서식 상속과 같은 규칙이다(P03-1 검수 M3). openpyxl은 행에 s만 있어도 customFormat을 True로
+    돌려주지만 Excel은 XML의 customFormat="1"일 때만 행 서식을 적용하므로(2차 검수 실측) custom_rows로 판정한다.
     """
     row_dim = sheet.row_dimensions.get(row)
-    if row_dim is not None and row_dim.customFormat:
+    if row_dim is not None and row in custom_rows:
         return row_dim.protection.locked
     for dim in sheet.column_dimensions.values():
         if dim.min and dim.max and dim.min <= col <= dim.max:
@@ -422,6 +446,7 @@ def _inspect(data, sheet, header_row, data_rows, preview_rows, max_sheet_cells) 
             if (r, c) != (m.min_row, m.min_col)
         }
         protected = bool(formula_sheet.protection.sheet)
+        custom_rows = _custom_format_rows(data, name)
         cells = []
         for row in range(first, min(last, first + preview_rows - 1) + 1):
             for col in range(1, max_col + 1):
@@ -430,7 +455,13 @@ def _inspect(data, sheet, header_row, data_rows, preview_rows, max_sheet_cells) 
                         f"{get_column_letter(col)}{row}",
                         cell_value(values_sheet.cell(row, col).value),
                         _blocked(
-                            formula_sheet, array_ranges, merged_followers, protected, row, col
+                            formula_sheet,
+                            array_ranges,
+                            merged_followers,
+                            protected,
+                            row,
+                            col,
+                            custom_rows,
                         ),
                     )
                 )

@@ -441,6 +441,9 @@ def _patch_sheet(data: bytes, writes, date1904, date_styles, unlocked_styles) ->
             raise PatchError(
                 f"{address}: 날짜 서식이 아닌 칸에는 날짜를 쓰지 않습니다(숫자로 보인다)."
             )
+        if value.kind == "number" and style_index < len(date_styles) and date_styles[style_index]:
+            # 날짜 서식 칸의 숫자는 Excel에서 날짜로 보인다(45000 → 2023-03-15). 날짜 거부와 짝을 맞춘다(2차 검수 N-M1)
+            raise PatchError(f"{address}: 날짜 서식 칸에는 숫자를 쓰지 않습니다(날짜로 보인다).")
     sheet_data = found["sheetData"]
     new_rows: dict[int, list[bytes]] = {}
     for row_number, targets in sorted(by_row.items()):
@@ -667,7 +670,10 @@ def _rows_layout(found: dict) -> list[tuple[int, list[str], tuple[int, int]]]:
 
 def _normalize_empty(xml: bytes) -> bytes:
     """<row .../>·<sheetData/>를 여닫는 형태로 맞춘다(쓰기가 빈 요소를 그렇게 바꾸므로, 검수 M1)."""
-    return re.sub(rb"<((?:\w+:)?(?:row|sheetData))(\s[^>]*?)?\s*/>", rb"<\1\2></\1>", xml)
+    # 속성 앞뒤 공백 차이(<sheetData />)는 같은 것으로 본다(2차 검수 R8)
+    return re.sub(
+        rb"<((?:\w+:)?(?:row|sheetData))((?:\s+[^\s>/][^>]*?)?)\s*/>", rb"<\1\2></\1>", xml
+    )
 
 
 def _compare_sheet(left: bytes, right: bytes, writes, fail) -> None:

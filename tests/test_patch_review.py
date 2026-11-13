@@ -164,6 +164,48 @@ def test_analysis_and_writer_agree_on_column_style_protection(tmp_path):
     assert failures(compare_packages(data, patch_xlsx(data, SHEET, writes), SHEET, writes)) == []
 
 
+def test_number_into_a_date_styled_cell_is_refused():
+    """2차 N-M1: 날짜 서식 칸의 숫자는 Excel에서 날짜로 보이므로 쓰지 않는다(날짜 거부와 짝)."""
+    with pytest.raises(PatchError, match="날짜 서식 칸에는 숫자"):
+        patch_xlsx(AT22.read_bytes(), SHEET, {"F2": number("45000")})
+
+
+def test_row_style_without_custom_format_is_ignored_like_excel(tmp_path):
+    """2차 N-L1: customFormat 없이 s만 있는 행은 Excel이 무시하고 열 서식을 쓴다. 분석과 쓰기 모두."""
+    from conftest import write_hwpx
+
+    from ureonggaksi.inputs import open_inputs
+    from ureonggaksi.xlsx import inspect_target
+
+    original = AT22.read_bytes()
+    part = "xl/worksheets/sheet1.xml"
+    xml = (
+        entries(original)[part]
+        .replace(
+            b"<sheetData>",
+            b'<cols><col min="7" max="7" style="4" width="12" customWidth="1"/></cols><sheetData>',
+            1,
+        )
+        .replace(b'<row r="7" ', b'<row r="7" s="2" ', 1)
+    )  # 7행: s만(customFormat 없음)
+    data = replace_entry(original, part, xml)
+    writes = {"G7": number("1")}
+    patched = patch_xlsx(data, SHEET, writes)  # 열 서식 s=4(잠금 해제)를 받아 쓸 수 있다
+    assert b'<c r="G7" s="4">' in entries(patched)[part]
+    path = tmp_path / "t.xlsx"
+    path.write_bytes(data)
+    inputs = open_inputs([write_hwpx(tmp_path / "a.hwpx")], path, tmp_path / "out")
+    view = inspect_target(inputs, header_row=1, data_rows=(2, 7))
+    assert {c.address: c.blocked for c in view.cells}.get("G7", "") == ""
+
+
+def test_self_closing_sheet_data_with_space_is_accepted():
+    """2차 R8: <sheetData /> 처럼 공백이 있는 빈 요소도 비교가 통과한다."""
+    empty = sheet_with(b"<sheetData />")
+    writes = {"A1": number("1")}
+    assert failures(compare_packages(empty, patch_xlsx(empty, SHEET, writes), SHEET, writes)) == []
+
+
 @pytest.mark.skipif(
     os.name != "nt" or shutil.which("powershell") is None or os.environ.get("CI") == "true",
     reason="이 PC의 Excel로 실제 열기(로컬 전용)",
