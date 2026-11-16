@@ -9,7 +9,7 @@ from conftest import cell, para, table, write_hwpx, write_xlsx
 from ureonggaksi.analyze import analyze
 from ureonggaksi.hwpx import read_hwpx
 from ureonggaksi.inputs import open_inputs
-from ureonggaksi.interpret import _resolve, build_rule, interpret
+from ureonggaksi.interpret import _ask_model, _resolve, build_rule, interpret
 from ureonggaksi.xlsx import inspect_target
 
 PEOPLE = [
@@ -105,7 +105,7 @@ def test_names_that_only_look_alike_go_to_the_model_with_a_hint(setup):
     assert result.fields == (("평가점수", "점수", "model"),)
     prompt, options = asked[0]
     assert options[0] == "평가점수" and options[-1] == "없음"  # 이름이 비슷한 것을 앞에
-    assert "이름이 비슷한 것: 평가점수" in prompt and "예: 90, 85" in prompt
+    assert "이름이 비슷한 것: 평가점수" in prompt and '예: "90", "85"' in prompt
     without = run(setup, "이름 기준으로 점수 채워줘")  # 모델이 없으면 확정하지 않고 빼서 소명
     assert without.fields == () and without.excluded == ("점수",)
     assert [q[0] for q in without.questions] == ["target_column"]
@@ -664,4 +664,40 @@ def test_model_choice_that_changes_with_option_order_is_not_trusted(setup):
     asked = []
     result = run(setup, "이름 기준으로 점수 채워줘", first_option(asked))
     assert result.fields == () and len(asked) == 2
-    assert asked[0][1][:-1] == tuple(reversed(asked[1][1][:-1]))
+    assert asked[1][1] == ("없음", *reversed(asked[0][1][:-1]))  # '없음' 자리까지 뒤집는다
+
+
+# ---------- PR #18 1차 검수: 별도 절의 부정·되가리킴, 키 바꾸기, 선택지 하나 ----------
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "이름 기준으로 직급이랑 이수시간 채워주지 마",
+        "이름 기준으로 직원번호, 이수시간 채워줘. 둘 다 빼줘",
+        "이름 기준으로 직원번호랑 이수시간 채워줘. 앞에 거는 빼줘",
+        "이름 기준으로 직원번호랑 이수시간 채워줘 아니다 전부 하지 마",
+        "이름 기준으로 직원번호랑 이수시간 넣을 필요 없어",
+        "이름 기준으로 직원번호랑 이수시간 채워줘. 그건 다음 주에 할게",
+        "이름 기준으로 직원번호를 번호 칸에, 이수시간도 채워줘. 앞에 건 취소",
+    ],
+)
+def test_a_separate_clause_reaches_every_earlier_name(setup, request_text):
+    """허용 낱말 뒤에 따로 나온 모르는 말은 앞의 모든 이름에 닿는다. 규칙이 만들어지지 않는다."""
+    result = run(setup, request_text)
+    _, _, view = setup
+    assert build_rule(result, view) is None
+
+
+def test_switching_the_key_is_asked(setup):
+    """'이름 기준 말고 발급번호 기준으로': 키를 둘 말했으면 어느 쪽도 정하지 않는다(PR #18 H2)."""
+    result = run(setup, "이름 기준 말고 발급번호 기준으로 이수시간 채워줘")
+    assert result.key is None and "key_column" in [q[0] for q in result.questions]
+
+
+def test_a_single_option_is_still_checked_for_position_bias():
+    """선택지가 하나여도 '없음' 자리를 뒤집어 묻는다. 첫 자리만 고르는 답은 받지 않는다(PR #18 M1)."""
+    asked = []
+    assert _ask_model(first_option(asked), lambda o: "질문", ("비고",)) is None
+    assert [o for _, o in asked] == [("비고", "없음"), ("없음", "비고")]
+    assert _ask_model(lambda p, o: "비고", lambda o: "질문", ("비고",)) == "비고"

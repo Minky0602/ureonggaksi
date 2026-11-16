@@ -25,7 +25,10 @@ from .xlsx import TargetView
 
 # 작업 종류 동사. "확인서"·"검토서"처럼 문서 이름에 든 글자는 동사가 아니다
 FILL = re.compile(r"채워|채우|채움|넣어|넣기|넣고|넣을|입력|기입|적어|옮겨|반영|써\s?줘")
-FILL_NEGATED = re.compile(r"(채우|넣|입력하|기입하|적|옮기)지\s*(마|말|않)")  # "아직 채우지 마"
+FILL_NEGATED = re.compile(  # 하지 않는 채우기: "채우지 마", "채워주지 마", "안 채워도 돼", "넣을 필요 없어"
+    r"(채우|채워|넣|넣어|입력하|기입하|적|적어|옮기|옮겨|써)\s*(주)?\s*지\s*(는|도|만)?\s*(마|말|않)"
+    r"|안\s*(채|넣|입력|기입|적|옮|써)|필요\s*없"
+)
 CHECK = re.compile(
     r"확인(?!서)|대조|검토(?!서)|비교|맞는지|맞나|같은지|일치|검증|틀린|다른지|차이|체크|점검|검사"
     r"|괜찮은지|됐나|됐는지|제대로|봐\s?줘|살펴|없나|맞아|됐어|있어|있나|\?"
@@ -51,7 +54,7 @@ ALLOWED_WORD = (
     r"|기준|기준으로|찾아|찾아서|찾고|찾구|행을"
     r"|(?:칸|열|란)에?"
     rf"|(?:취합표|현황표|명단|표|시트|엑셀|문서|서류|신청서|확인서|요청서){PARTICLE}?"
-    rf"|{ENDING}|요|좀|부탁해|부탁해요|부탁합니다|부탁드립니다|[ㅠㅜ]+"
+    rf"|{ENDING}|요|좀|부탁해|부탁해요|부탁합니다|부탁드립니다|감사합니다|감사해요|고맙습니다|[ㅠㅜ]+"
 )
 NAME_MARK = "\x00"
 # 낱말 끝에 붙은 '좀'("체크좀")은 뜻을 바꾸지 않는다
@@ -236,8 +239,12 @@ def _roster_fields(documents, section, table, top, names) -> list[FieldCandidate
 
 
 def _work_type(request: str) -> str | None:
-    """채우기·검토 동사가 하나만 있을 때만 정한다. "채우지 마"처럼 부정한 채우기는 채우기가 아니다."""
+    """채우기·검토 동사가 하나만 있을 때만 정한다. 하지 않는 채우기("채우지 마")는 채우기가 아니고,
+    그것과 다른 채우기가 함께 있으면("직급 채워줘, 이수시간은 안 채워도 돼") 묻는다."""
+    negated = bool(FILL_NEGATED.search(request))
     fill = bool(FILL.search(FILL_NEGATED.sub(" ", request)))
+    if negated and fill:
+        return None
     check = bool(CHECK.search(request))
     return "fill" if fill and not check else "check" if check and not fill else None
 
@@ -295,17 +302,28 @@ def _mentions(request: str, names: list[str]) -> list[tuple[str, str]]:
 
 
 def _tainted(request: str, names: list[str]) -> set[str]:
-    """모르는 말이 든 구간에 닿은 이름들. 요청을 이름 사이 구간으로 나누고, 구간의 낱말이 모두 조사·허용
-    낱말이 아니면 그 구간 양옆 이름을 확정하지 않는다("직급은 현행 유지", "제외: 직급", "직급 대신").
+    """모르는 말이 닿은 이름들. 요청을 이름 사이 구간으로 나눠 구간마다 본다.
+
+    - 모르는 말이 이름(+조사) 바로 뒤에 붙으면 그 이름과 다음 이름에 닿는다("직급은 현행 유지", "제외: 직급").
+    - 허용 낱말(동사 등) 뒤에 따로 나오면 별도 절이다. 앞의 모든 이름에 닿는다("…채워줘. 둘 다 빼줘",
+      "…채워줘. 앞에 건 취소", PR #18 검수 H1).
     """
     spans = [(s, e, n) for s, e, n in _spans(request, names) if n]
     tainted: set[str] = set()
+    seen: list[str] = []
     previous_end, previous_name = 0, None
     for start, end, name in [*spans, (len(request), len(request), None)]:
         gap = (NAME_MARK if previous_name else "") + request[previous_end:start]
         tokens = [t for t in re.split(r"[\s,.!~·、/]+", gap) if t]
-        if not all(SIMPLE_TOKEN.fullmatch(t) for t in tokens):
-            tainted.update(n for n in (previous_name, name) if n)
+        unknown = [i for i, t in enumerate(tokens) if not SIMPLE_TOKEN.fullmatch(t)]
+        if unknown:
+            before = tokens[: unknown[0]]
+            attached = all(t.startswith(NAME_MARK) for t in before)
+            tainted.update(n for n in ([previous_name] if attached else seen) if n)
+            if name:
+                tainted.add(name)
+        if name:
+            seen.append(name)
         previous_end, previous_name = end, name
     return tainted
 
@@ -437,7 +455,11 @@ def _ask_model(choose: Chooser | None, prompt_for, options: tuple[str, ...]) -> 
     """선택지 순서를 바꿔 두 번 묻고 같은 답일 때만 받아들인다. 순서에 흔들리는 답은 믿지 않는다."""
     if choose is None or not options:
         return None
-    answers = {choose(prompt_for(order), (*order, NONE)) for order in (options, options[::-1])}
+    # '없음'의 자리까지 뒤집는다. 선택지가 하나여도 첫 자리만 고르는 답이 걸린다(PR #18 M1)
+    answers = {
+        choose(prompt_for(options), (*options, NONE)),
+        choose(prompt_for(options[::-1]), (NONE, *options[::-1])),
+    }
     answer = answers.pop() if len(answers) == 1 else None
     return answer if answer in options else None
 
@@ -462,6 +484,7 @@ def interpret(
     found = _mentions(request, columns + names)
     skip = _negated(found)
     mentions = [(n, a) for n, a in found if n not in skip]
+    tainted = _tainted(request, columns + names)
     work_type = _work_type(_mask(request, columns + names))
     if work_type is None:
         questions.append(("work_type", ("fill", "check")))
@@ -470,7 +493,11 @@ def interpret(
     # "이름으로 찾아서 이름 말고"처럼 말한 키를 스스로 지웠으면 다른 열을 추정하지 않고 묻는다(2차 R03)
     key = None
     hint = next((n for n, after in mentions if KEY_AFTER.match(after)), None)
-    conflicting = any(n in skip and KEY_AFTER.match(a) for n, a in found)
+    named_keys = {n for n, a in found if KEY_AFTER.match(a)}
+    # 키를 둘 말했거나("이름 기준 말고 발급번호 기준으로"), 말한 키에 모르는 말이 닿았으면 묻는다(PR #18 H2)
+    conflicting = (
+        any(n in skip for n in named_keys) or len(named_keys) > 1 or bool(named_keys & tainted)
+    )
     if conflicting:
         hint = None
     elif hint:
@@ -549,7 +576,7 @@ def interpret(
     only_columns = [n for n in only_columns if n not in unclear]
     # 애매한 지목이면 모두, 모르는 말이 닿은 이름이면 그 이름만 정하지 않고 묻는다(P04 ② 국소 판정)
     mentioned = [*(p[0] for p in pairs), *(p[1] for p in pairs), *only_fields, *only_columns]
-    drop = set(mentioned) if pointing_unclear else _tainted(request, columns + names)
+    drop = set(mentioned) if pointing_unclear else tainted
     held = [n for n in mentioned if n in drop]
     pairs = [p for p in pairs if p[0] not in drop and p[1] not in drop]
     only_fields = [n for n in only_fields if n not in drop]
@@ -633,7 +660,8 @@ def _shape_fits(samples, existing) -> bool:
 
 
 def _examples(values) -> str:
-    shown = ", ".join(dict.fromkeys(v for v in values if v))
+    # 문서 글이 지시처럼 읽히지 않게 따옴표로 감싸고 자른다(PR #18 M2)
+    shown = ", ".join(dict.fromkeys(f'"{v.strip()[:20]}"' for v in values if v and v.strip()))
     return f" (예: {shown})" if shown else ""
 
 
