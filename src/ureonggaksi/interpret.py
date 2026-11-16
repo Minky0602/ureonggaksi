@@ -61,6 +61,9 @@ SIMPLE_TOKEN = re.compile(
 JOINED = re.compile(r"^(이랑|랑|하고|와|과|,|및|그리고)")  # 나열: 부정이 앞 이름까지 걸린다
 SLOT = re.compile(r"^(칸|열|란)에")  # "A를 B 칸에 넣어"
 OBJECT = re.compile(r"^(을|를)")  # 지목 규칙의 A: 목적격 조사가 붙은 이름만
+DIRECTION = re.compile(
+    r"^(에서|에|으로|로)"
+)  # "전화번호에", "휴대전화로": 지목인데 "A를 B 칸에" 꼴이 아님
 NONE = "없음"
 
 # 모델 호출: (질문 글, 선택지) → 선택지 하나 또는 None
@@ -253,6 +256,7 @@ def _spans(request: str, names: list[str]) -> list[tuple[int, int, str]]:
     - 단어 중간은 이름이 아니다("전화번호"의 '번호'). 앞 글자가 한글·영문·숫자면 건너뛴다.
     - 긴 이름이 먼저 자리를 잡고, 겹치는 짧은 이름은 버린다.
     - 작업 동사 자리("확인해줘")는 먼저 막아 둔다. 취합표에 '확인' 열이 있어도 동사를 열로 읽지 않는다.
+      다만 동사 글자를 완전히 감싸는 더 긴 이름('확인자', '입력일')은 이름이다(5차 검수 W01·W02).
     """
     taken: list[tuple[int, int, str]] = [
         (m.start(), m.end(), "") for verbs in (FILL, CHECK) for m in verbs.finditer(request)
@@ -264,15 +268,28 @@ def _spans(request: str, names: list[str]) -> list[tuple[int, int, str]]:
         pattern = r"(?<![가-힣A-Za-z0-9])" + r"\s*".join(map(re.escape, _compact(variant)))
         for match in re.finditer(pattern, request):
             start, end = match.span()
+            inside = [t for t in taken if not t[2] and start <= t[0] and t[1] <= end]
+            if any(e - s < end - start for s, e, _ in inside):
+                taken = [t for t in taken if t not in inside]
             if not any(s < end and start < e for s, e, _ in taken):
                 taken.append((start, end, name))  # 같은 이름이 여러 번 나오면 모두 읽는다
     return sorted(taken)
 
 
+def _mask(request: str, names: list[str]) -> str:
+    """이름 자리를 표시 글자로 가린 요청(길이 그대로). 이름 속 글자('참고사항'의 참고)를 낱말로 읽지 않는다."""
+    out = list(request)
+    for start, end, name in _spans(request, names):
+        if name:
+            out[start:end] = NAME_MARK * (end - start)
+    return "".join(out)
+
+
 def _mentions(request: str, names: list[str]) -> list[tuple[str, str]]:
-    """요청에 나온 이름과 그 뒤 글자(공백 제거, 12자)."""
+    """요청에 나온 이름과 그 뒤 글자(공백 제거, 12자, 뒤에 오는 이름은 가림)."""
+    masked = _mask(request, names)
     spans = _spans(request, names)
-    return [(name, _compact(request[e : e + 20])[:12]) for _, e, name in spans if name]
+    return [(name, _compact(masked[e : e + 20])[:12]) for _, e, name in spans if name]
 
 
 def _simple(request: str, names: list[str]) -> bool:
@@ -437,7 +454,7 @@ def interpret(
     found = _mentions(request, columns + names)
     skip = _negated(found)
     mentions = [(n, a) for n, a in found if n not in skip]
-    work_type = _work_type(request)
+    work_type = _work_type(_mask(request, columns + names))
     if work_type is None:
         questions.append(("work_type", ("fill", "check")))
 
@@ -485,6 +502,10 @@ def interpret(
         str
     ] = []  # 지목은 했는데 무엇을 넣을지 모르는 칸과 그 앞 이름("점수를 이수시간 칸에")
     previous = None  # (이름, 문서 항목 또는 None, 뒤 글자)
+    before_previous = (
+        None  # 그 앞 이름의 뒤 글자: "직급이랑 이수시간을 비고 칸에"의 나열을 알아본다
+    )
+    pointing_unclear = False  # "A를 B 칸에" 꼴이 아닌 지목(5차 검수 H): 짝을 정하지 않고 묻는다
     for name, after in mentions:
         if name == hint:
             continue
@@ -495,8 +516,12 @@ def interpret(
                 linked.append((previous[1], column))  # 지목한 칸이 같은 이름 짝보다 이긴다
             else:
                 unclear += [column, previous[0]]
-            previous = None
+            if before_previous is not None and JOINED.match(before_previous):
+                pointing_unclear = True  # 나열한 이름 가운데 어느 것을 넣을지 모른다
+            previous = before_previous = None
             continue
+        if SLOT.match(after) or DIRECTION.match(after):
+            pointing_unclear = True
         if field is not None and column is not None:
             pairs.append((field, column, "match"))
         elif field is not None:
@@ -504,6 +529,7 @@ def interpret(
                 only_fields.append(field)
         elif column is not None and column not in only_columns:
             only_columns.append(column)
+        before_previous = previous[2] if previous else None
         previous = (name, field, after)
     for field, column in linked:  # 사용자가 칸을 지목했다
         pairs = [p for p in pairs if p[0] != field]
@@ -514,7 +540,9 @@ def interpret(
     only_fields = [n for n in only_fields if n not in unclear]
     only_columns = [n for n in only_columns if n not in unclear]
     held: list[str] = []
-    if not _simple(request, columns + names):  # 모르는 말이 섞인 요청: 짝을 정하지 않고 모두 묻는다
+    if pointing_unclear or not _simple(
+        request, columns + names
+    ):  # 모르는 말·애매한 지목: 모두 묻는다
         held = [*(p[0] for p in pairs), *(p[1] for p in pairs), *only_fields, *only_columns]
         pairs, only_fields, only_columns = [], [], []
     off_limits = skip | set(unclear)  # 빼라고 한 열·이름은 모델 선택지에도 넣지 않는다

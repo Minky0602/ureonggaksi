@@ -527,3 +527,78 @@ def test_same_name_key_with_a_rival_person_field_is_asked(tmp_path):
     for request in ("이름 기준으로 이수시간 채워줘", "이름으로 찾아서 이수시간 넣어줘"):
         result = interpret(request, documents, view)
         assert result.key is None and build_rule(result, view) is None
+
+
+# ---------- 5차 독립 검수: "A를 B 칸에" 밖의 지목, 이름 속 동사·부정 글자 ----------
+
+PHONE_SHEET = [
+    ["이름", "직급", "휴대전화", "전화번호", "이수시간", "비고", "참고사항", "확인자", "입력일"],
+    ["가나다", None, None, None, None, None, None, None, None],
+    ["라마바", None, None, None, None, None, None, None, None],
+]
+
+
+@pytest.fixture
+def phone_setup(tmp_path):
+    def doc(name, title, mobile, phone, hours, checker, day):
+        rows = [
+            ("성명", name),
+            ("직급", title),
+            ("휴대전화", mobile),
+            ("전화번호", phone),
+            ("이수시간", hours),
+            ("확인자", checker),
+            ("입력일", day),
+        ]
+        body = table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
+        return ["<hp:p><hp:run>" + body + "</hp:run></hp:p>"]
+
+    docs = [
+        doc("가나다", "주무관", "010-1111", "02-111", "12", "파하가", "2026-11-01"),
+        doc("라마바", "팀장", "010-2222", "02-222", "8", "타파하", "2026-11-02"),
+    ]
+    return build(tmp_path, docs, PHONE_SHEET, "명단")
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "이름 기준으로 전화번호 칸에 휴대전화를 넣어줘",
+        "이름 기준으로 휴대전화를 전화번호에 넣어줘",
+        "이름 기준으로 전화번호를 휴대전화로 채워줘",
+        "이름 기준으로 휴대전화에서 전화번호 채워줘",
+        "이름 기준으로 휴대전화는 전화번호 칸에 넣어줘",
+        "이름 기준으로 직급이랑 이수시간을 비고 칸에 넣어줘",
+    ],
+)
+def test_pointing_in_any_other_form_confirms_no_pair(phone_setup, request_text):
+    """같은 이름 짝(전화번호→전화번호)이 지목한 칸을 덮어쓰지 않는다. 꼴이 다르면 묻는다."""
+    result = run(phone_setup, request_text)
+    assert result.fields == () and "target_column" in [q[0] for q in result.questions]
+
+
+def test_pointing_in_the_canonical_form_still_works(phone_setup):
+    result = run(phone_setup, "이름 기준으로 휴대전화를 전화번호 칸에 넣어줘")
+    assert {(f, c) for f, c, _ in result.fields} == {("휴대전화", "전화번호")}
+
+
+@pytest.mark.parametrize(
+    "request_text, expected",
+    [
+        ("이름 기준으로 확인자 채워줘", ("fill", {("확인자", "확인자")})),
+        ("이름 기준으로 입력일 채워줘", ("fill", {("입력일", "입력일")})),
+        ("이름 기준으로 직급 참고사항 채워줘", ("fill", None)),
+    ],
+)
+def test_verb_or_negation_letters_inside_names_are_part_of_the_name(
+    phone_setup, request_text, expected
+):
+    """'확인자'·'입력일'의 동사 글자, '참고사항'의 '참고'는 이름의 일부다(5차 W01·W02·N01)."""
+    work_type, pairs = expected
+    result = run(phone_setup, request_text)
+    assert result.work_type == work_type
+    if pairs is not None:
+        assert {(f, c) for f, c, _ in result.fields} == pairs
+    else:  # 참고사항은 문서에 없다: 직급만 확정되고 참고사항은 소명된다
+        assert ("직급", "직급") in {(f, c) for f, c, _ in result.fields}
+        assert "참고사항" in result.excluded
