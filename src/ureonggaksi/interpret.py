@@ -431,10 +431,12 @@ def _pick_record(documents, view, mentions):
     return RecordRule("document", ""), document
 
 
-def _ask_model(choose: Chooser | None, prompt: str, options: tuple[str, ...]) -> str | None:
+def _ask_model(choose: Chooser | None, prompt_for, options: tuple[str, ...]) -> str | None:
+    """선택지 순서를 바꿔 두 번 묻고 같은 답일 때만 받아들인다. 순서에 흔들리는 답은 믿지 않는다."""
     if choose is None or not options:
         return None
-    answer = choose(prompt, (*options, NONE))
+    answers = {choose(prompt_for(order), (*order, NONE)) for order in (options, options[::-1])}
+    answer = answers.pop() if len(answers) == 1 else None
     return answer if answer in options else None
 
 
@@ -561,7 +563,9 @@ def interpret(
             field,
             tuple(c for c in columns if c != key_column and c not in taken and c not in off_limits),
         )
-        answer = _ask_model(choose, _column_prompt(request, by_name[field], options, view), options)
+        answer = _ask_model(
+            choose, lambda o, f=field: _column_prompt(request, by_name[f], o, view), options
+        )
         if answer:
             pairs.append((field, answer, "model"))
     for column in only_columns:
@@ -570,7 +574,9 @@ def interpret(
             column,
             tuple(n for n in names if n != key_field and n not in taken and n not in off_limits),
         )
-        answer = _ask_model(choose, _field_prompt(request, column, options, by_name, view), options)
+        answer = _ask_model(
+            choose, lambda o, c=column: _field_prompt(request, c, o, by_name, view), options
+        )
         if answer:
             pairs.append((answer, column, "model"))
 

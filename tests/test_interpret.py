@@ -65,6 +65,19 @@ def first_option(asked):
     return choose
 
 
+def picks(meaning, asked=None):
+    """가짜 모델: 질문 대상('부서')에 맞는 답(meaning['부서'])을 선택지 순서와 무관하게 고른다."""
+
+    def choose(prompt, options):
+        if asked is not None:
+            asked.append((prompt, options))
+        subject = next((k for k in meaning if f"'{k}'" in prompt), None)
+        answer = meaning.get(subject, "없음")
+        return answer if answer in options else "없음"
+
+    return choose
+
+
 # ---------- 코드가 정하는 것 ----------
 
 
@@ -88,7 +101,7 @@ def test_equal_names_pair_without_the_model(setup):
 
 def test_names_that_only_look_alike_go_to_the_model_with_a_hint(setup):
     asked = []
-    result = run(setup, "이름 기준으로 점수 채워줘", first_option(asked))
+    result = run(setup, "이름 기준으로 점수 채워줘", picks({"점수": "평가점수"}, asked))
     assert result.fields == (("평가점수", "점수", "model"),)
     prompt, options = asked[0]
     assert options[0] == "평가점수" and options[-1] == "없음"  # 이름이 비슷한 것을 앞에
@@ -150,7 +163,10 @@ def test_roster_table_reads_every_participant(tmp_path):
     ]
     inputs, documents, view = build(tmp_path, docs, sheet, "명단")
     result = interpret(
-        "이름으로 찾아서 부서랑 참석일 채워줘", documents, view, choose=first_option([])
+        "이름으로 찾아서 부서랑 참석일 채워줘",
+        documents,
+        view,
+        choose=picks({"부서": "소속부서", "참석일": "참석일자"}),
     )
     assert result.record.kind == "table_rows" and result.key == ("성명", "이름")
     assert set(result.fields) == {("부서", "소속부서", "model"), ("참석일", "참석일자", "model")}
@@ -672,3 +688,11 @@ def test_pairs_whose_value_shapes_clash_are_not_confirmed(tmp_path):
     _, documents, view = build(tmp_path, docs, sheet, "명단")
     result = interpret("이름 기준으로 번호 확인해줘", documents, view)
     assert result.fields == () and "번호" in result.excluded
+
+
+def test_model_choice_that_changes_with_option_order_is_not_trusted(setup):
+    """첫 선택지만 고르는 모델(위치 편향)은 두 순서에서 답이 달라 확정되지 않는다(2B 실측 N01)."""
+    asked = []
+    result = run(setup, "이름 기준으로 점수 채워줘", first_option(asked))
+    assert result.fields == () and len(asked) == 2
+    assert asked[0][1][:-1] == tuple(reversed(asked[1][1][:-1]))
