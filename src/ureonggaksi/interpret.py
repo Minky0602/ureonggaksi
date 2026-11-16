@@ -60,7 +60,9 @@ SIMPLE_TOKEN = re.compile(
 )
 JOINED = re.compile(r"^(이랑|랑|하고|와|과|,|및|그리고)")  # 나열: 부정이 앞 이름까지 걸린다
 SLOT = re.compile(r"^(칸|열|란)에")  # "A를 B 칸에 넣어"
-OBJECT = re.compile(r"^(을|를)")  # 지목 규칙의 A: 목적격 조사가 붙은 이름만
+OBJECT = re.compile(
+    r"^(을|를)\x00"
+)  # 지목 규칙의 A: '를' 바로 뒤에 칸 이름이 온다(사이에 동사 없음)
 DIRECTION = re.compile(
     r"^(에서|에|으로|로)"
 )  # "전화번호에", "휴대전화로": 지목인데 "A를 B 칸에" 꼴이 아님
@@ -68,10 +70,6 @@ NONE = "없음"
 
 # 모델 호출: (질문 글, 선택지) → 선택지 하나 또는 None
 Chooser = Callable[[str, tuple[str, ...]], str | None]
-# 역할 판독: (질문 글, 이름들) → {이름: 역할}. 역할은 ROLES 가운데 하나, 목록 밖·빠진 이름은 '무관'
-RoleReader = Callable[[str, tuple[str, ...]], dict[str, str]]
-FILL_ROLE = "채움"
-ROLES = (FILL_ROLE, "키", "제외", "무관")
 
 
 @dataclass(frozen=True)
@@ -296,16 +294,20 @@ def _mentions(request: str, names: list[str]) -> list[tuple[str, str]]:
     return [(name, _compact(masked[e : e + 20])[:12]) for _, e, name in spans if name]
 
 
-def _simple(request: str, names: list[str]) -> bool:
-    """모든 낱말이 '이름+조사' 또는 허용 낱말인 요청. 이름 자리를 표시로 바꾸고 낱말마다 확인한다."""
-    marked, last = [], 0
-    for start, end, name in _spans(request, names):
-        if name:
-            marked += [request[last:start], NAME_MARK]
-            last = end
-    marked.append(request[last:])
-    tokens = [t for t in re.split(r"[\s,.!~·、/]+", "".join(marked)) if t]
-    return all(SIMPLE_TOKEN.fullmatch(t) for t in tokens)
+def _tainted(request: str, names: list[str]) -> set[str]:
+    """모르는 말이 든 구간에 닿은 이름들. 요청을 이름 사이 구간으로 나누고, 구간의 낱말이 모두 조사·허용
+    낱말이 아니면 그 구간 양옆 이름을 확정하지 않는다("직급은 현행 유지", "제외: 직급", "직급 대신").
+    """
+    spans = [(s, e, n) for s, e, n in _spans(request, names) if n]
+    tainted: set[str] = set()
+    previous_end, previous_name = 0, None
+    for start, end, name in [*spans, (len(request), len(request), None)]:
+        gap = (NAME_MARK if previous_name else "") + request[previous_end:start]
+        tokens = [t for t in re.split(r"[\s,.!~·、/]+", gap) if t]
+        if not all(SIMPLE_TOKEN.fullmatch(t) for t in tokens):
+            tainted.update(n for n in (previous_name, name) if n)
+        previous_end, previous_name = end, name
+    return tainted
 
 
 def _resolve(name: str, pool: list[str]) -> str | None:
@@ -446,7 +448,6 @@ def interpret(
     view: TargetView,
     *,
     choose: Chooser | None = None,
-    read_roles: RoleReader | None = None,
 ) -> Interpretation:
     """코드가 확정하는 것은 이름이 정규화 후 완전히 같은 짝과, 사용자가 지목한 키뿐이다(P04 ① 검수).
 
@@ -546,16 +547,13 @@ def interpret(
     pairs = [p for p in dict.fromkeys(pairs) if p[0] not in unclear and p[1] not in unclear]
     only_fields = [n for n in only_fields if n not in unclear]
     only_columns = [n for n in only_columns if n not in unclear]
-    held: list[str] = []
-    if pointing_unclear or not _simple(request, columns + names):
-        # 모르는 말·애매한 지목: 코드만으로는 모두 묻는다. 지목이 애매하면 모델에도 맡기지 않는다.
-        # 모르는 말만 섞였으면 모델이 두 순서로 읽어 둘 다 '채움'인 이름만 남긴다(P04 ②)
-        mentioned = [*(p[0] for p in pairs), *(p[1] for p in pairs), *only_fields, *only_columns]
-        keep = set() if pointing_unclear else _agreed_fill(read_roles, request, mentioned)
-        held = [n for n in mentioned if n not in keep]
-        pairs = [p for p in pairs if p[0] in keep or p[1] in keep]
-        only_fields = [n for n in only_fields if n in keep]
-        only_columns = [n for n in only_columns if n in keep]
+    # 애매한 지목이면 모두, 모르는 말이 닿은 이름이면 그 이름만 정하지 않고 묻는다(P04 ② 국소 판정)
+    mentioned = [*(p[0] for p in pairs), *(p[1] for p in pairs), *only_fields, *only_columns]
+    drop = set(mentioned) if pointing_unclear else _tainted(request, columns + names)
+    held = [n for n in mentioned if n in drop]
+    pairs = [p for p in pairs if p[0] not in drop and p[1] not in drop]
+    only_fields = [n for n in only_fields if n not in drop]
+    only_columns = [n for n in only_columns if n not in drop]
     off_limits = skip | set(unclear)  # 빼라고 한 열·이름은 모델 선택지에도 넣지 않는다
     for field in only_fields:
         taken = {p[1] for p in pairs}
@@ -604,28 +602,6 @@ def interpret(
         questions.append(("target_column", tuple(c for c in columns if c != key_column)[:3]))
     record = replace(record, key_field=key_field or "")
     return Interpretation(work_type, record, key, mapped, tuple(questions), excluded, tuple(fields))
-
-
-def _roles_prompt(request: str, names: list[str]) -> str:
-    lines = [
-        f"요청: {request}",
-        "요청에 나온 이름마다 역할을 고르세요. "
-        "채움=채우거나 대조하라는 항목, 키=행을 찾는 기준, 제외=빼거나 건드리지 말거나 미루라는 항목, "
-        "무관=그 밖. 확신이 없으면 무관.",
-        "이름: " + ", ".join(names),
-    ]
-    return "\n".join(lines)
-
-
-def _agreed_fill(read_roles: RoleReader | None, request: str, names: list[str]) -> set[str]:
-    """이름 순서를 바꿔 두 번 묻고 둘 다 '채움'인 이름. 순서에 따라 답이 바뀌면 믿지 않는다."""
-    names = list(dict.fromkeys(names))
-    if read_roles is None or not names:
-        return set()
-    answers = [
-        read_roles(_roles_prompt(request, order), tuple(order)) for order in (names, names[::-1])
-    ]
-    return {n for n in names if all(a.get(n) == FILL_ROLE for a in answers)}
 
 
 def _kind(value: str) -> str:

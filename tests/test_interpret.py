@@ -408,11 +408,10 @@ def test_same_name_with_a_different_unit_is_not_offered_to_the_model(tmp_path):
     ],
 )
 def test_any_restriction_in_the_request_confirms_no_pair(setup, request_text):
-    """부정 어휘를 다 셀 수 없으므로, 빼기·하지 않기가 섞인 요청은 짝을 정하지 않고 묻는다."""
+    """빼기·하지 않기 표현이 닿은 이름은 확정하지 않는다. 확정될 수 있는 것은 깨끗한 이수시간뿐이다."""
     asked = []
     result = run(setup, request_text, choose=first_option(asked))
-    assert result.fields == () and asked == []
-    assert "target_column" in [q[0] for q in result.questions]
+    assert {(f, c) for f, c, _ in result.fields} <= {("이수시간", "이수시간")} and asked == []
     assert result.excluded  # 말한 항목은 소명 목록에 남는다
 
 
@@ -500,10 +499,10 @@ def test_repeated_label_is_not_a_candidate(tmp_path):
     ],
 )
 def test_requests_with_unknown_words_confirm_no_pair(setup, request_text):
-    """아는 말(이름+조사, 동사 하나, 키·표 낱말)만으로 된 요청이 아니면 짝을 정하지 않고 모델도 부르지 않는다."""
+    """모르는 말이 닿은 이름은 확정하지도 모델에 묻지도 않는다. 깨끗한 이수시간만 확정될 수 있다."""
     asked = []
     result = run(setup, request_text, choose=first_option(asked))
-    assert result.fields == () and asked == []
+    assert {(f, c) for f, c, _ in result.fields} <= {("이수시간", "이수시간")} and asked == []
 
 
 @pytest.mark.parametrize(
@@ -623,57 +622,27 @@ def test_verb_or_negation_letters_inside_names_are_part_of_the_name(
 # ---------- P04 ② 모델 역할 판독·값 형태 검증 ----------
 
 
-def roles_reader(table_of_roles, calls=None):
-    """가짜 판독기: 이름별 역할 표. 두 번째 호출(뒤집은 순서)에는 reversed_roles를 쓸 수 있다."""
-
-    def read(prompt, names):
-        if calls is not None:
-            calls.append(names)
-        roles = table_of_roles[min(len(calls or [None]) - 1, len(table_of_roles) - 1)]
-        return {n: roles.get(n, "무관") for n in names}
-
-    return read
-
-
-def test_model_roles_rescue_requests_with_unknown_words(setup):
-    """'생략'은 허용 낱말이 아니지만, 모델이 두 순서 모두 이수시간=채움·직급=제외로 읽으면 이수시간만 확정한다."""
-    calls = []
-    read = roles_reader([{"이수시간": "채움", "직급": "제외"}], calls)
-    _, docs, view = setup
-    result = interpret("이름 기준으로 이수시간 채워줘. 직급은 생략", docs, view, read_roles=read)
-    assert {(f, c) for f, c, _ in result.fields} == {("이수시간", "이수시간")}
-    assert len(calls) == 2 and calls[0] == tuple(reversed(calls[1]))
-    assert "직급" in result.excluded
+@pytest.mark.parametrize(
+    "request_text, expected",
+    [
+        ("이름 기준으로 이수시간 채워줘. 직급은 현행 유지", {("이수시간", "이수시간")}),
+        ("이름 기준으로 이수시간 채워줘. 직급은 생략", {("이수시간", "이수시간")}),
+        ("이름 기준으로 이수시간 채워줘. 제외: 직급", set()),
+        ("이름 기준으로 직급 대신 이수시간 채워줘", set()),
+        ("이름 기준으로 이수시간을 채우고 비고 칸에 직급을 적어줘", set()),
+        ("이름 기준으로 직급이랑 이수시간 채워줘", {("이수시간", "이수시간")}),  # 문서는 직위
+    ],
+)
+def test_only_names_untouched_by_unknown_words_are_confirmed(setup, request_text, expected):
+    """국소 판정(P04 ②): 모르는 말이 든 구간에 닿은 이름만 묻는다. 앞에 와도("제외: 직급") 닿은 것으로 본다."""
+    result = run(setup, request_text)
+    assert {(f, c) for f, c, _ in result.fields} == expected
 
 
-def test_model_roles_that_change_with_order_are_not_trusted(setup):
-    read = roles_reader([{"이수시간": "채움"}, {"이수시간": "무관"}], [])
-    _, docs, view = setup
-    result = interpret("이름 기준으로 이수시간 채워줘. 직급은 생략", docs, view, read_roles=read)
-    assert result.fields == ()
-
-
-def test_code_negation_beats_the_model(setup):
-    """모델이 직급=채움이라 해도 코드가 '빼'를 찾은 이름은 확정하지 않는다(마지막 방어막)."""
-    read = roles_reader([{"이수시간": "채움", "직급": "채움"}], [])
-    _, docs, view = setup
-    result = interpret("이름 기준으로 이수시간 채우고 직급은 빼줘", docs, view, read_roles=read)
-    assert ("직급", "직급") not in {(f, c) for f, c, _ in result.fields}
-
-
-def test_unclear_pointing_is_not_given_to_the_model(phone_setup):
-    calls = []
-    read = roles_reader([{"휴대전화": "채움", "전화번호": "채움"}], calls)
-    _, docs, view = phone_setup
-    result = interpret("이름 기준으로 전화번호 칸에 휴대전화를 넣어줘", docs, view, read_roles=read)
-    assert result.fields == () and calls == []
-
-
-def test_simple_requests_do_not_call_the_role_reader(setup):
-    calls = []
-    _, docs, view = setup
-    interpret("이름 기준으로 이수시간 채워줘", docs, view, read_roles=roles_reader([{}], calls))
-    assert calls == []
+def test_pointing_needs_the_cell_right_after_the_object(setup):
+    """'이수시간을 채우고 비고 칸에': '를'과 칸 사이에 동사가 있으면 지목이 아니다(4B 측정 L01)."""
+    result = run(setup, "이름 기준으로 이수시간을 채우고 비고 칸에 직급을 적어줘")
+    assert ("이수시간", "비고") not in {(f, c) for f, c, _ in result.fields}
 
 
 def test_pairs_whose_value_shapes_clash_are_not_confirmed(tmp_path):

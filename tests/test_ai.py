@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from ureonggaksi.ai import LocalModel, ai_status, chat_prompt, parse_choice, parse_fields
+from ureonggaksi.ai import LocalModel, ai_status, chat_prompt, parse_choice
 from ureonggaksi.errors import ServiceError
 
 FAKE = """
@@ -21,16 +21,8 @@ if mode == "sleep":
     time.sleep(30)
 if mode == "fail":
     sys.exit(3)
-if mode in ("fields", "fields_outside"):
-    props = schema["properties"]
-    answer = {{k: v["enum"][0] for k, v in props.items()}}
-    if mode == "fields_outside":
-        answer[next(iter(props))] = "엉뚱함"
-    answer["목록밖이름"] = "채움"
-    out = "[33m[0m" + json.dumps(answer, ensure_ascii=False)  # 실제 출력처럼 색 코드가 앞에
-else:
-    answer = {{"first": schema["enum"][0], "outside": "주소", "garbage": None}}[mode]
-    out = "not json" if answer is None else json.dumps(answer, ensure_ascii=False)
+answer = {{"first": schema["enum"][0], "outside": "주소", "garbage": None}}[mode]
+out = "not json" if answer is None else json.dumps(answer, ensure_ascii=False)
 sys.stdout.buffer.write((out + " [end of text]\\n").encode("utf-8"))
 """
 
@@ -88,21 +80,3 @@ def test_real_model_picks_the_synonym():
     question = "요청: 이름으로 찾아서 직급 채워줘\n취합표 열 '직급'에 넣을 문서 항목을 고르세요.\n- 성명\n- 직위\n- 이수시간"
     assert model.choose(question, ("성명", "직위", "이수시간", "없음")) == "직위"
     json.dumps(question)  # 질문은 평문이다(외부 전송 없음)
-
-
-def test_fields_are_asked_in_one_call_and_unknown_answers_dropped(tmp_path):
-    """이름마다 선택지 하나(객체 스키마). 목록 밖 값과 묻지 않은 이름은 버린다(DIF-036)."""
-    roles = ("채움", "키", "제외", "무관")
-    asked = {"이수시간": roles, "직급": roles}
-    assert fake_model(tmp_path, "fields").ask_fields("역할?", asked) == {
-        "이수시간": "채움",
-        "직급": "채움",
-    }
-    assert fake_model(tmp_path, "fields_outside").ask_fields("역할?", asked) == {"직급": "채움"}
-
-
-def test_fields_parser_rejects_non_objects():
-    roles = {"직급": ("채움", "무관")}
-    assert parse_fields("not json [end of text]", roles) == {}
-    assert parse_fields('"채움" [end of text]', roles) == {}
-    assert parse_fields('{"직급": "채움"} [end of text]', roles) == {"직급": "채움"}
