@@ -268,6 +268,8 @@ class Interpretation:            # 요청 해석 결과. 규칙 초안의 재료
     candidates: tuple[FieldCandidate, ...]
 
 Chooser = Callable[[str, tuple[str, ...]], str | None]   # (질문 글, 선택지) → 선택지 하나 또는 None
+RoleReader = Callable[[str, tuple[str, ...]], dict[str, str]]  # (질문 글, 이름들) → {이름: 역할}
+ROLES = ("채움", "키", "제외", "무관")   # 목록 밖·빠진 이름은 '무관'으로 본다
 
 @dataclass(frozen=True)
 class AiStatus:
@@ -283,7 +285,8 @@ class RuleDraft:
 
 def ai_status() -> AiStatus
 def interpret(request: str, documents: tuple[Document, ...], view: TargetView,
-              *, choose: Chooser | None = None) -> Interpretation
+              *, choose: Chooser | None = None,
+              read_roles: RoleReader | None = None) -> Interpretation
     # view는 데이터 행 전체를 담아야 한다(prepare는 preview_rows를 데이터 행 수 이상으로 연다).
     #   전체를 담지 못한 view로는 값으로 키를 잇지 않고 묻는다(51행 아래 사람을 놓친다).
     # 코드가 확정하는 것은 둘뿐이다(P04 ① 독립 검수: 추정 확정이 틀린 칸을 채움).
@@ -301,6 +304,11 @@ def interpret(request: str, documents: tuple[Document, ...], view: TargetView,
     # 이름이 다른 짝은 choose로 하나씩 묻는다(선택지 = 열 또는 항목 + "없음", 이름이 비슷한 것을 앞에 두고
     #   단서로 표시, 단위만 다른 같은 이름은 제외). 모델이 없거나 '없음'·목록 밖 답이면 확정하지 않고
     #   excluded로 소명한다. 한 열에 둘이 몰리면 둘 다 뺀다.
+    # 역할 판독(P04 ②): 허용 목록 밖 말이 섞인 요청은 read_roles가 있을 때만 다룬다. 요청에 나온 이름을 두 순서
+    #   (원래·뒤집은)로 물어 둘 다 '채움'인 이름만 남긴다. 코드의 부정 표지·애매한 지목은 모델보다 앞선다
+    #   (부정한 이름은 묻지 않고, 지목이 애매하면 판독기를 부르지 않는다). 단순 요청에는 부르지 않는다.
+    # 값 형태 검증: 문서 값과 취합표 열 기존 값의 주된 형태(날짜·연락처·숫자·코드형·글자)가 둘 다 뚜렷한데
+    #   다르면 그 짝은 확정하지 않고 소명한다. 열이 비었거나 한쪽이 글자면 판단하지 않는다.
 def build_rule(result: Interpretation, view: TargetView) -> RuleSet | None
     # 질문이 남았으면 None. RuleSet은 validate_rule과 analyze(자기 대조)를 거친다.
     # 기존 AiSelection(블록 번호 전체 선택)·suggest_rule은 폐기했다(2026-11-13 사용자 승인, P04).

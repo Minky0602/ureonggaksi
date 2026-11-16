@@ -68,6 +68,10 @@ NONE = "없음"
 
 # 모델 호출: (질문 글, 선택지) → 선택지 하나 또는 None
 Chooser = Callable[[str, tuple[str, ...]], str | None]
+# 역할 판독: (질문 글, 이름들) → {이름: 역할}. 역할은 ROLES 가운데 하나, 목록 밖·빠진 이름은 '무관'
+RoleReader = Callable[[str, tuple[str, ...]], dict[str, str]]
+FILL_ROLE = "채움"
+ROLES = (FILL_ROLE, "키", "제외", "무관")
 
 
 @dataclass(frozen=True)
@@ -440,6 +444,7 @@ def interpret(
     view: TargetView,
     *,
     choose: Chooser | None = None,
+    read_roles: RoleReader | None = None,
 ) -> Interpretation:
     """코드가 확정하는 것은 이름이 정규화 후 완전히 같은 짝과, 사용자가 지목한 키뿐이다(P04 ① 검수).
 
@@ -540,11 +545,15 @@ def interpret(
     only_fields = [n for n in only_fields if n not in unclear]
     only_columns = [n for n in only_columns if n not in unclear]
     held: list[str] = []
-    if pointing_unclear or not _simple(
-        request, columns + names
-    ):  # 모르는 말·애매한 지목: 모두 묻는다
-        held = [*(p[0] for p in pairs), *(p[1] for p in pairs), *only_fields, *only_columns]
-        pairs, only_fields, only_columns = [], [], []
+    if pointing_unclear or not _simple(request, columns + names):
+        # 모르는 말·애매한 지목: 코드만으로는 모두 묻는다. 지목이 애매하면 모델에도 맡기지 않는다.
+        # 모르는 말만 섞였으면 모델이 두 순서로 읽어 둘 다 '채움'인 이름만 남긴다(P04 ②)
+        mentioned = [*(p[0] for p in pairs), *(p[1] for p in pairs), *only_fields, *only_columns]
+        keep = set() if pointing_unclear else _agreed_fill(read_roles, request, mentioned)
+        held = [n for n in mentioned if n not in keep]
+        pairs = [p for p in pairs if p[0] in keep or p[1] in keep]
+        only_fields = [n for n in only_fields if n in keep]
+        only_columns = [n for n in only_columns if n in keep]
     off_limits = skip | set(unclear)  # 빼라고 한 열·이름은 모델 선택지에도 넣지 않는다
     for field in only_fields:
         taken = {p[1] for p in pairs}
@@ -565,6 +574,11 @@ def interpret(
         if answer:
             pairs.append((answer, column, "model"))
 
+    # 값 형태가 어긋나는 짝(코드형 값을 숫자 열에)은 확정하지 않는다
+    fits = [p for p in pairs if _shape_fits(by_name[p[0]].samples, _column_values(view, p[1]))]
+    held += [name for p in pairs if p not in fits for name in p[:2]]
+    pairs = fits
+
     # 한 열에 둘 이상이 몰리면 어느 것도 확정하지 않는다(검수 H7)
     count: dict[str, int] = {}
     for _, column, _ in pairs:
@@ -584,6 +598,56 @@ def interpret(
         questions.append(("target_column", tuple(c for c in columns if c != key_column)[:3]))
     record = replace(record, key_field=key_field or "")
     return Interpretation(work_type, record, key, mapped, tuple(questions), excluded, tuple(fields))
+
+
+def _roles_prompt(request: str, names: list[str]) -> str:
+    lines = [
+        f"요청: {request}",
+        "요청에 나온 이름마다 역할을 고르세요. "
+        "채움=채우거나 대조하라는 항목, 키=행을 찾는 기준, 제외=빼거나 건드리지 말거나 미루라는 항목, "
+        "무관=그 밖. 확신이 없으면 무관.",
+        "이름: " + ", ".join(names),
+    ]
+    return "\n".join(lines)
+
+
+def _agreed_fill(read_roles: RoleReader | None, request: str, names: list[str]) -> set[str]:
+    """이름 순서를 바꿔 두 번 묻고 둘 다 '채움'인 이름. 순서에 따라 답이 바뀌면 믿지 않는다."""
+    names = list(dict.fromkeys(names))
+    if read_roles is None or not names:
+        return set()
+    answers = [
+        read_roles(_roles_prompt(request, order), tuple(order)) for order in (names, names[::-1])
+    ]
+    return {n for n in names if all(a.get(n) == FILL_ROLE for a in answers)}
+
+
+def _kind(value: str) -> str:
+    """값 형태: 날짜·연락처·숫자·코드형·글자. 짝이 그럴듯한지만 본다(값을 바꾸지 않는다)."""
+    v = value.strip()
+    if re.fullmatch(r"\d{4}\s*[-./년]\s*\d{1,2}\s*[-./월]\s*\d{1,2}\s*일?\.?", v):
+        return "date"
+    if re.fullmatch(r"(0\d{1,2}-\d{3,4}(-\d{4})?|내선\s*\d+)", v):
+        return "phone"
+    if re.fullmatch(r"[\d,]+(\.\d+)?\s*(원|천원|시간|명|개|점|%)?", v):
+        return "number"
+    if re.fullmatch(r"(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9]+([-_][A-Za-z0-9]+)+", v):
+        return "code"
+    return "text"
+
+
+def _main_kind(values) -> str:
+    kinds = [_kind(v) for v in values if v and v.strip()]
+    if not kinds:
+        return "text"
+    top = max(set(kinds), key=kinds.count)
+    return top if kinds.count(top) * 2 > len(kinds) else "text"
+
+
+def _shape_fits(samples, existing) -> bool:
+    """둘 다 뚜렷한 형태(글자 아님)인데 서로 다르면 맞지 않는다. 열이 비었으면 판단하지 않는다."""
+    a, b = _main_kind(samples), _main_kind(existing)
+    return "text" in (a, b) or a == b
 
 
 def _examples(values) -> str:

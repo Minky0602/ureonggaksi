@@ -602,3 +602,73 @@ def test_verb_or_negation_letters_inside_names_are_part_of_the_name(
     else:  # 참고사항은 문서에 없다: 직급만 확정되고 참고사항은 소명된다
         assert ("직급", "직급") in {(f, c) for f, c, _ in result.fields}
         assert "참고사항" in result.excluded
+
+
+# ---------- P04 ② 모델 역할 판독·값 형태 검증 ----------
+
+
+def roles_reader(table_of_roles, calls=None):
+    """가짜 판독기: 이름별 역할 표. 두 번째 호출(뒤집은 순서)에는 reversed_roles를 쓸 수 있다."""
+
+    def read(prompt, names):
+        if calls is not None:
+            calls.append(names)
+        roles = table_of_roles[min(len(calls or [None]) - 1, len(table_of_roles) - 1)]
+        return {n: roles.get(n, "무관") for n in names}
+
+    return read
+
+
+def test_model_roles_rescue_requests_with_unknown_words(setup):
+    """'생략'은 허용 낱말이 아니지만, 모델이 두 순서 모두 이수시간=채움·직급=제외로 읽으면 이수시간만 확정한다."""
+    calls = []
+    read = roles_reader([{"이수시간": "채움", "직급": "제외"}], calls)
+    _, docs, view = setup
+    result = interpret("이름 기준으로 이수시간 채워줘. 직급은 생략", docs, view, read_roles=read)
+    assert {(f, c) for f, c, _ in result.fields} == {("이수시간", "이수시간")}
+    assert len(calls) == 2 and calls[0] == tuple(reversed(calls[1]))
+    assert "직급" in result.excluded
+
+
+def test_model_roles_that_change_with_order_are_not_trusted(setup):
+    read = roles_reader([{"이수시간": "채움"}, {"이수시간": "무관"}], [])
+    _, docs, view = setup
+    result = interpret("이름 기준으로 이수시간 채워줘. 직급은 생략", docs, view, read_roles=read)
+    assert result.fields == ()
+
+
+def test_code_negation_beats_the_model(setup):
+    """모델이 직급=채움이라 해도 코드가 '빼'를 찾은 이름은 확정하지 않는다(마지막 방어막)."""
+    read = roles_reader([{"이수시간": "채움", "직급": "채움"}], [])
+    _, docs, view = setup
+    result = interpret("이름 기준으로 이수시간 채우고 직급은 빼줘", docs, view, read_roles=read)
+    assert ("직급", "직급") not in {(f, c) for f, c, _ in result.fields}
+
+
+def test_unclear_pointing_is_not_given_to_the_model(phone_setup):
+    calls = []
+    read = roles_reader([{"휴대전화": "채움", "전화번호": "채움"}], calls)
+    _, docs, view = phone_setup
+    result = interpret("이름 기준으로 전화번호 칸에 휴대전화를 넣어줘", docs, view, read_roles=read)
+    assert result.fields == () and calls == []
+
+
+def test_simple_requests_do_not_call_the_role_reader(setup):
+    calls = []
+    _, docs, view = setup
+    interpret("이름 기준으로 이수시간 채워줘", docs, view, read_roles=roles_reader([{}], calls))
+    assert calls == []
+
+
+def test_pairs_whose_value_shapes_clash_are_not_confirmed(tmp_path):
+    """문서 값이 코드형(E-11)인데 취합표 열 기존 값이 숫자면 같은 이름이어도 확정하지 않는다."""
+    docs = _single_table_docs(
+        [
+            [("성명", n), ("번호", v)]
+            for n, v in zip(["가나다", "라마바"], ["E-11", "E-12"], strict=True)
+        ]
+    )
+    sheet = [["이름", "번호"], ["가나다", "100"], ["라마바", "200"], ["사아자", "300"]]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("이름 기준으로 번호 확인해줘", documents, view)
+    assert result.fields == () and "번호" in result.excluded
