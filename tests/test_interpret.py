@@ -262,10 +262,13 @@ def test_excluded_columns_are_not_offered_to_the_model(setup):
     assert all(column != "비고" for _, column, _ in result.fields)
 
 
-def test_keep_as_is_is_not_negation_when_it_modifies_the_verb(setup):
-    """'그대로 옮겨줘'는 빼라는 말이 아니다(2차 검수 E02)."""
-    result = run(setup, "이름 기준으로 이수시간을 그대로 옮겨줘")
-    assert ("이수시간", "이수시간") in {(f, c) for f, c, _ in result.fields}
+def test_keep_as_is_is_asked_because_it_can_also_mean_leave_alone(setup):
+    """'그대로'는 '그대로 옮겨'(채우기)와 '직급은 그대로'(빼기) 둘 다 된다. 허용 낱말이 아니라 묻는다."""
+    for request in (
+        "이름 기준으로 이수시간을 그대로 옮겨줘",
+        "이름 기준으로 이수시간 채우고 직급은 그대로",
+    ):
+        assert run(setup, request).fields == ()
 
 
 @pytest.mark.parametrize(
@@ -454,3 +457,73 @@ def test_repeated_label_is_not_a_candidate(tmp_path):
     _, documents, view = build(tmp_path, docs, sheet, "명단")
     result = interpret("성명 기준으로 이수시간 채워줘", documents, view)
     assert result.key is None and build_rule(result, view) is None
+
+
+# ---------- 4차 독립 검수: 허용 목록·같은 이름 키 경쟁 ----------
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        # 부정 목록 밖의 빼기 표현(4차 H1)
+        "이름 기준으로 이수시간 채워줘. 직급은 생략",
+        "이름 기준으로 이수시간 채워줘. 직급은 패스",
+        "이름 기준으로 이수시간 채워줘. 직급은 나중에",
+        "이름 기준으로 이수시간 채워줘. 직급은 공란으로",
+        "이름 기준으로 이수시간 채워줘. 직급은 현행 유지",
+        "이름 기준으로 이수시간 채워줘. 직급은 해당 없음",
+        "이름 기준으로 직급 없이 이수시간 채워줘",
+        "이름 기준으로 직급 대신 이수시간 채워줘",
+        "이름 기준으로 이수시간 채워줘. 직급은 놔 둬",
+        # 두 절 요청(4차 H2)
+        "이름 기준으로 이수시간을 채우고 비고 칸에 직급을 적어줘",
+        "이름 기준으로 이수시간을 먼저 채우고 번호 칸에는 직원번호 넣어줘",
+        "이름 기준으로 직급을 적어 주고 비고 칸에 연락처 넣어 줘",
+        # 검토 요청(4차 M1)
+        "이름 기준으로 이수시간 입력값 점검해줘",
+    ],
+)
+def test_requests_with_unknown_words_confirm_no_pair(setup, request_text):
+    """아는 말(이름+조사, 동사 하나, 키·표 낱말)만으로 된 요청이 아니면 짝을 정하지 않고 모델도 부르지 않는다."""
+    asked = []
+    result = run(setup, request_text, choose=first_option(asked))
+    assert result.fields == () and asked == []
+
+
+@pytest.mark.parametrize(
+    "request_text, expected",
+    [
+        ("이름 기준으로 이수시간 채워줘", {("이수시간", "이수시간")}),
+        ("이름으로 찾아서 이수시간이랑 직급 넣어 주세요", {("이수시간", "이수시간")}),
+        ("이수시간이 취합표랑 같은지 이름으로 대조해 줘", {("이수시간", "이수시간")}),
+        ("이름 기준으로 직원번호를 번호 칸에 넣어줘", {("직원번호", "번호")}),
+        ("이름 기준 이수시간 체크좀", {("이수시간", "이수시간")}),
+        ("이수시간 점검해 주세요 이름으로 찾구", {("이수시간", "이수시간")}),
+        ("이름으로 찾아서 이수시간 채워주라", {("이수시간", "이수시간")}),
+    ],
+)
+def test_plain_requests_still_confirm_same_name_pairs(setup, request_text, expected):
+    result = run(setup, request_text)
+    assert {(f, c) for f, c, _ in result.fields} == expected
+
+
+def test_same_name_key_with_a_rival_person_field_is_asked(tmp_path):
+    """4차 H3: 신청인 '성명'과 확인자 '이름'이 모두 이름 열과 맞으면 이름이 같아도 키를 정하지 않는다."""
+
+    def doc(applicant, checker, hours):
+        rows = [("성명", applicant), ("이수시간", hours), ("이름", checker)]
+        body = table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
+        return ["<hp:p><hp:run>" + body + "</hp:run></hp:p>"]
+
+    docs = [doc("가나다", "파하가", "12"), doc("라마바", "타파하", "8")]
+    sheet = [
+        ["이름", "이수시간"],
+        ["가나다", None],
+        ["라마바", None],
+        ["파하가", None],
+        ["타파하", None],
+    ]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    for request in ("이름 기준으로 이수시간 채워줘", "이름으로 찾아서 이수시간 넣어줘"):
+        result = interpret(request, documents, view)
+        assert result.key is None and build_rule(result, view) is None

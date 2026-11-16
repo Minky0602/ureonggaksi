@@ -8,7 +8,8 @@ wrong cells):
   key only when one identifier-like column clearly wins.
 - fields ↔ columns only when names are equal after normalization (DIF-010 labels vs headers), or when the
   user points at the cell ("A를 B 칸에").
-- a request with any "leave out / don't" wording confirms no field pair at all; it is asked instead.
+- field pairs only for requests made entirely of known words (names with particles, one verb, key and
+  sheet words). Any other word ("생략", "패스", a second clause) means nothing is confirmed; it is asked.
 Everything else goes to the model, one name at a time, as a choice from an enum; without a model it is
 left out and reported.
 """
@@ -26,7 +27,7 @@ from .xlsx import TargetView
 FILL = re.compile(r"채워|채우|채움|넣어|넣기|넣고|넣을|입력|기입|적어|옮겨|반영|써\s?줘")
 FILL_NEGATED = re.compile(r"(채우|넣|입력하|기입하|적|옮기)지\s*(마|말|않)")  # "아직 채우지 마"
 CHECK = re.compile(
-    r"확인(?!서)|대조|검토(?!서)|비교|맞는지|맞나|같은지|일치|검증|틀린|다른지|차이|체크"
+    r"확인(?!서)|대조|검토(?!서)|비교|맞는지|맞나|같은지|일치|검증|틀린|다른지|차이|체크|점검|검사"
     r"|괜찮은지|됐나|됐는지|제대로|봐\s?줘|살펴|없나|맞아|됐어|있어|있나|\?"
 )  # "기입 상태 봐줘"·"입력 누락 없나": 채우기 낱말이 명사로 쓰인 검토 요청(P04 ① 2차 검수)
 # 이름 바로 뒤(공백 제거) 글자로 읽는 표현
@@ -38,12 +39,24 @@ NEGATED = re.compile(
     r"(빼(?!놓지|먹지)|제외|말고|그대로(?!옮|넣|채|입력|적|기입|반영)|손대지|건드리지|하지마|하지말|두고|놔두|참고|비워|비우"
     r"|채우지마|채우지말|넣지마|넣지말)"
 )  # "번호 칸은 비워 둬", "비고 칸에 넣지 말고"
-# 요청 어디에든 빼기·하지 않기 표현이 있으면 코드는 항목 짝을 확정하지 않는다(P04 ① 3차 검수).
-# 이름별 부정(NEGATED)은 어휘·조사·구분자를 다 셀 수 없어 빈틈이 계속 나왔다. 여기서는 넓게 걸고 묻는다
-RESTRICTION = re.compile(
-    r"않|안\s*(채|넣|써|쓰|적|해|돼|되)|지\s*(는|도|만|를|을)?\s*(마|말)|말고|말\s*것|빼|제외|손대|건드|건들"
-    r"|놔두|놔둬|냅두|냅둬|두고|그냥\s*둬|비워|비우|필요\s*없"
-    r"|그대로(?!\s*(옮|넣|채|입력|적|기입|반영))"
+# 코드가 항목 짝을 확정해도 되는 요청은 모든 낱말이 '이름+조사'이거나 아래 허용 낱말인 것뿐이다.
+# 빼기·미루기·두 절 요청처럼 위험한 표현을 목록으로 막으면 목록 밖 표현이 계속 새었다(P04 ① 2~4차 검수).
+# 그래서 아는 말만으로 된 요청만 확정하고, 모르는 말이 하나라도 있으면 묻는다.
+PARTICLE = r"(?:이랑|랑|하고|과|와|및|을|를|이|가|은|는|도|의|만|으로|로|에서|에)"
+ENDING = r"(?:줘|줘요|주세요|주십시오|주라|줄래|줄래요)"  # 동사 끝(부탁)
+ALLOWED_WORD = (
+    rf"(?:채워|넣어|입력해|기입해|적어|옮겨|반영해|써){ENDING}?"
+    rf"|(?:확인|대조|비교|검토|검증|체크|점검|검사)(?:해|해서|하기)?{ENDING}?"
+    r"|맞는지|같은지|일치하는지|다른지"
+    r"|기준|기준으로|찾아|찾아서|찾고|찾구|행을"
+    r"|(?:칸|열|란)에?"
+    rf"|(?:취합표|현황표|명단|표|시트|엑셀|문서|서류|신청서|확인서|요청서){PARTICLE}?"
+    rf"|{ENDING}|요|좀|부탁해|부탁해요|부탁합니다|부탁드립니다|[ㅠㅜ]+"
+)
+NAME_MARK = "\x00"
+# 낱말 끝에 붙은 '좀'("체크좀")은 뜻을 바꾸지 않는다
+SIMPLE_TOKEN = re.compile(
+    rf"(?:(?:{NAME_MARK}{PARTICLE}*)+|(?:{NAME_MARK}{PARTICLE}*)*(?:{ALLOWED_WORD}))좀?"
 )
 JOINED = re.compile(r"^(이랑|랑|하고|와|과|,|및|그리고)")  # 나열: 부정이 앞 이름까지 걸린다
 SLOT = re.compile(r"^(칸|열|란)에")  # "A를 B 칸에 넣어"
@@ -234,8 +247,8 @@ def _variants(name: str) -> set[str]:
     return {v for v in (name.strip(), bare) if v}
 
 
-def _mentions(request: str, names: list[str]) -> list[tuple[str, str]]:
-    """요청에 단어로 나온 이름과 그 뒤 글자(공백 제거, 12자).
+def _spans(request: str, names: list[str]) -> list[tuple[int, int, str]]:
+    """요청에 단어로 나온 이름의 자리(시작, 끝, 이름). 작업 동사 자리는 이름 ''로 막아 둔다.
 
     - 단어 중간은 이름이 아니다("전화번호"의 '번호'). 앞 글자가 한글·영문·숫자면 건너뛴다.
     - 긴 이름이 먼저 자리를 잡고, 겹치는 짧은 이름은 버린다.
@@ -253,7 +266,25 @@ def _mentions(request: str, names: list[str]) -> list[tuple[str, str]]:
             start, end = match.span()
             if not any(s < end and start < e for s, e, _ in taken):
                 taken.append((start, end, name))  # 같은 이름이 여러 번 나오면 모두 읽는다
-    return [(name, _compact(request[e : e + 20])[:12]) for _, e, name in sorted(taken) if name]
+    return sorted(taken)
+
+
+def _mentions(request: str, names: list[str]) -> list[tuple[str, str]]:
+    """요청에 나온 이름과 그 뒤 글자(공백 제거, 12자)."""
+    spans = _spans(request, names)
+    return [(name, _compact(request[e : e + 20])[:12]) for _, e, name in spans if name]
+
+
+def _simple(request: str, names: list[str]) -> bool:
+    """모든 낱말이 '이름+조사' 또는 허용 낱말인 요청. 이름 자리를 표시로 바꾸고 낱말마다 확인한다."""
+    marked, last = [], 0
+    for start, end, name in _spans(request, names):
+        if name:
+            marked += [request[last:start], NAME_MARK]
+            last = end
+    marked.append(request[last:])
+    tokens = [t for t in re.split(r"[\s,.!~·、/]+", "".join(marked)) if t]
+    return all(SIMPLE_TOKEN.fullmatch(t) for t in tokens)
 
 
 def _resolve(name: str, pool: list[str]) -> str | None:
@@ -430,8 +461,8 @@ def interpret(
         candidates = _key_candidates(fields, view)
         if candidates and (len(candidates) == 1 or candidates[0][0] > 2 * candidates[1][0]):
             key = (candidates[0][1], candidates[0][2])
-    if key is not None and not _same(key[0], key[1]):
-        # 값으로 이은 키: 행 전체를 봤고, 그 열에 값이 맞는 다른 문서 항목이 없을 때만(3차 H1: 성명·추천인)
+    if key is not None:
+        # 행 전체를 봤고, 그 열에 값이 맞는 다른 문서 항목이 없을 때만(3차 H1 성명·추천인, 4차 H3 이름·이름)
         rivals = [
             c
             for c in _key_candidates(fields, view, named=True)
@@ -483,7 +514,7 @@ def interpret(
     only_fields = [n for n in only_fields if n not in unclear]
     only_columns = [n for n in only_columns if n not in unclear]
     held: list[str] = []
-    if RESTRICTION.search(request):  # 빼기·하지 않기가 섞인 요청: 짝을 정하지 않고 모두 묻는다
+    if not _simple(request, columns + names):  # 모르는 말이 섞인 요청: 짝을 정하지 않고 모두 묻는다
         held = [*(p[0] for p in pairs), *(p[1] for p in pairs), *only_fields, *only_columns]
         pairs, only_fields, only_columns = [], [], []
     off_limits = skip | set(unclear)  # 빼라고 한 열·이름은 모델 선택지에도 넣지 않는다
