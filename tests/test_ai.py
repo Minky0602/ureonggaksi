@@ -41,7 +41,9 @@ def test_answer_is_one_of_the_options(tmp_path):
 
 def test_answers_outside_the_options_or_unparsable_are_dropped(tmp_path):
     assert fake_model(tmp_path, "outside").choose("q", ("직위", "없음")) is None
-    assert fake_model(tmp_path, "garbage").choose("q", ("직위", "없음")) is None
+    with pytest.raises(ServiceError) as caught:
+        fake_model(tmp_path, "garbage").choose("q", ("직위", "없음"))
+    assert caught.value.code == "AI_BAD_OUTPUT"
     assert parse_choice('"직위"\n[end of text]', ("직위",)) == "직위"
 
 

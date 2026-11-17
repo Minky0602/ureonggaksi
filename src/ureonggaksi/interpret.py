@@ -40,7 +40,7 @@ KEY_AFTER = re.compile(
 NEGATED = re.compile(
     r"^(칸|열|란)?(에는|에|은|는|을|를|이|가|도|까지는|까지|만은|만)?"
     r"(빼(?!놓지|먹지)|제외|말고|그대로(?!옮|넣|채|입력|적|기입|반영)|손대지|건드리지|하지마|하지말|두고|놔두|참고|비워|비우"
-    r"|채우지마|채우지말|넣지마|넣지말)"
+    r"|채우지마|채우지말|넣지마|넣지말|보류|생략|취소)"
 )  # "번호 칸은 비워 둬", "비고 칸에 넣지 말고"
 # 코드가 항목 짝을 확정해도 되는 요청은 모든 낱말이 '이름+조사'이거나 아래 허용 낱말인 것뿐이다.
 # 빼기·미루기·두 절 요청처럼 위험한 표현을 목록으로 막으면 목록 밖 표현이 계속 새었다(P04 ① 2~4차 검수).
@@ -63,7 +63,9 @@ SIMPLE_TOKEN = re.compile(
     rf"(?:(?:{NAME_MARK}{PARTICLE}*)+|(?:{NAME_MARK}{PARTICLE}*)*(?:{ALLOWED_WORD}))좀?"
 )
 JOINED = re.compile(r"^(이랑|랑|하고|와|과|,|및|그리고)")  # 나열: 부정이 앞 이름까지 걸린다
-SLOT = re.compile(r"^(칸|열|란)에")  # "A를 B 칸에 넣어"
+# 이름 바로 뒤의 자리 낱말은 지목이다("B 칸에", "B 빈칸에", "B의 빈칸", "B 칸", "B 표에", PR #18 4차 검수 H).
+# "A를 B …"로 짝이 맞으면 지목대로, 아니면 모두 묻는다
+SLOT = re.compile(r"^의?(빈칸|칸|열|란|셀|표|시트)")
 OBJECT = re.compile(
     r"^(을|를)\x00"
 )  # 지목 규칙의 A: '를' 바로 뒤에 칸 이름이 온다(사이에 동사 없음)
@@ -479,6 +481,10 @@ def interpret(
     skip = _negated(found)
     mentions = [(n, a) for n, a in found if n not in skip]
     simple = _simple(request, columns + names)
+    # 열·항목 이름 자체가 빼기 낱말('제외')이면 이름으로 가려져 부정을 못 본다. 그런 이름이 나오면 묻는다(4차 M1)
+    simple = simple and not any(
+        re.fullmatch(NEGATED.pattern, _compact(v)) for n, _ in found for v in _variants(n)
+    )
     work_type = _work_type(_mask(request, columns + names))
     if work_type is None:
         questions.append(("work_type", ("fill", "check")))

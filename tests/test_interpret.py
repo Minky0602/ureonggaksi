@@ -760,3 +760,49 @@ def test_all_with_plain_fill_is_allowed(setup):
     result = run(setup, "이름 기준으로 이수시간 다 채워줘")
     assert result.key == ("성명", "이름")
     assert {(f, c) for f, c, _ in result.fields} == {("이수시간", "이수시간")}
+
+
+# ---------- PR #18 4차 검수: 이름 뒤 자리 낱말·부정 낱말 이름 ----------
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 이수시간 빈칸에 직원번호 채워줘",
+        "발급번호 기준으로 이수시간의 빈칸에 직원번호 넣어줘",
+        "발급번호 기준으로 이수시간 열 빈칸에 직원번호 채워줘",
+        "발급번호 기준으로 비고 빈칸 직원번호 다 채워줘",
+        "발급번호 기준으로 이수시간 표에 직원번호 넣어줘",
+    ],
+)
+def test_place_words_right_after_a_name_are_pointing(setup, request_text):
+    """이름 바로 뒤 빈칸·칸·열·표는 지목이다. "A를 B …" 꼴이 아니면 같은 이름 짝으로 확정하지 않는다."""
+    assert run(setup, request_text).fields == ()
+
+
+def test_pointing_with_a_blank_word_follows_the_pointing(setup):
+    result = run(setup, "발급번호 기준으로 이수시간을 비고 빈칸에 넣어줘")
+    assert {(f, c) for f, c, _ in result.fields} == {("이수시간", "비고")}
+
+
+def test_a_column_named_like_an_exclusion_word_is_asked(tmp_path):
+    """열 이름이 '제외'면 "직급은 제외"가 이름으로 가려진다. 그런 이름이 나오면 묻는다(4차 M1)."""
+    docs = _single_table_docs(
+        [
+            [("성명", n), ("직급", t), ("이수시간", h)]
+            for n, t, h in zip(["가나다", "라마바"], ["주무관", "팀장"], ["12", "8"], strict=True)
+        ]
+    )
+    sheet = [
+        ["이름", "직급", "이수시간", "제외"],
+        ["가나다", None, None, None],
+        ["라마바", None, None, None],
+    ]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("이름 기준으로 직급은 제외 이수시간 채워줘", documents, view)
+    assert ("직급", "직급") not in {(f, c) for f, c, _ in result.fields}
+    sheet[0][3] = "보류"
+    (tmp_path / "b").mkdir()
+    _, documents, view = build(tmp_path / "b", docs, sheet, "명단")
+    result = interpret("이름 기준으로 직급 보류 이수시간만 채워줘", documents, view)
+    assert ("직급", "직급") not in {(f, c) for f, c, _ in result.fields}

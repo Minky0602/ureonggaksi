@@ -111,6 +111,8 @@ class LocalModel:
                 raise ServiceError(
                     "AI_UNAVAILABLE", "로컬 AI 실행 파일을 찾지 못했습니다."
                 ) from exc
+            except OSError as exc:  # 권한·잠금 등 실행 파일을 띄울 수 없는 경우
+                raise ServiceError("AI_UNAVAILABLE", "로컬 AI를 실행하지 못했습니다.") from exc
             except subprocess.TimeoutExpired as exc:
                 raise ServiceError(
                     "AI_TIMEOUT", f"로컬 AI가 {self.timeout_s}초 안에 답하지 않았습니다."
@@ -128,6 +130,6 @@ def parse_choice(stdout: str, options: tuple[str, ...]) -> str | None:
         text = text[: -len(END_MARK)].rstrip()
     try:
         answer = json.loads(text)
-    except ValueError:
-        return None
+    except ValueError as exc:  # 스키마 제약을 받았는데 JSON이 아니면 실행기 이상이다(api 오류표)
+        raise ServiceError("AI_BAD_OUTPUT", "로컬 AI의 답을 읽지 못했습니다.") from exc
     return answer if isinstance(answer, str) and answer in options else None
