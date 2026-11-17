@@ -130,6 +130,11 @@ def parse_choice(stdout: str, options: tuple[str, ...]) -> str | None:
         text = text[: -len(END_MARK)].rstrip()
     try:
         answer = json.loads(text)
-    except ValueError as exc:  # 스키마 제약을 받았는데 JSON이 아니면 실행기 이상이다(api 오류표)
+    except (
+        ValueError,
+        RecursionError,
+    ) as exc:  # 스키마 제약을 받았는데 JSON이 아니면 실행기 이상이다
         raise ServiceError("AI_BAD_OUTPUT", "로컬 AI의 답을 읽지 못했습니다.") from exc
-    return answer if isinstance(answer, str) and answer in options else None
+    if not isinstance(answer, str):
+        raise ServiceError("AI_BAD_OUTPUT", "로컬 AI가 선택지가 아닌 형식으로 답했습니다.")
+    return answer if answer in options else None

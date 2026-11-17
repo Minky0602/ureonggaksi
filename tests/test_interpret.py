@@ -806,3 +806,48 @@ def test_a_column_named_like_an_exclusion_word_is_asked(tmp_path):
     _, documents, view = build(tmp_path / "b", docs, sheet, "명단")
     result = interpret("이름 기준으로 직급 보류 이수시간만 채워줘", documents, view)
     assert ("직급", "직급") not in {(f, c) for f, c, _ in result.fields}
+
+
+# ---------- PR #18 5차 검수: 지목은 단 하나의 정형 꼴만 ----------
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "이름 기준으로 직원번호 이수시간을 비고 칸에 넣어줘",
+        "이름 기준으로 직원번호/이수시간을 비고 칸에 넣어줘",
+        "이름 기준으로 이수시간을 비고 칸 기준으로 채워줘",
+        "이름 기준으로 이수시간을 비고 칸 찾아서 채워줘",
+        "이름 기준으로 이수시간을 비고 시트에 넣어줘",
+        "이름 기준으로 이수시간을 비고 표에 넣어줘",
+        "이름 기준으로 이수시간을 이름 칸에 넣어줘",
+    ],
+)
+def test_pointing_is_confirmed_only_in_its_single_plain_form(setup, request_text):
+    assert run(setup, request_text).fields == ()
+
+
+def test_a_word_shared_by_two_names_is_not_read_as_either(tmp_path):
+    """비고(1)·비고(2)일 때 '비고'는 어느 열인지 모른다. 실행할 때마다 다른 열을 고르지 않고 묻는다(5차 H3)."""
+    docs = _single_table_docs(
+        [
+            [("성명", n), ("이수시간", h)]
+            for n, h in zip(["가나다", "라마바"], ["12", "8"], strict=True)
+        ]
+    )
+    sheet = [["이름", "비고(1)", "비고(2)"], ["가나다", None, None], ["라마바", None, None]]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("이름 기준으로 이수시간을 비고 칸에 넣어줘", documents, view)
+    assert result.fields == ()
+
+
+def test_a_column_named_none_is_not_offered():
+    asked = []
+    assert _ask_model(first_option(asked), lambda o: "질문", ("없음",)) is None and asked == []
+
+
+def test_name_with_possessive_is_asked(setup):
+    """'비고의 직급': 어느 칸에 무엇을 넣는지 갈린다. 짝을 정하지도 모델에 묻지도 않는다(5차 검수 P03)."""
+    asked = []
+    result = run(setup, "이름 기준으로 비고의 직원번호 채워줘", picks({"비고": "직원번호"}, asked))
+    assert result.fields == () and asked == []

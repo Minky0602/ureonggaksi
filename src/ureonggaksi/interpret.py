@@ -59,13 +59,17 @@ ALLOWED_WORD = (
 )
 NAME_MARK = "\x00"
 # 낱말 끝에 붙은 '좀'("체크좀")은 뜻을 바꾸지 않는다
+# 이름 뒤 '의'는 허용하지 않는다: "비고의 직급"은 어느 칸에 무엇을 넣는지 갈린다(5차 검수 P03)
+NAME_PARTICLE = PARTICLE.replace("|의|", "|")
 SIMPLE_TOKEN = re.compile(
-    rf"(?:(?:{NAME_MARK}{PARTICLE}*)+|(?:{NAME_MARK}{PARTICLE}*)*(?:{ALLOWED_WORD}))좀?"
+    rf"(?:(?:{NAME_MARK}{NAME_PARTICLE}*)+|(?:{NAME_MARK}{NAME_PARTICLE}*)*(?:{ALLOWED_WORD}))좀?"
 )
 JOINED = re.compile(r"^(이랑|랑|하고|와|과|,|및|그리고)")  # 나열: 부정이 앞 이름까지 걸린다
 # 이름 바로 뒤의 자리 낱말은 지목이다("B 칸에", "B 빈칸에", "B의 빈칸", "B 칸", "B 표에", PR #18 4차 검수 H).
 # "A를 B …"로 짝이 맞으면 지목대로, 아니면 모두 묻는다
 SLOT = re.compile(r"^의?(빈칸|칸|열|란|셀|표|시트)")
+# 지목을 확정하는 꼴: 칸 낱말(표·시트 아님) 바로 뒤에 채우기 동사. "칸 기준으로", "현황 시트에"는 지목으로 확정하지 않는다
+POINTED = re.compile(r"^의?(빈칸|칸|열|란|셀)(에|에다|에다가)?(채워|넣어|입력|기입|적어|옮겨|써)")
 OBJECT = re.compile(
     r"^(을|를)\x00"
 )  # 지목 규칙의 A: '를' 바로 뒤에 칸 이름이 온다(사이에 동사 없음)
@@ -276,7 +280,12 @@ def _spans(request: str, names: list[str]) -> list[tuple[int, int, str]]:
     pairs = sorted(
         {(v, n) for n in names for v in _variants(n)}, key=lambda p: -len(_compact(p[0]))
     )
+    owners: dict[str, set[str]] = {}
     for variant, name in pairs:
+        owners.setdefault(_compact(variant), set()).add(name)
+    for variant, name in pairs:
+        if len(owners[_compact(variant)]) > 1:
+            name = ""  # 비고(1)·비고(2)의 '비고': 어느 이름인지 모른다. 모르는 말로 남긴다(5차 검수 H3)
         pattern = r"(?<![가-힣A-Za-z0-9])" + r"\s*".join(map(re.escape, _compact(variant)))
         for match in re.finditer(pattern, request):
             start, end = match.span()
@@ -285,6 +294,8 @@ def _spans(request: str, names: list[str]) -> list[tuple[int, int, str]]:
                 taken = [t for t in taken if t not in inside]
             if not any(s < end and start < e for s, e, _ in taken):
                 taken.append((start, end, name))  # 같은 이름이 여러 번 나오면 모두 읽는다
+                if not name:
+                    taken[-1] = (start, end, "")
     return sorted(taken)
 
 
@@ -449,6 +460,7 @@ def _ask_model(choose: Chooser | None, prompt_for, options: tuple[str, ...]) -> 
     '없음'까지 돌리므로 모든 자리의 선택지가 바뀐다(뒤집기는 가운데 자리가 남는다, PR #18 3차 검수 L1).
     첫 답이 '없음'이거나 목록 밖이면 확정하지 않으므로 두 번째는 묻지 않는다.
     """
+    options = tuple(o for o in options if o != NONE)  # '없음'이라는 열은 답과 구분할 수 없다
     if choose is None or not options:
         return None
     first = (*options, NONE)
@@ -539,16 +551,20 @@ def interpret(
         None  # 그 앞 이름의 뒤 글자: "직급이랑 이수시간을 비고 칸에"의 나열을 알아본다
     )
     pointing_unclear = False  # "A를 B 칸에" 꼴이 아닌 지목(5차 검수 H): 짝을 정하지 않고 묻는다
+    pointed_names: list[str] = []
     for name, after in mentions:
         if name == hint:
+            if SLOT.match(after) or (DIRECTION.match(after) and not KEY_AFTER.match(after)):
+                pointing_unclear = True  # 키로 말한 이름을 칸으로도 지목했다(5차 검수 M)
             continue
         column = _resolve(name, [c for c in columns if c != key_column])
         field = _resolve(name, [n for n in names if n != key_field])
         if column is not None and SLOT.match(after) and previous and OBJECT.match(previous[2]):
-            if previous[1] is not None:
+            if previous[1] is not None and POINTED.match(after):
                 linked.append((previous[1], column))  # 지목한 칸이 같은 이름 짝보다 이긴다
+                pointed_names += [previous[0], name]
             else:
-                unclear += [column, previous[0]]
+                pointing_unclear = True
             if before_previous is not None and JOINED.match(before_previous):
                 pointing_unclear = True  # 나열한 이름 가운데 어느 것을 넣을지 모른다
             previous = before_previous = None
@@ -564,6 +580,10 @@ def interpret(
             only_columns.append(column)
         before_previous = previous[2] if previous else None
         previous = (name, field, after)
+    # 지목은 요청에 단 하나, 그 두 이름 말고 다른 항목 이름이 없을 때만 확정한다("직급 이수시간을 비고 칸에", 5차 H1)
+    others = {n for n, _ in mentions if n != hint and n not in pointed_names}
+    if len(linked) > 1 or (linked and others):
+        pointing_unclear = True
     for field, column in linked:  # 사용자가 칸을 지목했다
         pairs = [p for p in pairs if p[0] != field]
         if field in only_fields:
