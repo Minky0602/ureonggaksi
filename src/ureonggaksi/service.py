@@ -310,3 +310,49 @@ def commit(
         return save_check(plan, progress=progress, cancel=cancel)
     approval = approve(plan, prepared.output_path)
     return save_result(plan, approval, progress=progress, cancel=cancel)
+
+
+# ---------- CLI 두 단계(api 2.9) ----------
+
+
+def replay(
+    rule: RuleSet,
+    sources: list[Path],
+    target: Path,
+    *,
+    request: str = "",
+    output_path: Path | None = None,
+    progress: Progress = _no_progress,
+    cancel: Cancel | None = None,
+) -> Prepared:
+    """계획 파일의 규칙으로 AI 없이 다시 분석한다. 질문은 만들지 않는다(규칙이 이미 정해졌다)."""
+    inputs = open_inputs(list(sources), target, local_dir(output_path, target))
+    view = _full_view(inputs, rule)
+    if validate_rule(rule, inputs, view):
+        raise ServiceError(
+            "RULE_INVALID", "계획의 규칙이 지금 파일에 맞지 않습니다. 다시 prepare 하세요."
+        )
+    plan = analyze(inputs, rule, progress=progress, cancel=cancel)
+    path = output_path or default_output_path(plan)
+    return Prepared(
+        request,
+        (),
+        inputs,
+        None,
+        plan,
+        describe_rule(rule, view),
+        _samples(plan),
+        (),
+        manual_items(plan),
+        path,
+    )
+
+
+def approval_hash(prepared: Prepared) -> str:
+    """[저장]이 승인할 계획 지문(plan_hash). 채우기는 출력 경로를, 검토는 기본 경로를 쓴다(commit과 같게)."""
+    plan = prepared.plan
+    if plan is None:
+        raise ServiceError("APPROVAL_INVALID", "질문에 먼저 답해야 저장할 수 있습니다.")
+    if plan.rule.work_type == "check":
+        return approve(plan).plan_hash
+    return approve(plan, prepared.output_path).plan_hash

@@ -58,7 +58,21 @@ uv run ureonggaksi extract --workflow examples/workflow.json --output examples/g
 | `1` | 일부 필수 값 누락, 중복, 문서 오류. 성공한 결과는 저장한다 |
 | `2` | 설정 또는 저장 실패 |
 
-기존 파일을 덮어쓰려면 `--overwrite`를 지정한다.
+출력 파일이 이미 있으면 덮어쓰지 않고 오류로 끝낸다.
+
+### 한 줄 요청으로 채우기(두 단계)
+
+화면 없이도 "본 것만 저장"을 지키도록 미리보기와 저장을 나눈다.
+
+```powershell
+uv run ureonggaksi prepare --request "이름 기준으로 이수시간 채워줘" --target 취합표.xlsx `
+  --out 작업.plan.json 문서1.hwpx 문서2.hwpx
+# 해석·채울 칸·예시와 계획 지문을 출력한다. 질문이 있으면 종료 코드 3과 --answer 쓰는 법을 출력한다.
+uv run ureonggaksi commit --plan 작업.plan.json --plan-hash <출력된 지문>
+# 파일이나 계획이 prepare 때와 달라졌으면 저장하지 않는다.
+```
+
+로컬 모델을 쓰려면 prepare에 `--runtime`(llama-completion 실행 파일)과 `--model`(GGUF)을 준다. 없으면 모델 없이 해석한다.
 
 ## 지원 범위와 알려진 한계
 
