@@ -54,18 +54,10 @@ ALLOWED_WORD = (
     r"|기준|기준으로|찾아|찾아서|찾고|찾구|행을"
     r"|(?:칸|열|란)에?"
     rf"|(?:취합표|현황표|명단|표|시트|엑셀|문서|서류|신청서|확인서|요청서){PARTICLE}?"
+    r"|빈칸|빈칸을|빈칸에|다|모두|전부|각각"  # "다 채워줘": 빼는 동사가 오면 그 동사가 모르는 말이라 묻는다
     rf"|{ENDING}|요|좀|부탁해|부탁해요|부탁합니다|부탁드립니다|감사합니다|감사해요|고맙습니다|[ㅠㅜ]+"
 )
 NAME_MARK = "\x00"
-# 이름에 붙은 모르는 말 가운데 다른 이름까지 가리키는 말(마지막 방어막): "비고 빼고 전부 취소", "둘 다 빼",
-# "앞에 것도", "비고처럼". 위치만으로는 "직급은 현행 유지"(그 이름만)와 가를 수 없어서 둔다(PR #18 2차 검수 H2)
-REFERENCE = re.compile(
-    r"(?<![가-힣])(전부|모두|다|둘|셋|전체|나머지|모든|다른|앞|앞에|앞의|위|위에|아까|그것|그건|그거|이것|이건|이거)"
-    r"(?![가-힣])|처럼|포함|같이|전부|모두|나머지"
-)
-CHAIN = re.compile(
-    r"\s*(이랑|랑|하고|과|와|및)?\s*[,·/]?\s*"
-)  # 나열: "직급이랑 이수시간", "직급, 이수시간"
 # 낱말 끝에 붙은 '좀'("체크좀")은 뜻을 바꾸지 않는다
 SIMPLE_TOKEN = re.compile(
     rf"(?:(?:{NAME_MARK}{PARTICLE}*)+|(?:{NAME_MARK}{PARTICLE}*)*(?:{ALLOWED_WORD}))좀?"
@@ -310,45 +302,20 @@ def _mentions(request: str, names: list[str]) -> list[tuple[str, str]]:
     return [(name, _compact(masked[e : e + 20])[:12]) for _, e, name in spans if name]
 
 
-def _tainted(request: str, names: list[str]) -> set[str]:
-    """모르는 말이 닿은 이름들. 요청을 이름 사이 구간으로 나눠 구간마다 본다.
+def _simple(request: str, names: list[str]) -> bool:
+    """모든 낱말이 '이름+조사' 또는 허용 낱말인 요청. 모르는 말이 하나라도 있으면 짝을 정하지 않는다.
 
-    - 이름(+조사) 바로 뒤에 붙은 모르는 말은 그 이름과 다음 이름에 닿는다("직급은 현행 유지").
-    - 허용 낱말 뒤에 따로 나온 모르는 말은 별도 절이라 앞의 모든 이름에 닿는다("…채워줘. 둘 다 빼줘").
-    - 첫 이름 앞의 모르는 말, 되가리킴 낱말(REFERENCE)이 든 모르는 말은 모든 이름에 닿는다.
-    - 나열로 이어진 이름("직급이랑 이수시간")은 한 묶음이라, 하나에 닿으면 묶음 전체에 닿는다.
+    모르는 말이 어느 이름에 걸리는지를 위치나 낱말 목록으로 정하는 국소 판정은 독립 검수 세 번 모두에서
+    나열·되가리킴·다른 지목 표현으로 새었다(PR #18, DIF-041). 그래서 요청 전체로 판단한다.
     """
-    spans = [(s, e, n) for s, e, n in _spans(request, names) if n]
-    every = {n for _, _, n in spans}
-    tainted: set[str] = set()
-    seen: list[str] = []
-    chains: list[set[str]] = []
-    previous_end, previous_name = 0, None
-    for start, end, name in [*spans, (len(request), len(request), None)]:
-        raw = request[previous_end:start]
-        if name and previous_name and CHAIN.fullmatch(raw):
-            chains[-1].add(name)
-        elif name:
-            chains.append({name})
-        gap = (NAME_MARK if previous_name else "") + raw
-        tokens = [t for t in re.split(r"[\s,.!~·、/]+", gap) if t]
-        unknown = [i for i, t in enumerate(tokens) if not SIMPLE_TOKEN.fullmatch(t)]
-        if unknown:
-            words = " ".join(tokens[unknown[0] :]).replace(NAME_MARK, " ")
-            attached = all(t.startswith(NAME_MARK) for t in tokens[: unknown[0]])
-            if previous_name is None or REFERENCE.search(words):
-                tainted |= every
-            else:
-                tainted.update(n for n in ([previous_name] if attached else seen) if n)
-            if name:
-                tainted.add(name)
+    marked, last = [], 0
+    for start, end, name in _spans(request, names):
         if name:
-            seen.append(name)
-        previous_end, previous_name = end, name
-    for chain in chains:
-        if chain & tainted:
-            tainted |= chain
-    return tainted
+            marked += [request[last:start], NAME_MARK]
+            last = end
+    marked.append(request[last:])
+    tokens = [t for t in re.split(r"[\s,.!~·、/]+", "".join(marked)) if t]
+    return all(SIMPLE_TOKEN.fullmatch(t) for t in tokens)
 
 
 def _resolve(name: str, pool: list[str]) -> str | None:
@@ -475,16 +442,20 @@ def _pick_record(documents, view, mentions):
 
 
 def _ask_model(choose: Chooser | None, prompt_for, options: tuple[str, ...]) -> str | None:
-    """선택지 순서를 바꿔 두 번 묻고 같은 답일 때만 받아들인다. 순서에 흔들리는 답은 믿지 않는다."""
+    """선택지를 한 칸씩 돌려 두 번 묻고 같은 답일 때만 받아들인다. 자리에 흔들리는 답은 믿지 않는다.
+
+    '없음'까지 돌리므로 모든 자리의 선택지가 바뀐다(뒤집기는 가운데 자리가 남는다, PR #18 3차 검수 L1).
+    첫 답이 '없음'이거나 목록 밖이면 확정하지 않으므로 두 번째는 묻지 않는다.
+    """
     if choose is None or not options:
         return None
-    # '없음'의 자리까지 뒤집는다. 선택지가 하나여도 첫 자리만 고르는 답이 걸린다(PR #18 M1)
-    answers = {
-        choose(prompt_for(options), (*options, NONE)),
-        choose(prompt_for(options[::-1]), (NONE, *options[::-1])),
-    }
-    answer = answers.pop() if len(answers) == 1 else None
-    return answer if answer in options else None
+    first = (*options, NONE)
+    answer = choose(prompt_for(options), first)
+    if answer not in options:
+        return None
+    second = first[1:] + first[:1]
+    again = choose(prompt_for(tuple(o for o in second if o != NONE)), second)
+    return answer if again == answer else None
 
 
 def interpret(
@@ -507,7 +478,7 @@ def interpret(
     found = _mentions(request, columns + names)
     skip = _negated(found)
     mentions = [(n, a) for n, a in found if n not in skip]
-    tainted = _tainted(request, columns + names)
+    simple = _simple(request, columns + names)
     work_type = _work_type(_mask(request, columns + names))
     if work_type is None:
         questions.append(("work_type", ("fill", "check")))
@@ -518,9 +489,7 @@ def interpret(
     hint = next((n for n, after in mentions if KEY_AFTER.match(after)), None)
     named_keys = {n for n, a in found if KEY_AFTER.match(a)}
     # 키를 둘 말했거나("이름 기준 말고 발급번호 기준으로"), 말한 키에 모르는 말이 닿았으면 묻는다(PR #18 H2)
-    conflicting = (
-        any(n in skip for n in named_keys) or len(named_keys) > 1 or bool(named_keys & tainted)
-    )
+    conflicting = any(n in skip for n in named_keys) or len(named_keys) > 1
     if conflicting:
         hint = None
     elif hint:
@@ -597,15 +566,14 @@ def interpret(
     pairs = [p for p in dict.fromkeys(pairs) if p[0] not in unclear and p[1] not in unclear]
     only_fields = [n for n in only_fields if n not in unclear]
     only_columns = [n for n in only_columns if n not in unclear]
-    # 애매한 지목이면 모두, 모르는 말이 닿은 이름이면 그 이름만 정하지 않고 묻는다(P04 ② 국소 판정)
+    # 애매한 지목이나 모르는 말이 있으면 짝을 정하지도 모델에 묻지도 않고 모두 소명한다
     mentioned = [*(p[0] for p in pairs), *(p[1] for p in pairs), *only_fields, *only_columns]
-    drop = set(mentioned) if pointing_unclear else tainted
+    drop = set(mentioned) if pointing_unclear or not simple else set()
     held = [n for n in mentioned if n in drop]
     pairs = [p for p in pairs if p[0] not in drop and p[1] not in drop]
     only_fields = [n for n in only_fields if n not in drop]
     only_columns = [n for n in only_columns if n not in drop]
-    # 빼라고 한 열·이름, 모르는 말이 닿은 이름은 모델 선택지에도 넣지 않는다(PR #18 2차 검수 M1)
-    off_limits = skip | set(unclear) | tainted
+    off_limits = skip | set(unclear)  # 빼라고 한 열·이름은 모델 선택지에도 넣지 않는다
     for field in only_fields:
         taken = {p[1] for p in pairs}
         options = _order(
@@ -683,10 +651,14 @@ def _shape_fits(samples, existing) -> bool:
     return "text" in (a, b) or a == b
 
 
+def _clean(text: str, limit: int = 20) -> str:
+    """질문에 넣는 문서·취합표 글: 줄바꿈·따옴표를 공백으로 바꾸고 자른다(줄 구조를 깨지 못하게)."""
+    return re.sub(r"[\s\"'`]+", " ", text or "").strip()[:limit]
+
+
 def _examples(values) -> str:
-    # 문서 글이 지시처럼 읽히지 않게 따옴표로 감싸고 자른다(PR #18 M2)
-    # 줄바꿈·따옴표는 공백으로 바꿔 질문 줄 구조를 깨지 못하게 한다(PR #18 2차 검수 L1)
-    clean = (re.sub(r"[\s\"'`]+", " ", v).strip()[:20] for v in values if v and v.strip())
+    # 문서 글이 지시처럼 읽히지 않게 따옴표로 감싸고 자른다(PR #18 검수 M2·L1)
+    clean = (_clean(v) for v in values if v and v.strip())
     shown = ", ".join(dict.fromkeys(f'"{c}"' for c in clean if c))
     return f" (예: {shown})" if shown else ""
 
@@ -721,7 +693,7 @@ def _field_prompt(request, column, options, by_name, view) -> str:
     ]
     lines += _hint(column, options)
     for option in options:
-        lines.append(f"- {option}{_examples(by_name[option].samples[:2])}")
+        lines.append(f"- {_clean(option, 40)}{_examples(by_name[option].samples[:2])}")
     return "\n".join(lines)
 
 
@@ -732,7 +704,7 @@ def _column_prompt(request, field: FieldCandidate, options, view) -> str:
         f"맞는 열이 없으면 '{NONE}'.",
     ]
     lines += _hint(field.name, options)
-    lines += [f"- {o}{_examples(_column_values(view, o)[:3])}" for o in options]
+    lines += [f"- {_clean(o, 40)}{_examples(_column_values(view, o)[:3])}" for o in options]
     return "\n".join(lines)
 
 

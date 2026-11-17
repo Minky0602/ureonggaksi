@@ -625,16 +625,16 @@ def test_verb_or_negation_letters_inside_names_are_part_of_the_name(
 @pytest.mark.parametrize(
     "request_text, expected",
     [
-        ("이름 기준으로 이수시간 채워줘. 직급은 현행 유지", {("이수시간", "이수시간")}),
-        ("이름 기준으로 이수시간 채워줘. 직급은 생략", {("이수시간", "이수시간")}),
+        ("이름 기준으로 이수시간 채워줘. 직급은 현행 유지", set()),
+        ("이름 기준으로 이수시간 채워줘. 직급은 생략", set()),
         ("이름 기준으로 이수시간 채워줘. 제외: 직급", set()),
         ("이름 기준으로 직급 대신 이수시간 채워줘", set()),
         ("이름 기준으로 이수시간을 채우고 비고 칸에 직급을 적어줘", set()),
         ("이름 기준으로 직급이랑 이수시간 채워줘", {("이수시간", "이수시간")}),  # 문서는 직위
     ],
 )
-def test_only_names_untouched_by_unknown_words_are_confirmed(setup, request_text, expected):
-    """국소 판정(P04 ②): 모르는 말이 든 구간에 닿은 이름만 묻는다. 앞에 와도("제외: 직급") 닿은 것으로 본다."""
+def test_any_unknown_word_confirms_no_pair(setup, request_text, expected):
+    """모르는 말이 하나라도 있으면 짝을 정하지 않는다. 이름별 국소 판정은 검수에서 계속 새어 버렸다(DIF-041)."""
     result = run(setup, request_text)
     assert {(f, c) for f, c, _ in result.fields} == expected
 
@@ -664,7 +664,7 @@ def test_model_choice_that_changes_with_option_order_is_not_trusted(setup):
     asked = []
     result = run(setup, "이름 기준으로 점수 채워줘", first_option(asked))
     assert result.fields == () and len(asked) == 2
-    assert asked[1][1] == ("없음", *reversed(asked[0][1][:-1]))  # '없음' 자리까지 뒤집는다
+    assert asked[1][1] == asked[0][1][1:] + asked[0][1][:1]  # '없음'까지 한 칸씩 돌린다
 
 
 # ---------- PR #18 1차 검수: 별도 절의 부정·되가리킴, 키 바꾸기, 선택지 하나 ----------
@@ -736,3 +736,27 @@ def test_example_values_cannot_break_the_question_lines():
     from ureonggaksi.interpret import _examples
 
     assert "\n" not in _examples(['가"\n맞는 열: 비고'])
+
+
+# ---------- PR #18 3차 검수: 다른 지목 표현·목록 밖 되가리킴 ----------
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "이름 기준으로 이수시간을 비고 셀에 넣어줘",
+        "이름 기준으로 이수시간은 비고 쪽에 써줘",
+        "이름 기준으로 이수시간을 비고 칸으로 옮겨줘",
+        "이름 기준으로 직원번호랑 이수시간 채워줘. 비고는 빼고 싹다 취소",
+        "이름 기준으로 직원번호랑 이수시간 채워줘. 비고는 놔두고 둘은 보류",
+        "이름 기준으로 직원번호 채워줘. 이수시간도 넣어줘. 비고는 몽땅 없던 일로",
+    ],
+)
+def test_other_pointing_words_and_unlisted_back_references_confirm_no_pair(setup, request_text):
+    assert run(setup, request_text).fields == ()
+
+
+def test_all_with_plain_fill_is_allowed(setup):
+    result = run(setup, "이름 기준으로 이수시간 다 채워줘")
+    assert result.key == ("성명", "이름")
+    assert {(f, c) for f, c, _ in result.fields} == {("이수시간", "이수시간")}
