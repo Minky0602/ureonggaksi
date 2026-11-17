@@ -15,6 +15,7 @@ from .interpret import Chooser, build_rule, interpret
 from .manual import ManualItem
 from .rules import POLICY_VALUES, SKIP, RuleSet, RuleStore, WorkflowVersion, validate_rule
 from .save import ResultPackage, approve, default_output_path, save_result
+from .storage import local_path
 from .xlsx import TargetView, inspect_target
 
 QUESTION_RATIO = 0.30  # 공통 문제 질문 기준(api 2.0). Q01 정답셋으로 조정한다
@@ -153,10 +154,19 @@ def _rule_question(slot: str, options: tuple[str, ...]) -> Question:
     )
 
 
-def _apply_answers(result, answers: Pairs, view: TargetView):
-    """규칙이 서지 않을 때의 답(work_type·key_column)을 해석 결과에 반영한다."""
+def _key_field_for(result, view: TargetView, column: str) -> str | None:
+    """그 열과 값이 맞는 문서 항목이 하나뿐이면 그 항목. 둘 이상(성명·추천인)이면 답으로 정할 수 없다."""
     from .interpret import _key_candidates  # 같은 해석 기준으로 키 항목을 찾는다
 
+    fields = list(result.candidates)
+    matches = {
+        c[1] for c in _key_candidates(fields, view, named=True, any_hit=True) if c[2] == column
+    }
+    return matches.pop() if len(matches) == 1 else None
+
+
+def _apply_answers(result, answers: Pairs, view: TargetView):
+    """규칙이 서지 않을 때의 답(work_type·key_column)을 해석 결과에 반영한다."""
     work_type = _answer(answers, "work_type")
     if work_type in ("fill", "check") and result.work_type is None:
         result = replace(
@@ -166,12 +176,8 @@ def _apply_answers(result, answers: Pairs, view: TargetView):
         )
     column = _answer(answers, "key_column")
     if column and result.key is None and column in view.columns:
-        fields = list(result.candidates)
-        matches = {
-            c[1] for c in _key_candidates(fields, view, named=True, any_hit=True) if c[2] == column
-        }
-        if len(matches) == 1:
-            field = matches.pop()
+        field = _key_field_for(result, view, column)
+        if field is not None:
             result = replace(
                 result,
                 key=(field, column),
@@ -273,6 +279,10 @@ def prepare(
                     "RULE_INVALID",
                     "이 질문은 답으로 정할 수 없습니다. '자세히'에서 직접 지정하세요.",
                 )
+            if (
+                slot == "key_column"
+            ):  # 답으로 정해지는 열만 선택지로 준다(검수 M-a). 없으면 '자세히'로 안내
+                options = tuple(c for c in options if _key_field_for(result, view, c))
             return _asking(request, answers, inputs, _rule_question(slot, options))
         warnings += [f"‘{name}’은(는) 정하지 못해 비워 둡니다." for name in result.excluded]
     rule = _with_policy(rule, answers)
@@ -323,14 +333,15 @@ def commit(
     plan = prepared.plan
     if plan is None or prepared.question is not None:
         raise ServiceError("APPROVAL_INVALID", "질문에 먼저 답해야 저장할 수 있습니다.")
+    # 검토도 prepare가 정한 경로로 승인한다(기본 경로는 시각이 들어가 다시 만들면 달라진다, 검수 M1).
+    # 승인 확인(경로 충돌 등)을 규칙 저장보다 먼저 해, 저장하지 못할 결과의 규칙을 남기지 않는다(검수 L-a)
+    approval = approve(plan, prepared.output_path)
     store.save(
         prepared.workflow.name if prepared.workflow else _rule_name(prepared),
         plan.rule,
         base=prepared.workflow,
         request=prepared.request[:500],
     )
-    # 검토도 prepare가 정한 경로로 승인한다(기본 경로는 시각이 들어가 다시 만들면 달라진다, 검수 M1)
-    approval = approve(plan, prepared.output_path)
     return save_result(plan, approval, progress=progress, cancel=cancel)
 
 
@@ -381,8 +392,10 @@ def approval_hash(prepared: Prepared) -> str:
     if plan is None:
         raise ServiceError("APPROVAL_INVALID", "질문에 먼저 답해야 저장할 수 있습니다.")
     workflow = prepared.workflow
+    paths = [str(local_path(f.path)) for f in (*plan.inputs.sources, plan.inputs.target)]
     parts = (
         approve(plan, prepared.output_path).plan_hash,
+        "|".join(paths),  # 같은 내용의 다른 경로로 바꿔도 다른 승인이다(검수 M-b)
         prepared.request[:500],
         f"{workflow.workflow_id}:{workflow.revision}" if workflow else "",
     )

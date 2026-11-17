@@ -178,3 +178,37 @@ def test_a_saved_rule_with_new_answers_is_saved_as_the_next_revision(files):
     commit(rerun, store)
     assert len(store.list()) == 1 and store.load(saved.workflow_id).revision == 2
     assert store.load(saved.workflow_id).rule.answered("rounding")  # 건너뛴 답도 남는다
+
+
+def test_key_choices_only_offer_columns_an_answer_can_settle(tmp_path):
+    """성명·추천인이 모두 '이름' 열과 맞으면 '이름'은 답으로 정할 수 없다. 선택지에 내놓지 않는다(검수 M-a)."""
+
+    def doc(name, referrer, hours):
+        rows = [("성명", name), ("추천인", referrer), ("이수시간", hours)]
+        return [
+            "<hp:p><hp:run>"
+            + table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
+            + "</hp:run></hp:p>"
+        ]
+
+    sources = [
+        write_hwpx(tmp_path / "a.hwpx", doc("가나다", "라마바", "12")),
+        write_hwpx(tmp_path / "b.hwpx", doc("라마바", "가나다", "8")),
+    ]
+    target = write_xlsx(
+        tmp_path / "표.xlsx",
+        [["이름", "이수시간"], ["가나다", None], ["라마바", None]],
+        sheet="현황",
+    )
+    asked = prepare("이수시간 채워줘", sources, target, output_path=tmp_path / "r.xlsx")
+    assert asked.question.slot == "key_column" and "이름" not in asked.question.choices
+
+
+def test_a_path_conflict_saves_no_rule(files):
+    """결과 경로에 다른 파일이 생기면 저장하지 않고 규칙도 남기지 않는다(검수 L-a)."""
+    sources, target, out, store = files
+    prepared = prepare("이름 기준으로 이수시간 채워줘", sources, target, output_path=out)
+    out.write_bytes(b"someone else")
+    with pytest.raises(ServiceError):
+        commit(prepared, store)
+    assert store.list() == () and out.read_bytes() == b"someone else"

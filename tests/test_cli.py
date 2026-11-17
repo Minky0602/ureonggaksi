@@ -242,3 +242,40 @@ def test_a_broken_plan_file_is_an_error_not_partial(tmp_path):
         _cli("commit", "--plan", plan, "--plan-hash", "x", "--rules-dir", tmp_path / "r").returncode
         == 2
     )
+
+
+def test_a_copy_at_another_path_is_a_different_approval(tmp_path):
+    """같은 내용의 다른 경로로 바꾼 계획은 거부한다. 근거에 승인하지 않은 경로가 남지 않는다(검수 M-b)."""
+    import json
+    import shutil
+
+    sources, target = _files(tmp_path)
+    plan, out, rules = tmp_path / "p.plan.json", tmp_path / "결과.xlsx", tmp_path / "r"
+    shown = _cli(
+        "prepare",
+        "--request",
+        "이름 기준으로 이수시간 채워줘",
+        "--target",
+        target,
+        "--out",
+        plan,
+        "--output",
+        out,
+        "--rules-dir",
+        rules,
+        *sources,
+    )
+    copy = tmp_path / "사본.xlsx"
+    shutil.copy(target, copy)
+    record = json.loads(plan.read_text(encoding="utf-8"))
+    moved = tmp_path / "m.plan.json"
+    moved.write_text(
+        json.dumps({**record, "target": str(copy)}, ensure_ascii=False), encoding="utf-8"
+    )
+    assert (
+        _cli(
+            "commit", "--plan", moved, "--plan-hash", _digest(shown), "--rules-dir", rules
+        ).returncode
+        == 2
+    )
+    assert not out.exists()

@@ -14,7 +14,7 @@ from pathlib import Path
 from .ai import LocalModel, ai_status
 from .errors import ServiceError
 from .rules import RuleError, RuleStore, rule_from_dict, rule_to_dict
-from .save import publish_new
+from .save import _companions, publish_new
 from .service import Prepared, approval_hash, commit, prepare, replay
 from .storage import local_path
 
@@ -109,9 +109,10 @@ def run_prepare(args, parser) -> int:
             if question.examples:
                 print("  예시: " + ", ".join(question.examples))
             if question.choices:
-                print(
-                    f"  답: --answer {question.slot}=<{'|'.join(question.choices)}> 로 다시 실행하세요."
-                )
+                choices = list(question.choices)
+                if question.affects:  # 공통 문제 질문은 건너뛸 수 있다(그 칸은 비워 둔다)
+                    choices.append("__skip__")
+                print(f"  답: --answer {question.slot}=<{'|'.join(choices)}> 로 다시 실행하세요.")
             return EXIT_QUESTION
         _print_preview(prepared)
         digest = approval_hash(prepared)
@@ -134,7 +135,14 @@ def run_prepare(args, parser) -> int:
             "plan_hash": digest,
         }
         data = json.dumps(record, ensure_ascii=False, indent=2).encode("utf-8")
-        taken = [*args.files, args.target, prepared.output_path]
+        evidence, manual = _companions(prepared.output_path, True)
+        taken = [
+            *args.files,
+            args.target,
+            prepared.output_path,
+            evidence,
+            manual,
+        ]  # 동반 파일도(검수 L-b)
         _write_plan(args.out, data, taken)
         print(f"계획 파일: {args.out}")
         print(f"계획 지문: {digest}")
