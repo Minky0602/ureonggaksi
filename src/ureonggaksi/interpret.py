@@ -25,19 +25,22 @@ from .xlsx import TargetView
 
 # 작업 종류 동사. "확인서"·"검토서"처럼 문서 이름에 든 글자는 동사가 아니다
 FILL = re.compile(r"채워|채우|채움|넣어|넣기|넣고|넣을|입력|기입|적어|옮겨|반영|써\s?줘")
-FILL_NEGATED = re.compile(r"(채우|넣|입력하|기입하|적|옮기)지\s*(마|말|않)")  # "아직 채우지 마"
+FILL_NEGATED = re.compile(  # 하지 않는 채우기: "채우지 마", "채워주지 마", "안 채워도 돼", "넣을 필요 없어"
+    r"(채우|채워|넣|넣어|입력하|기입하|적|적어|옮기|옮겨|써)\s*(주)?\s*지\s*(는|도|만)?\s*(마|말|않)"
+    r"|안\s*(채|넣|입력|기입|적|옮|써)|필요\s*(는|도)?\s*없|맙시다|(채우|넣으|입력하|기입하|적으|쓰)면\s*안"
+)
 CHECK = re.compile(
     r"확인(?!서)|대조|검토(?!서)|비교|맞는지|맞나|같은지|일치|검증|틀린|다른지|차이|체크|점검|검사"
     r"|괜찮은지|됐나|됐는지|제대로|봐\s?줘|살펴|없나|맞아|됐어|있어|있나|\?"
 )  # "기입 상태 봐줘"·"입력 누락 없나": 채우기 낱말이 명사로 쓰인 검토 요청(P04 ① 2차 검수)
 # 이름 바로 뒤(공백 제거) 글자로 읽는 표현
-KEY_AFTER = re.compile(
-    r"^(기준|으로|로)"
-)  # "이름으로 찾아", "요청번호 기준". "직급별로"는 묶기라 키가 아니다
+# "요청번호 기준", "이름으로 찾아", "이름으로 대조", "발급번호로 행을". '로'만으로는 키가 아니다:
+# "비고를 이름으로 채워줘"는 이름을 넣으라는 뜻일 수 있다(PR #18 6차 검수 H1). "직급별로"는 묶기다
+KEY_AFTER = re.compile(r"^(기준|(으로|로)(찾|대조|맞춰|비교|확인|검토|행))")
 NEGATED = re.compile(
     r"^(칸|열|란)?(에는|에|은|는|을|를|이|가|도|까지는|까지|만은|만)?"
     r"(빼(?!놓지|먹지)|제외|말고|그대로(?!옮|넣|채|입력|적|기입|반영)|손대지|건드리지|하지마|하지말|두고|놔두|참고|비워|비우"
-    r"|채우지마|채우지말|넣지마|넣지말)"
+    r"|채우지마|채우지말|넣지마|넣지말|보류|생략|취소)"
 )  # "번호 칸은 비워 둬", "비고 칸에 넣지 말고"
 # 코드가 항목 짝을 확정해도 되는 요청은 모든 낱말이 '이름+조사'이거나 아래 허용 낱말인 것뿐이다.
 # 빼기·미루기·두 절 요청처럼 위험한 표현을 목록으로 막으면 목록 밖 표현이 계속 새었다(P04 ① 2~4차 검수).
@@ -51,16 +54,25 @@ ALLOWED_WORD = (
     r"|기준|기준으로|찾아|찾아서|찾고|찾구|행을"
     r"|(?:칸|열|란)에?"
     rf"|(?:취합표|현황표|명단|표|시트|엑셀|문서|서류|신청서|확인서|요청서){PARTICLE}?"
-    rf"|{ENDING}|요|좀|부탁해|부탁해요|부탁합니다|부탁드립니다|[ㅠㅜ]+"
+    r"|빈칸|빈칸을|빈칸에|다|모두|전부|각각"  # "다 채워줘": 빼는 동사가 오면 그 동사가 모르는 말이라 묻는다
+    rf"|{ENDING}|요|좀|부탁해|부탁해요|부탁합니다|부탁드립니다|감사합니다|감사해요|고맙습니다|[ㅠㅜ]+"
 )
 NAME_MARK = "\x00"
 # 낱말 끝에 붙은 '좀'("체크좀")은 뜻을 바꾸지 않는다
+# 이름 뒤 '의'는 허용하지 않는다: "비고의 직급"은 어느 칸에 무엇을 넣는지 갈린다(5차 검수 P03)
+NAME_PARTICLE = PARTICLE.replace("|의|", "|")
 SIMPLE_TOKEN = re.compile(
-    rf"(?:(?:{NAME_MARK}{PARTICLE}*)+|(?:{NAME_MARK}{PARTICLE}*)*(?:{ALLOWED_WORD}))좀?"
+    rf"(?:(?:{NAME_MARK}{NAME_PARTICLE}*)+|(?:{NAME_MARK}{NAME_PARTICLE}*)*(?:{ALLOWED_WORD}))좀?"
 )
 JOINED = re.compile(r"^(이랑|랑|하고|와|과|,|및|그리고)")  # 나열: 부정이 앞 이름까지 걸린다
-SLOT = re.compile(r"^(칸|열|란)에")  # "A를 B 칸에 넣어"
-OBJECT = re.compile(r"^(을|를)")  # 지목 규칙의 A: 목적격 조사가 붙은 이름만
+# 이름 바로 뒤의 자리 낱말은 지목이다("B 칸에", "B 빈칸에", "B의 빈칸", "B 칸", "B 표에", PR #18 4차 검수 H).
+# "A를 B …"로 짝이 맞으면 지목대로, 아니면 모두 묻는다
+SLOT = re.compile(r"^의?(빈칸|칸|열|란|셀|표|시트)")
+# 지목을 확정하는 꼴: 칸 낱말(표·시트 아님) 바로 뒤에 채우기 동사. "칸 기준으로", "현황 시트에"는 지목으로 확정하지 않는다
+POINTED = re.compile(r"^의?(빈칸|칸|열|란|셀)(에|에다|에다가)?(채워|넣어|입력|기입|적어|옮겨|써)")
+OBJECT = re.compile(
+    r"^(을|를)\x00"
+)  # 지목 규칙의 A: '를' 바로 뒤에 칸 이름이 온다(사이에 동사 없음)
 DIRECTION = re.compile(
     r"^(에서|에|으로|로)"
 )  # "전화번호에", "휴대전화로": 지목인데 "A를 B 칸에" 꼴이 아님
@@ -117,6 +129,12 @@ def _document_fields(documents: tuple[Document, ...]) -> list[FieldCandidate]:
     for block in first.blocks:
         if block.kind == "cell" and block.text.strip():
             label_counts[_norm(block.text)] = label_counts.get(_norm(block.text), 0) + 1
+    paragraph_label = re.compile(r"^\s*([^:：\s][^:：]{0,19}?)\s*[:：]")
+    for (
+        block
+    ) in first.blocks:  # 문단 "직급: 팀장"과 표 칸 '직급'이 함께 있으면 어느 것인지 모른다(6차 A01)
+        if block.kind == "paragraph" and (m := paragraph_label.match(block.text)):
+            label_counts[_norm(m.group(1))] = label_counts.get(_norm(m.group(1)), 0) + 1
     for key, block in maps[0].items():
         text = block.text.strip()
         if not text or len(text) > 30 or text.isdigit():  # 연번 같은 숫자는 항목명이 아니다
@@ -157,13 +175,26 @@ def _document_fields(documents: tuple[Document, ...]) -> list[FieldCandidate]:
                 None,
             )
             values.append(hit.group(2) if hit else "")
-        if _norm(label) in found or not any(values):
+        if _norm(label) in found or not any(values) or label_counts.get(_norm(label), 0) > 1:
             continue
         query = rf"^\s*{re.escape(label)}\s*[:：]\s*(.+?)\s*$"
         found[_norm(label)] = FieldCandidate(
             label, FieldRule(label, "regex", query=query, group=1), tuple(values)
         )
     return list(found.values())
+
+
+def _ambiguous_labels(documents: tuple[Document, ...]) -> set[str]:
+    """첫 문서에서 둘 이상 나오는 라벨(표 칸·문단 "라벨:"). 항목 후보에서 빠진 이름이다."""
+    counts: dict[str, int] = {}
+    paragraph_label = re.compile(r"^\s*([^:：\s][^:：]{0,19}?)\s*[:：]")
+    for block in documents[0].blocks:
+        text = block.text.strip() if block.kind == "cell" else ""
+        if block.kind == "paragraph" and (m := paragraph_label.match(block.text)):
+            text = m.group(1)
+        if text:
+            counts[_norm(text)] = counts.get(_norm(text), 0) + 1
+    return {name for name, n in counts.items() if n > 1}
 
 
 def _related(name: str, columns) -> bool:
@@ -234,8 +265,12 @@ def _roster_fields(documents, section, table, top, names) -> list[FieldCandidate
 
 
 def _work_type(request: str) -> str | None:
-    """채우기·검토 동사가 하나만 있을 때만 정한다. "채우지 마"처럼 부정한 채우기는 채우기가 아니다."""
+    """채우기·검토 동사가 하나만 있을 때만 정한다. 하지 않는 채우기("채우지 마")는 채우기가 아니고,
+    그것과 다른 채우기가 함께 있으면("직급 채워줘, 이수시간은 안 채워도 돼") 묻는다."""
+    negated = bool(FILL_NEGATED.search(request))
     fill = bool(FILL.search(FILL_NEGATED.sub(" ", request)))
+    if negated and fill:
+        return None
     check = bool(CHECK.search(request))
     return "fill" if fill and not check else "check" if check and not fill else None
 
@@ -264,7 +299,12 @@ def _spans(request: str, names: list[str]) -> list[tuple[int, int, str]]:
     pairs = sorted(
         {(v, n) for n in names for v in _variants(n)}, key=lambda p: -len(_compact(p[0]))
     )
+    owners: dict[str, set[str]] = {}
     for variant, name in pairs:
+        owners.setdefault(_compact(variant), set()).add(name)
+    for variant, name in pairs:
+        if len(owners[_compact(variant)]) > 1 or re.fullmatch(ALLOWED_WORD, _compact(variant)):
+            name = ""  # 비고(1)·비고(2)의 '비고': 어느 이름인지 모른다. 모르는 말로 남긴다(5차 검수 H3)
         pattern = r"(?<![가-힣A-Za-z0-9])" + r"\s*".join(map(re.escape, _compact(variant)))
         for match in re.finditer(pattern, request):
             start, end = match.span()
@@ -273,6 +313,8 @@ def _spans(request: str, names: list[str]) -> list[tuple[int, int, str]]:
                 taken = [t for t in taken if t not in inside]
             if not any(s < end and start < e for s, e, _ in taken):
                 taken.append((start, end, name))  # 같은 이름이 여러 번 나오면 모두 읽는다
+                if not name:
+                    taken[-1] = (start, end, "")
     return sorted(taken)
 
 
@@ -293,7 +335,11 @@ def _mentions(request: str, names: list[str]) -> list[tuple[str, str]]:
 
 
 def _simple(request: str, names: list[str]) -> bool:
-    """모든 낱말이 '이름+조사' 또는 허용 낱말인 요청. 이름 자리를 표시로 바꾸고 낱말마다 확인한다."""
+    """모든 낱말이 '이름+조사' 또는 허용 낱말인 요청. 모르는 말이 하나라도 있으면 짝을 정하지 않는다.
+
+    모르는 말이 어느 이름에 걸리는지를 위치나 낱말 목록으로 정하는 국소 판정은 독립 검수 세 번 모두에서
+    나열·되가리킴·다른 지목 표현으로 새었다(PR #18, DIF-041). 그래서 요청 전체로 판단한다.
+    """
     marked, last = [], 0
     for start, end, name in _spans(request, names):
         if name:
@@ -373,7 +419,7 @@ def _identifier_like(values: list[str]) -> bool:
 
 
 def _key_candidates(
-    fields: list[FieldCandidate], view: TargetView, *, named: bool = False
+    fields: list[FieldCandidate], view: TargetView, *, named: bool = False, any_hit: bool = False
 ) -> list[tuple[int, str, str]]:
     """(일치 수, 문서 항목, 대상 열): 문서 값이 그 열에 글자 그대로 있는 쌍.
 
@@ -401,7 +447,9 @@ def _key_candidates(
             if not named and not _same(field.name, column) and all(map(_numeric, hit_values)):
                 continue  # 이름이 다른 열의 날짜·금액은 우연히 같을 수 있다(2차 검수 K01·K02)
             hits = len(hit_values)
-            if named or hits >= max(2, 0.8 * len(samples)):
+            # 키를 말했어도 이름이 다른 열은 값 한두 개의 우연한 일치로 잇지 않는다(6차 검수 H2)
+            strong = hits >= max(2, 0.8 * len(samples))
+            if any_hit or (named and _same(field.name, column)) or strong:
                 result.append((hits, field.name, column))
     return sorted(result, key=lambda c: -c[0])
 
@@ -427,11 +475,22 @@ def _pick_record(documents, view, mentions):
     return RecordRule("document", ""), document
 
 
-def _ask_model(choose: Chooser | None, prompt: str, options: tuple[str, ...]) -> str | None:
+def _ask_model(choose: Chooser | None, prompt_for, options: tuple[str, ...]) -> str | None:
+    """선택지를 한 칸씩 돌려 두 번 묻고 같은 답일 때만 받아들인다. 자리에 흔들리는 답은 믿지 않는다.
+
+    '없음'까지 돌리므로 모든 자리의 선택지가 바뀐다(뒤집기는 가운데 자리가 남는다, PR #18 3차 검수 L1).
+    첫 답이 '없음'이거나 목록 밖이면 확정하지 않으므로 두 번째는 묻지 않는다.
+    """
+    options = tuple(o for o in options if o != NONE)  # '없음'이라는 열은 답과 구분할 수 없다
     if choose is None or not options:
         return None
-    answer = choose(prompt, (*options, NONE))
-    return answer if answer in options else None
+    first = (*options, NONE)
+    answer = choose(prompt_for(options), first)
+    if answer not in options:
+        return None
+    second = first[1:] + first[:1]
+    again = choose(prompt_for(tuple(o for o in second if o != NONE)), second)
+    return answer if again == answer else None
 
 
 def interpret(
@@ -454,6 +513,11 @@ def interpret(
     found = _mentions(request, columns + names)
     skip = _negated(found)
     mentions = [(n, a) for n, a in found if n not in skip]
+    simple = _simple(request, columns + names)
+    # 열·항목 이름 자체가 빼기 낱말('제외')이면 이름으로 가려져 부정을 못 본다. 그런 이름이 나오면 묻는다(4차 M1)
+    simple = simple and not any(
+        re.fullmatch(NEGATED.pattern, _compact(v)) for n, _ in found for v in _variants(n)
+    )
     work_type = _work_type(_mask(request, columns + names))
     if work_type is None:
         questions.append(("work_type", ("fill", "check")))
@@ -462,7 +526,9 @@ def interpret(
     # "이름으로 찾아서 이름 말고"처럼 말한 키를 스스로 지웠으면 다른 열을 추정하지 않고 묻는다(2차 R03)
     key = None
     hint = next((n for n, after in mentions if KEY_AFTER.match(after)), None)
-    conflicting = any(n in skip and KEY_AFTER.match(a) for n, a in found)
+    named_keys = {n for n, a in found if KEY_AFTER.match(a)}
+    # 키를 둘 말했거나("이름 기준 말고 발급번호 기준으로"), 말한 키에 모르는 말이 닿았으면 묻는다(PR #18 H2)
+    conflicting = any(n in skip for n in named_keys) or len(named_keys) > 1
     if conflicting:
         hint = None
     elif hint:
@@ -482,13 +548,15 @@ def interpret(
         # 행 전체를 봤고, 그 열에 값이 맞는 다른 문서 항목이 없을 때만(3차 H1 성명·추천인, 4차 H3 이름·이름)
         rivals = [
             c
-            for c in _key_candidates(fields, view, named=True)
+            for c in _key_candidates(fields, view, named=True, any_hit=True)
             if c[2] == key[1] and c[1] != key[0]
         ]
         if rivals or not _covers_all_rows(view):
             key = None
     if key is None:
-        options = tuple(dict.fromkeys(c[2] for c in _key_candidates(fields, view, named=True)))
+        options = tuple(
+            dict.fromkeys(c[2] for c in _key_candidates(fields, view, named=True, any_hit=True))
+        )
         questions.append(("key_column", options[:3]))
     key_field, key_column = key if key else (None, None)
 
@@ -506,21 +574,25 @@ def interpret(
         None  # 그 앞 이름의 뒤 글자: "직급이랑 이수시간을 비고 칸에"의 나열을 알아본다
     )
     pointing_unclear = False  # "A를 B 칸에" 꼴이 아닌 지목(5차 검수 H): 짝을 정하지 않고 묻는다
+    pointed_names: list[str] = []
     for name, after in mentions:
         if name == hint:
+            if SLOT.match(after) or (DIRECTION.match(after) and not KEY_AFTER.match(after)):
+                pointing_unclear = True  # 키로 말한 이름을 칸으로도 지목했다(5차 검수 M)
             continue
         column = _resolve(name, [c for c in columns if c != key_column])
         field = _resolve(name, [n for n in names if n != key_field])
         if column is not None and SLOT.match(after) and previous and OBJECT.match(previous[2]):
-            if previous[1] is not None:
+            if previous[1] is not None and POINTED.match(after):
                 linked.append((previous[1], column))  # 지목한 칸이 같은 이름 짝보다 이긴다
+                pointed_names += [previous[0], name]
             else:
-                unclear += [column, previous[0]]
+                pointing_unclear = True
             if before_previous is not None and JOINED.match(before_previous):
                 pointing_unclear = True  # 나열한 이름 가운데 어느 것을 넣을지 모른다
             previous = before_previous = None
             continue
-        if SLOT.match(after) or DIRECTION.match(after):
+        if SLOT.match(after) or DIRECTION.match(after) or re.match(r"^(은|는)\x00", after):
             pointing_unclear = True
         if field is not None and column is not None:
             pairs.append((field, column, "match"))
@@ -531,6 +603,10 @@ def interpret(
             only_columns.append(column)
         before_previous = previous[2] if previous else None
         previous = (name, field, after)
+    # 지목은 요청에 단 하나, 그 두 이름 말고 다른 항목 이름이 없을 때만 확정한다("직급 이수시간을 비고 칸에", 5차 H1)
+    others = {n for n, _ in mentions if n != hint and n not in pointed_names}
+    if len(linked) > 1 or (linked and others):
+        pointing_unclear = True
     for field, column in linked:  # 사용자가 칸을 지목했다
         pairs = [p for p in pairs if p[0] != field]
         if field in only_fields:
@@ -539,12 +615,13 @@ def interpret(
     pairs = [p for p in dict.fromkeys(pairs) if p[0] not in unclear and p[1] not in unclear]
     only_fields = [n for n in only_fields if n not in unclear]
     only_columns = [n for n in only_columns if n not in unclear]
-    held: list[str] = []
-    if pointing_unclear or not _simple(
-        request, columns + names
-    ):  # 모르는 말·애매한 지목: 모두 묻는다
-        held = [*(p[0] for p in pairs), *(p[1] for p in pairs), *only_fields, *only_columns]
-        pairs, only_fields, only_columns = [], [], []
+    # 애매한 지목이나 모르는 말이 있으면 짝을 정하지도 모델에 묻지도 않고 모두 소명한다
+    mentioned = [*(p[0] for p in pairs), *(p[1] for p in pairs), *only_fields, *only_columns]
+    drop = set(mentioned) if pointing_unclear or not simple else set()
+    held = [n for n in mentioned if n in drop]
+    pairs = [p for p in pairs if p[0] not in drop and p[1] not in drop]
+    only_fields = [n for n in only_fields if n not in drop]
+    only_columns = [n for n in only_columns if n not in drop]
     off_limits = skip | set(unclear)  # 빼라고 한 열·이름은 모델 선택지에도 넣지 않는다
     for field in only_fields:
         taken = {p[1] for p in pairs}
@@ -552,18 +629,31 @@ def interpret(
             field,
             tuple(c for c in columns if c != key_column and c not in taken and c not in off_limits),
         )
-        answer = _ask_model(choose, _column_prompt(request, by_name[field], options, view), options)
+        answer = _ask_model(
+            choose, lambda o, f=field: _column_prompt(request, by_name[f], o, view), options
+        )
         if answer:
             pairs.append((field, answer, "model"))
+    # 문서에 같은 이름 라벨이 있지만 겹쳐서 뺀 열: 답은 그 라벨뿐이라 다른 항목을 고르게 하지 않는다(6차 A01)
+    ambiguous = _ambiguous_labels(documents)
+    held += [c for c in only_columns if _norm(c) in ambiguous]
+    only_columns = [c for c in only_columns if _norm(c) not in ambiguous]
     for column in only_columns:
         taken = {p[0] for p in pairs}
         options = _order(
             column,
             tuple(n for n in names if n != key_field and n not in taken and n not in off_limits),
         )
-        answer = _ask_model(choose, _field_prompt(request, column, options, by_name, view), options)
+        answer = _ask_model(
+            choose, lambda o, c=column: _field_prompt(request, c, o, by_name, view), options
+        )
         if answer:
             pairs.append((answer, column, "model"))
+
+    # 값 형태가 어긋나는 짝(코드형 값을 숫자 열에)은 확정하지 않는다
+    fits = [p for p in pairs if _shape_fits(by_name[p[0]].samples, _column_values(view, p[1]))]
+    held += [name for p in pairs if p not in fits for name in p[:2]]
+    pairs = fits
 
     # 한 열에 둘 이상이 몰리면 어느 것도 확정하지 않는다(검수 H7)
     count: dict[str, int] = {}
@@ -586,8 +676,43 @@ def interpret(
     return Interpretation(work_type, record, key, mapped, tuple(questions), excluded, tuple(fields))
 
 
+def _kind(value: str) -> str:
+    """값 형태: 날짜·연락처·숫자·코드형·글자. 짝이 그럴듯한지만 본다(값을 바꾸지 않는다)."""
+    v = value.strip()
+    if re.fullmatch(r"\d{4}\s*[-./년]\s*\d{1,2}\s*[-./월]\s*\d{1,2}\s*일?\.?", v):
+        return "date"
+    if re.fullmatch(r"(0\d{1,2}-\d{3,4}(-\d{4})?|내선\s*\d+)", v):
+        return "phone"
+    if re.fullmatch(r"[\d,]+(\.\d+)?\s*(원|천원|시간|명|개|점|%)?", v):
+        return "number"
+    if re.fullmatch(r"(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9]+([-_][A-Za-z0-9]+)+", v):
+        return "code"
+    return "text"
+
+
+def _main_kind(values) -> str:
+    kinds = [_kind(v) for v in values if v and v.strip()]
+    if not kinds:
+        return "text"
+    top = max(set(kinds), key=kinds.count)
+    return top if kinds.count(top) * 2 > len(kinds) else "text"
+
+
+def _shape_fits(samples, existing) -> bool:
+    """둘 다 뚜렷한 형태(글자 아님)인데 서로 다르면 맞지 않는다. 열이 비었으면 판단하지 않는다."""
+    a, b = _main_kind(samples), _main_kind(existing)
+    return "text" in (a, b) or a == b
+
+
+def _clean(text: str, limit: int = 20) -> str:
+    """질문에 넣는 문서·취합표 글: 줄바꿈·따옴표를 공백으로 바꾸고 자른다(줄 구조를 깨지 못하게)."""
+    return re.sub(r"[\s\"'`]+", " ", text or "").strip()[:limit]
+
+
 def _examples(values) -> str:
-    shown = ", ".join(dict.fromkeys(v for v in values if v))
+    # 문서 글이 지시처럼 읽히지 않게 따옴표로 감싸고 자른다(PR #18 검수 M2·L1)
+    clean = (_clean(v) for v in values if v and v.strip())
+    shown = ", ".join(dict.fromkeys(f'"{c}"' for c in clean if c))
     return f" (예: {shown})" if shown else ""
 
 
@@ -621,7 +746,7 @@ def _field_prompt(request, column, options, by_name, view) -> str:
     ]
     lines += _hint(column, options)
     for option in options:
-        lines.append(f"- {option}{_examples(by_name[option].samples[:2])}")
+        lines.append(f"- {_clean(option, 40)}{_examples(by_name[option].samples[:2])}")
     return "\n".join(lines)
 
 
@@ -632,7 +757,7 @@ def _column_prompt(request, field: FieldCandidate, options, view) -> str:
         f"맞는 열이 없으면 '{NONE}'.",
     ]
     lines += _hint(field.name, options)
-    lines += [f"- {o}{_examples(_column_values(view, o)[:3])}" for o in options]
+    lines += [f"- {_clean(o, 40)}{_examples(_column_values(view, o)[:3])}" for o in options]
     return "\n".join(lines)
 
 

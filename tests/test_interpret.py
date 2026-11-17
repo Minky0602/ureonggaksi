@@ -9,7 +9,7 @@ from conftest import cell, para, table, write_hwpx, write_xlsx
 from ureonggaksi.analyze import analyze
 from ureonggaksi.hwpx import read_hwpx
 from ureonggaksi.inputs import open_inputs
-from ureonggaksi.interpret import _resolve, build_rule, interpret
+from ureonggaksi.interpret import _ask_model, _resolve, build_rule, interpret
 from ureonggaksi.xlsx import inspect_target
 
 PEOPLE = [
@@ -65,6 +65,19 @@ def first_option(asked):
     return choose
 
 
+def picks(meaning, asked=None):
+    """가짜 모델: 질문 대상('부서')에 맞는 답(meaning['부서'])을 선택지 순서와 무관하게 고른다."""
+
+    def choose(prompt, options):
+        if asked is not None:
+            asked.append((prompt, options))
+        subject = next((k for k in meaning if f"'{k}'" in prompt), None)
+        answer = meaning.get(subject, "없음")
+        return answer if answer in options else "없음"
+
+    return choose
+
+
 # ---------- 코드가 정하는 것 ----------
 
 
@@ -88,11 +101,11 @@ def test_equal_names_pair_without_the_model(setup):
 
 def test_names_that_only_look_alike_go_to_the_model_with_a_hint(setup):
     asked = []
-    result = run(setup, "이름 기준으로 점수 채워줘", first_option(asked))
+    result = run(setup, "이름 기준으로 점수 채워줘", picks({"점수": "평가점수"}, asked))
     assert result.fields == (("평가점수", "점수", "model"),)
     prompt, options = asked[0]
     assert options[0] == "평가점수" and options[-1] == "없음"  # 이름이 비슷한 것을 앞에
-    assert "이름이 비슷한 것: 평가점수" in prompt and "예: 90, 85" in prompt
+    assert "이름이 비슷한 것: 평가점수" in prompt and '예: "90", "85"' in prompt
     without = run(setup, "이름 기준으로 점수 채워줘")  # 모델이 없으면 확정하지 않고 빼서 소명
     assert without.fields == () and without.excluded == ("점수",)
     assert [q[0] for q in without.questions] == ["target_column"]
@@ -150,7 +163,10 @@ def test_roster_table_reads_every_participant(tmp_path):
     ]
     inputs, documents, view = build(tmp_path, docs, sheet, "명단")
     result = interpret(
-        "이름으로 찾아서 부서랑 참석일 채워줘", documents, view, choose=first_option([])
+        "이름으로 찾아서 부서랑 참석일 채워줘",
+        documents,
+        view,
+        choose=picks({"부서": "소속부서", "참석일": "참석일자"}),
     )
     assert result.record.kind == "table_rows" and result.key == ("성명", "이름")
     assert set(result.fields) == {("부서", "소속부서", "model"), ("참석일", "참석일자", "model")}
@@ -392,11 +408,10 @@ def test_same_name_with_a_different_unit_is_not_offered_to_the_model(tmp_path):
     ],
 )
 def test_any_restriction_in_the_request_confirms_no_pair(setup, request_text):
-    """부정 어휘를 다 셀 수 없으므로, 빼기·하지 않기가 섞인 요청은 짝을 정하지 않고 묻는다."""
+    """빼기·하지 않기 표현이 닿은 이름은 확정하지 않는다. 확정될 수 있는 것은 깨끗한 이수시간뿐이다."""
     asked = []
     result = run(setup, request_text, choose=first_option(asked))
-    assert result.fields == () and asked == []
-    assert "target_column" in [q[0] for q in result.questions]
+    assert {(f, c) for f, c, _ in result.fields} <= {("이수시간", "이수시간")} and asked == []
     assert result.excluded  # 말한 항목은 소명 목록에 남는다
 
 
@@ -484,10 +499,10 @@ def test_repeated_label_is_not_a_candidate(tmp_path):
     ],
 )
 def test_requests_with_unknown_words_confirm_no_pair(setup, request_text):
-    """아는 말(이름+조사, 동사 하나, 키·표 낱말)만으로 된 요청이 아니면 짝을 정하지 않고 모델도 부르지 않는다."""
+    """모르는 말이 닿은 이름은 확정하지도 모델에 묻지도 않는다. 깨끗한 이수시간만 확정될 수 있다."""
     asked = []
     result = run(setup, request_text, choose=first_option(asked))
-    assert result.fields == () and asked == []
+    assert {(f, c) for f, c, _ in result.fields} <= {("이수시간", "이수시간")} and asked == []
 
 
 @pytest.mark.parametrize(
@@ -602,3 +617,285 @@ def test_verb_or_negation_letters_inside_names_are_part_of_the_name(
     else:  # 참고사항은 문서에 없다: 직급만 확정되고 참고사항은 소명된다
         assert ("직급", "직급") in {(f, c) for f, c, _ in result.fields}
         assert "참고사항" in result.excluded
+
+
+# ---------- P04 ② 모델 역할 판독·값 형태 검증 ----------
+
+
+@pytest.mark.parametrize(
+    "request_text, expected",
+    [
+        ("이름 기준으로 이수시간 채워줘. 직급은 현행 유지", set()),
+        ("이름 기준으로 이수시간 채워줘. 직급은 생략", set()),
+        ("이름 기준으로 이수시간 채워줘. 제외: 직급", set()),
+        ("이름 기준으로 직급 대신 이수시간 채워줘", set()),
+        ("이름 기준으로 이수시간을 채우고 비고 칸에 직급을 적어줘", set()),
+        ("이름 기준으로 직급이랑 이수시간 채워줘", {("이수시간", "이수시간")}),  # 문서는 직위
+    ],
+)
+def test_any_unknown_word_confirms_no_pair(setup, request_text, expected):
+    """모르는 말이 하나라도 있으면 짝을 정하지 않는다. 이름별 국소 판정은 검수에서 계속 새어 버렸다(DIF-041)."""
+    result = run(setup, request_text)
+    assert {(f, c) for f, c, _ in result.fields} == expected
+
+
+def test_pointing_needs_the_cell_right_after_the_object(setup):
+    """'이수시간을 채우고 비고 칸에': '를'과 칸 사이에 동사가 있으면 지목이 아니다(4B 측정 L01)."""
+    result = run(setup, "이름 기준으로 이수시간을 채우고 비고 칸에 직급을 적어줘")
+    assert ("이수시간", "비고") not in {(f, c) for f, c, _ in result.fields}
+
+
+def test_pairs_whose_value_shapes_clash_are_not_confirmed(tmp_path):
+    """문서 값이 코드형(E-11)인데 취합표 열 기존 값이 숫자면 같은 이름이어도 확정하지 않는다."""
+    docs = _single_table_docs(
+        [
+            [("성명", n), ("번호", v)]
+            for n, v in zip(["가나다", "라마바"], ["E-11", "E-12"], strict=True)
+        ]
+    )
+    sheet = [["이름", "번호"], ["가나다", "100"], ["라마바", "200"], ["사아자", "300"]]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("이름 기준으로 번호 확인해줘", documents, view)
+    assert result.fields == () and "번호" in result.excluded
+
+
+def test_model_choice_that_changes_with_option_order_is_not_trusted(setup):
+    """첫 선택지만 고르는 모델(위치 편향)은 두 순서에서 답이 달라 확정되지 않는다(2B 실측 N01)."""
+    asked = []
+    result = run(setup, "이름 기준으로 점수 채워줘", first_option(asked))
+    assert result.fields == () and len(asked) == 2
+    assert asked[1][1] == asked[0][1][1:] + asked[0][1][:1]  # '없음'까지 한 칸씩 돌린다
+
+
+# ---------- PR #18 1차 검수: 별도 절의 부정·되가리킴, 키 바꾸기, 선택지 하나 ----------
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "이름 기준으로 직급이랑 이수시간 채워주지 마",
+        "이름 기준으로 직원번호, 이수시간 채워줘. 둘 다 빼줘",
+        "이름 기준으로 직원번호랑 이수시간 채워줘. 앞에 거는 빼줘",
+        "이름 기준으로 직원번호랑 이수시간 채워줘 아니다 전부 하지 마",
+        "이름 기준으로 직원번호랑 이수시간 넣을 필요 없어",
+        "이름 기준으로 직원번호랑 이수시간 채워줘. 그건 다음 주에 할게",
+        "이름 기준으로 직원번호를 번호 칸에, 이수시간도 채워줘. 앞에 건 취소",
+    ],
+)
+def test_a_separate_clause_reaches_every_earlier_name(setup, request_text):
+    """허용 낱말 뒤에 따로 나온 모르는 말은 앞의 모든 이름에 닿는다. 규칙이 만들어지지 않는다."""
+    result = run(setup, request_text)
+    _, _, view = setup
+    assert build_rule(result, view) is None
+
+
+def test_switching_the_key_is_asked(setup):
+    """'이름 기준 말고 발급번호 기준으로': 키를 둘 말했으면 어느 쪽도 정하지 않는다(PR #18 H2)."""
+    result = run(setup, "이름 기준 말고 발급번호 기준으로 이수시간 채워줘")
+    assert result.key is None and "key_column" in [q[0] for q in result.questions]
+
+
+def test_a_single_option_is_still_checked_for_position_bias():
+    """선택지가 하나여도 '없음' 자리를 뒤집어 묻는다. 첫 자리만 고르는 답은 받지 않는다(PR #18 M1)."""
+    asked = []
+    assert _ask_model(first_option(asked), lambda o: "질문", ("비고",)) is None
+    assert [o for _, o in asked] == [("비고", "없음"), ("없음", "비고")]
+    assert _ask_model(lambda p, o: "비고", lambda o: "질문", ("비고",)) == "비고"
+
+
+# ---------- PR #18 2차 검수: 나열 묶음·첫 구간·되가리킴 ----------
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "이름 기준으로 직원번호랑 이수시간 채우면 안 돼",
+        "이름 기준으로 직원번호랑 이수시간 넣을 필요는 없어",
+        "이름 기준으로 직원번호랑 이수시간은 입력 금지",
+        "이름 기준으로 직원번호랑 이수시간 채우지 맙시다",
+        "이름 기준으로 직원번호, 이수시간 채워줘. 비고 빼고 전부 취소",
+        "이름 기준으로 직원번호랑 이수시간 채워줘. 점수 포함 둘 다 빼",
+        "다음은 하지 마세요 직원번호랑 이수시간 이름 기준으로 채워줘",
+        "이름 기준으로 이수시간 채워줘. 비고처럼 앞에 것도 비워 둬",
+    ],
+)
+def test_lists_leading_words_and_back_references_reach_every_name(setup, request_text):
+    """나열 묶음 전체, 첫 이름 앞의 말, 되가리킴 낱말은 모든 이름에 닿는다. 이수시간이 확정되지 않는다."""
+    result = run(setup, request_text)
+    assert ("이수시간", "이수시간") not in {(f, c) for f, c, _ in result.fields}
+
+
+def test_a_name_left_out_with_unknown_words_is_not_offered_to_the_model(setup):
+    """'비고는 생략': 모르는 말이 닿은 이름은 모델 선택지에서도 뺀다(PR #18 2차 검수 M1)."""
+    asked = []
+    run(setup, "이름 기준으로 직원번호 채워줘. 비고는 생략", picks({"직원번호": "비고"}, asked))
+    assert all("비고" not in options for _, options in asked)
+
+
+def test_example_values_cannot_break_the_question_lines():
+    from ureonggaksi.interpret import _examples
+
+    assert "\n" not in _examples(['가"\n맞는 열: 비고'])
+
+
+# ---------- PR #18 3차 검수: 다른 지목 표현·목록 밖 되가리킴 ----------
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "이름 기준으로 이수시간을 비고 셀에 넣어줘",
+        "이름 기준으로 이수시간은 비고 쪽에 써줘",
+        "이름 기준으로 이수시간을 비고 칸으로 옮겨줘",
+        "이름 기준으로 직원번호랑 이수시간 채워줘. 비고는 빼고 싹다 취소",
+        "이름 기준으로 직원번호랑 이수시간 채워줘. 비고는 놔두고 둘은 보류",
+        "이름 기준으로 직원번호 채워줘. 이수시간도 넣어줘. 비고는 몽땅 없던 일로",
+    ],
+)
+def test_other_pointing_words_and_unlisted_back_references_confirm_no_pair(setup, request_text):
+    assert run(setup, request_text).fields == ()
+
+
+def test_all_with_plain_fill_is_allowed(setup):
+    result = run(setup, "이름 기준으로 이수시간 다 채워줘")
+    assert result.key == ("성명", "이름")
+    assert {(f, c) for f, c, _ in result.fields} == {("이수시간", "이수시간")}
+
+
+# ---------- PR #18 4차 검수: 이름 뒤 자리 낱말·부정 낱말 이름 ----------
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 이수시간 빈칸에 직원번호 채워줘",
+        "발급번호 기준으로 이수시간의 빈칸에 직원번호 넣어줘",
+        "발급번호 기준으로 이수시간 열 빈칸에 직원번호 채워줘",
+        "발급번호 기준으로 비고 빈칸 직원번호 다 채워줘",
+        "발급번호 기준으로 이수시간 표에 직원번호 넣어줘",
+    ],
+)
+def test_place_words_right_after_a_name_are_pointing(setup, request_text):
+    """이름 바로 뒤 빈칸·칸·열·표는 지목이다. "A를 B …" 꼴이 아니면 같은 이름 짝으로 확정하지 않는다."""
+    assert run(setup, request_text).fields == ()
+
+
+def test_pointing_with_a_blank_word_follows_the_pointing(setup):
+    result = run(setup, "발급번호 기준으로 이수시간을 비고 빈칸에 넣어줘")
+    assert {(f, c) for f, c, _ in result.fields} == {("이수시간", "비고")}
+
+
+def test_a_column_named_like_an_exclusion_word_is_asked(tmp_path):
+    """열 이름이 '제외'면 "직급은 제외"가 이름으로 가려진다. 그런 이름이 나오면 묻는다(4차 M1)."""
+    docs = _single_table_docs(
+        [
+            [("성명", n), ("직급", t), ("이수시간", h)]
+            for n, t, h in zip(["가나다", "라마바"], ["주무관", "팀장"], ["12", "8"], strict=True)
+        ]
+    )
+    sheet = [
+        ["이름", "직급", "이수시간", "제외"],
+        ["가나다", None, None, None],
+        ["라마바", None, None, None],
+    ]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("이름 기준으로 직급은 제외 이수시간 채워줘", documents, view)
+    assert ("직급", "직급") not in {(f, c) for f, c, _ in result.fields}
+    sheet[0][3] = "보류"
+    (tmp_path / "b").mkdir()
+    _, documents, view = build(tmp_path / "b", docs, sheet, "명단")
+    result = interpret("이름 기준으로 직급 보류 이수시간만 채워줘", documents, view)
+    assert ("직급", "직급") not in {(f, c) for f, c, _ in result.fields}
+
+
+# ---------- PR #18 5차 검수: 지목은 단 하나의 정형 꼴만 ----------
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "이름 기준으로 직원번호 이수시간을 비고 칸에 넣어줘",
+        "이름 기준으로 직원번호/이수시간을 비고 칸에 넣어줘",
+        "이름 기준으로 이수시간을 비고 칸 기준으로 채워줘",
+        "이름 기준으로 이수시간을 비고 칸 찾아서 채워줘",
+        "이름 기준으로 이수시간을 비고 시트에 넣어줘",
+        "이름 기준으로 이수시간을 비고 표에 넣어줘",
+        "이름 기준으로 이수시간을 이름 칸에 넣어줘",
+    ],
+)
+def test_pointing_is_confirmed_only_in_its_single_plain_form(setup, request_text):
+    assert run(setup, request_text).fields == ()
+
+
+def test_a_word_shared_by_two_names_is_not_read_as_either(tmp_path):
+    """비고(1)·비고(2)일 때 '비고'는 어느 열인지 모른다. 실행할 때마다 다른 열을 고르지 않고 묻는다(5차 H3)."""
+    docs = _single_table_docs(
+        [
+            [("성명", n), ("이수시간", h)]
+            for n, h in zip(["가나다", "라마바"], ["12", "8"], strict=True)
+        ]
+    )
+    sheet = [["이름", "비고(1)", "비고(2)"], ["가나다", None, None], ["라마바", None, None]]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("이름 기준으로 이수시간을 비고 칸에 넣어줘", documents, view)
+    assert result.fields == ()
+
+
+def test_a_column_named_none_is_not_offered():
+    asked = []
+    assert _ask_model(first_option(asked), lambda o: "질문", ("없음",)) is None and asked == []
+
+
+def test_name_with_possessive_is_asked(setup):
+    """'비고의 직급': 어느 칸에 무엇을 넣는지 갈린다. 짝을 정하지도 모델에 묻지도 않는다(5차 검수 P03)."""
+    asked = []
+    result = run(setup, "이름 기준으로 비고의 직원번호 채워줘", picks({"비고": "직원번호"}, asked))
+    assert result.fields == () and asked == []
+
+
+# ---------- PR #18 6차 검수: 키 경로 ----------
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    ["비고를 이름으로 채워줘", "이수시간은 성명으로 채워줘", "비고를 직원번호로 채워줘"],
+)
+def test_fill_with_ro_is_not_a_key(setup, request_text):
+    """'B로 채워줘'는 B를 넣으라는 뜻일 수 있다. 키로 읽어 같은 이름 짝을 확정하지 않는다(6차 H1)."""
+    _, _, view = setup
+    assert build_rule(run(setup, request_text), view) is None
+
+
+def test_a_named_key_needs_most_values_to_match_a_differently_named_column(tmp_path):
+    """'연락처로 찾아서': 이름이 다른 열에서 값 하나가 우연히 맞아도 키가 아니다(6차 H2)."""
+    docs = _single_table_docs(
+        [
+            [("성명", n), ("연락처", c), ("직급", t)]
+            for n, c, t in zip(
+                ["가나다", "라마바"], ["내선 101", "내선 102"], ["주무관", "팀장"], strict=True
+            )
+        ]
+    )
+    sheet = [["이름", "직급", "비고"], ["김라마", None, "내선 101"], ["이사아", None, None]]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("연락처로 찾아서 직급 채워줘", documents, view)
+    assert result.key is None
+
+
+def test_a_column_named_like_an_allowed_word_is_not_a_name(tmp_path):
+    """열 이름이 '기준'이어도 "발급번호 기준으로"의 '기준'은 키 표현이다(6차 K05)."""
+    docs = _single_table_docs(
+        [
+            [("발급번호", b), ("직급", t)]
+            for b, t in zip(["T-1", "T-2"], ["주무관", "팀장"], strict=True)
+        ]
+    )
+    sheet = [["발급번호", "직급", "기준"], ["T-1", None, "x"], ["T-2", None, "y"]]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("발급번호 기준으로 직급 채워줘", documents, view)
+    assert result.key == ("발급번호", "발급번호")
+
+
+def test_topic_marked_name_followed_by_another_name_is_asked(setup):
+    """'비고는 직급 채워줘'는 대응을 말한 것일 수 있다(6차 M02)."""
+    assert run(setup, "발급번호로 찾아서 비고는 이수시간 채워줘").fields == ()
