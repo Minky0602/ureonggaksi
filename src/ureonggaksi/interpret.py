@@ -27,7 +27,7 @@ from .xlsx import TargetView
 FILL = re.compile(r"채워|채우|채움|넣어|넣기|넣고|넣을|입력|기입|적어|옮겨|반영|써\s?줘")
 FILL_NEGATED = re.compile(  # 하지 않는 채우기: "채우지 마", "채워주지 마", "안 채워도 돼", "넣을 필요 없어"
     r"(채우|채워|넣|넣어|입력하|기입하|적|적어|옮기|옮겨|써)\s*(주)?\s*지\s*(는|도|만)?\s*(마|말|않)"
-    r"|안\s*(채|넣|입력|기입|적|옮|써)|필요\s*없"
+    r"|안\s*(채|넣|입력|기입|적|옮|써)|필요\s*(는|도)?\s*없|맙시다|(채우|넣으|입력하|기입하|적으|쓰)면\s*안"
 )
 CHECK = re.compile(
     r"확인(?!서)|대조|검토(?!서)|비교|맞는지|맞나|같은지|일치|검증|틀린|다른지|차이|체크|점검|검사"
@@ -57,6 +57,15 @@ ALLOWED_WORD = (
     rf"|{ENDING}|요|좀|부탁해|부탁해요|부탁합니다|부탁드립니다|감사합니다|감사해요|고맙습니다|[ㅠㅜ]+"
 )
 NAME_MARK = "\x00"
+# 이름에 붙은 모르는 말 가운데 다른 이름까지 가리키는 말(마지막 방어막): "비고 빼고 전부 취소", "둘 다 빼",
+# "앞에 것도", "비고처럼". 위치만으로는 "직급은 현행 유지"(그 이름만)와 가를 수 없어서 둔다(PR #18 2차 검수 H2)
+REFERENCE = re.compile(
+    r"(?<![가-힣])(전부|모두|다|둘|셋|전체|나머지|모든|다른|앞|앞에|앞의|위|위에|아까|그것|그건|그거|이것|이건|이거)"
+    r"(?![가-힣])|처럼|포함|같이|전부|모두|나머지"
+)
+CHAIN = re.compile(
+    r"\s*(이랑|랑|하고|과|와|및)?\s*[,·/]?\s*"
+)  # 나열: "직급이랑 이수시간", "직급, 이수시간"
 # 낱말 끝에 붙은 '좀'("체크좀")은 뜻을 바꾸지 않는다
 SIMPLE_TOKEN = re.compile(
     rf"(?:(?:{NAME_MARK}{PARTICLE}*)+|(?:{NAME_MARK}{PARTICLE}*)*(?:{ALLOWED_WORD}))좀?"
@@ -304,27 +313,41 @@ def _mentions(request: str, names: list[str]) -> list[tuple[str, str]]:
 def _tainted(request: str, names: list[str]) -> set[str]:
     """모르는 말이 닿은 이름들. 요청을 이름 사이 구간으로 나눠 구간마다 본다.
 
-    - 모르는 말이 이름(+조사) 바로 뒤에 붙으면 그 이름과 다음 이름에 닿는다("직급은 현행 유지", "제외: 직급").
-    - 허용 낱말(동사 등) 뒤에 따로 나오면 별도 절이다. 앞의 모든 이름에 닿는다("…채워줘. 둘 다 빼줘",
-      "…채워줘. 앞에 건 취소", PR #18 검수 H1).
+    - 이름(+조사) 바로 뒤에 붙은 모르는 말은 그 이름과 다음 이름에 닿는다("직급은 현행 유지").
+    - 허용 낱말 뒤에 따로 나온 모르는 말은 별도 절이라 앞의 모든 이름에 닿는다("…채워줘. 둘 다 빼줘").
+    - 첫 이름 앞의 모르는 말, 되가리킴 낱말(REFERENCE)이 든 모르는 말은 모든 이름에 닿는다.
+    - 나열로 이어진 이름("직급이랑 이수시간")은 한 묶음이라, 하나에 닿으면 묶음 전체에 닿는다.
     """
     spans = [(s, e, n) for s, e, n in _spans(request, names) if n]
+    every = {n for _, _, n in spans}
     tainted: set[str] = set()
     seen: list[str] = []
+    chains: list[set[str]] = []
     previous_end, previous_name = 0, None
     for start, end, name in [*spans, (len(request), len(request), None)]:
-        gap = (NAME_MARK if previous_name else "") + request[previous_end:start]
+        raw = request[previous_end:start]
+        if name and previous_name and CHAIN.fullmatch(raw):
+            chains[-1].add(name)
+        elif name:
+            chains.append({name})
+        gap = (NAME_MARK if previous_name else "") + raw
         tokens = [t for t in re.split(r"[\s,.!~·、/]+", gap) if t]
         unknown = [i for i, t in enumerate(tokens) if not SIMPLE_TOKEN.fullmatch(t)]
         if unknown:
-            before = tokens[: unknown[0]]
-            attached = all(t.startswith(NAME_MARK) for t in before)
-            tainted.update(n for n in ([previous_name] if attached else seen) if n)
+            words = " ".join(tokens[unknown[0] :]).replace(NAME_MARK, " ")
+            attached = all(t.startswith(NAME_MARK) for t in tokens[: unknown[0]])
+            if previous_name is None or REFERENCE.search(words):
+                tainted |= every
+            else:
+                tainted.update(n for n in ([previous_name] if attached else seen) if n)
             if name:
                 tainted.add(name)
         if name:
             seen.append(name)
         previous_end, previous_name = end, name
+    for chain in chains:
+        if chain & tainted:
+            tainted |= chain
     return tainted
 
 
@@ -581,7 +604,8 @@ def interpret(
     pairs = [p for p in pairs if p[0] not in drop and p[1] not in drop]
     only_fields = [n for n in only_fields if n not in drop]
     only_columns = [n for n in only_columns if n not in drop]
-    off_limits = skip | set(unclear)  # 빼라고 한 열·이름은 모델 선택지에도 넣지 않는다
+    # 빼라고 한 열·이름, 모르는 말이 닿은 이름은 모델 선택지에도 넣지 않는다(PR #18 2차 검수 M1)
+    off_limits = skip | set(unclear) | tainted
     for field in only_fields:
         taken = {p[1] for p in pairs}
         options = _order(
@@ -661,7 +685,9 @@ def _shape_fits(samples, existing) -> bool:
 
 def _examples(values) -> str:
     # 문서 글이 지시처럼 읽히지 않게 따옴표로 감싸고 자른다(PR #18 M2)
-    shown = ", ".join(dict.fromkeys(f'"{v.strip()[:20]}"' for v in values if v and v.strip()))
+    # 줄바꿈·따옴표는 공백으로 바꿔 질문 줄 구조를 깨지 못하게 한다(PR #18 2차 검수 L1)
+    clean = (re.sub(r"[\s\"'`]+", " ", v).strip()[:20] for v in values if v and v.strip())
+    shown = ", ".join(dict.fromkeys(f'"{c}"' for c in clean if c))
     return f" (예: {shown})" if shown else ""
 
 
