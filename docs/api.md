@@ -74,6 +74,7 @@ def prepare(request: str, sources: list[Path], target: Path, *,
             workflow: WorkflowVersion | None = None,     # '최근 작업'을 눌렀으면 AI를 부르지 않는다
             answers: Pairs = (),                         # (slot, 답). SKIP이면 그 문제의 칸은 비워 둔다
             output_path: Path | None = None,
+            choose: Chooser | None = None,               # 로컬 모델(ai.LocalModel.choose). 없으면 모델 없이 해석
             progress: Progress, cancel: Cancel) -> Prepared
     # 쓰기 없음. 질문에 답하면 UI가 answers를 늘려 다시 부른다(서비스는 대화 상태를 갖지 않는다).
     # question이 생기는 경우(PRD 6.2)만 묻는다:
@@ -81,13 +82,21 @@ def prepare(request: str, sources: list[Path], target: Path, *,
     #   ② 공통 문제: 답 하나로 정해지는 원인(default_unit·rounding·date_order)의 칸이
     #      분석 대상 칸(ChangeItem 수)의 QUESTION_RATIO 이상. affects가 큰 것부터 하나씩.
     # 그 외 애매함은 묻지 않고 비워 둔다. 답은 RuleSet.policy에 넣어 저장되므로 재실행 때 다시 묻지 않는다.
-    # 예외: INPUT_*, PATH_CONFLICT, AI_UNAVAILABLE(workflow 없이 AI 미준비 → '자세히'의 직접 선택 안내), CANCELLED
+    #   날짜 순서(date_order)는 애매한 날짜가 읽기 실패(parse_failed)와 같은 코드라 아직 따로 묻지 못한다.
+    # 모델 오류(AI_UNAVAILABLE·AI_TIMEOUT·AI_BAD_OUTPUT)는 예외로 끝내지 않고 그 짝만 빼서 소명한다
+    #   (짝 하나 때문에 미리보기 전체를 잃지 않는다, 2026-11-17 사용자 결정). 모델이 없으면 모델 없이 해석한다.
+    # 예외: INPUT_*, PATH_CONFLICT, CANCELLED
 
 def commit(prepared: Prepared, store: RuleStore, *, progress: Progress, cancel: Cancel) -> ResultPackage
     # [저장] 한 번 = 승인. 순서: ① store.save(같은 rule_hash가 있으면 생략) ② 채우기: approve → save_result
     #                                                                       검토: save_check(XLSX 없음)
     # 파일 쓰기 전 실패는 예외, 쓰기 시작 후는 ResultPackage로 돌려준다(5절 원칙 그대로).
     # 규칙은 결과 파일보다 먼저 저장된다. 결과 저장이 실패해도 규칙은 남지만, 사용자가 저장을 결정한 해석이므로 허용한다.
+
+def replay(rule: RuleSet, sources, target, *, request="", output_path=None, progress, cancel) -> Prepared
+    # CLI commit용: 계획 파일의 규칙으로 AI 없이 다시 분석한다. 규칙이 지금 파일에 맞지 않으면 RULE_INVALID.
+def approval_hash(prepared: Prepared) -> str
+    # [저장]이 승인할 plan_hash. CLI prepare가 출력하고 commit이 다시 계산해 비교한다.
 
 def describe_rule(rule: RuleSet, view: TargetView) -> str
     # 예: "채우기: 사업코드로 행을 찾아 ‘사업비’를 D열(2026 예산)에 원 단위로 넣음"
@@ -481,8 +490,11 @@ def open_result(evidence_path: Path) -> ResultView
 화면이 없을 때도 "본 것만 저장"을 지키기 위해 두 단계로 나눈다.
 
 ```
-ureonggaksi prepare --request "…" --target 표.xlsx --out 계획.plan.json 문서/*.hwpx
-    # 미리보기 요약·질문을 출력하고 plan_hash를 표시한다. 질문이 있으면 --answer slot=값으로 다시 실행한다.
+ureonggaksi prepare --request "…" --target 표.xlsx --out 계획.plan.json [--output 결과.xlsx]
+                    [--answer slot=값]… [--workflow ID[:rev]] [--rules-dir 폴더]
+                    [--runtime llama-completion.exe --model 모델.gguf] 문서/*.hwpx
+    # 미리보기 요약을 출력하고 plan_hash를 표시한다(종료 코드 0). 질문이 있으면 종료 코드 3과 답하는 법을 출력한다.
+    # 계획 파일에는 원문 값을 넣지 않는다: 형식, 요청, 경로, 입력 지문, RuleSet, 출력 경로, plan_hash.
 ureonggaksi commit --plan 계획.plan.json --plan-hash <값>
     # plan.json의 규칙으로 AI 없이 다시 분석해 계산한 해시가 --plan-hash와 같을 때만 commit한다.
     # 다르면 PLAN_HASH_MISMATCH. 파일을 만들지 않는다.
