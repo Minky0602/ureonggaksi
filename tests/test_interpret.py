@@ -851,3 +851,51 @@ def test_name_with_possessive_is_asked(setup):
     asked = []
     result = run(setup, "이름 기준으로 비고의 직원번호 채워줘", picks({"비고": "직원번호"}, asked))
     assert result.fields == () and asked == []
+
+
+# ---------- PR #18 6차 검수: 키 경로 ----------
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    ["비고를 이름으로 채워줘", "이수시간은 성명으로 채워줘", "비고를 직원번호로 채워줘"],
+)
+def test_fill_with_ro_is_not_a_key(setup, request_text):
+    """'B로 채워줘'는 B를 넣으라는 뜻일 수 있다. 키로 읽어 같은 이름 짝을 확정하지 않는다(6차 H1)."""
+    _, _, view = setup
+    assert build_rule(run(setup, request_text), view) is None
+
+
+def test_a_named_key_needs_most_values_to_match_a_differently_named_column(tmp_path):
+    """'연락처로 찾아서': 이름이 다른 열에서 값 하나가 우연히 맞아도 키가 아니다(6차 H2)."""
+    docs = _single_table_docs(
+        [
+            [("성명", n), ("연락처", c), ("직급", t)]
+            for n, c, t in zip(
+                ["가나다", "라마바"], ["내선 101", "내선 102"], ["주무관", "팀장"], strict=True
+            )
+        ]
+    )
+    sheet = [["이름", "직급", "비고"], ["김라마", None, "내선 101"], ["이사아", None, None]]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("연락처로 찾아서 직급 채워줘", documents, view)
+    assert result.key is None
+
+
+def test_a_column_named_like_an_allowed_word_is_not_a_name(tmp_path):
+    """열 이름이 '기준'이어도 "발급번호 기준으로"의 '기준'은 키 표현이다(6차 K05)."""
+    docs = _single_table_docs(
+        [
+            [("발급번호", b), ("직급", t)]
+            for b, t in zip(["T-1", "T-2"], ["주무관", "팀장"], strict=True)
+        ]
+    )
+    sheet = [["발급번호", "직급", "기준"], ["T-1", None, "x"], ["T-2", None, "y"]]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("발급번호 기준으로 직급 채워줘", documents, view)
+    assert result.key == ("발급번호", "발급번호")
+
+
+def test_topic_marked_name_followed_by_another_name_is_asked(setup):
+    """'비고는 직급 채워줘'는 대응을 말한 것일 수 있다(6차 M02)."""
+    assert run(setup, "발급번호로 찾아서 비고는 이수시간 채워줘").fields == ()

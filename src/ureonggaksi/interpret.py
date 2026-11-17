@@ -34,9 +34,9 @@ CHECK = re.compile(
     r"|괜찮은지|됐나|됐는지|제대로|봐\s?줘|살펴|없나|맞아|됐어|있어|있나|\?"
 )  # "기입 상태 봐줘"·"입력 누락 없나": 채우기 낱말이 명사로 쓰인 검토 요청(P04 ① 2차 검수)
 # 이름 바로 뒤(공백 제거) 글자로 읽는 표현
-KEY_AFTER = re.compile(
-    r"^(기준|으로|로)"
-)  # "이름으로 찾아", "요청번호 기준". "직급별로"는 묶기라 키가 아니다
+# "요청번호 기준", "이름으로 찾아", "이름으로 대조", "발급번호로 행을". '로'만으로는 키가 아니다:
+# "비고를 이름으로 채워줘"는 이름을 넣으라는 뜻일 수 있다(PR #18 6차 검수 H1). "직급별로"는 묶기다
+KEY_AFTER = re.compile(r"^(기준|(으로|로)(찾|대조|맞춰|비교|확인|검토|행))")
 NEGATED = re.compile(
     r"^(칸|열|란)?(에는|에|은|는|을|를|이|가|도|까지는|까지|만은|만)?"
     r"(빼(?!놓지|먹지)|제외|말고|그대로(?!옮|넣|채|입력|적|기입|반영)|손대지|건드리지|하지마|하지말|두고|놔두|참고|비워|비우"
@@ -129,6 +129,12 @@ def _document_fields(documents: tuple[Document, ...]) -> list[FieldCandidate]:
     for block in first.blocks:
         if block.kind == "cell" and block.text.strip():
             label_counts[_norm(block.text)] = label_counts.get(_norm(block.text), 0) + 1
+    paragraph_label = re.compile(r"^\s*([^:：\s][^:：]{0,19}?)\s*[:：]")
+    for (
+        block
+    ) in first.blocks:  # 문단 "직급: 팀장"과 표 칸 '직급'이 함께 있으면 어느 것인지 모른다(6차 A01)
+        if block.kind == "paragraph" and (m := paragraph_label.match(block.text)):
+            label_counts[_norm(m.group(1))] = label_counts.get(_norm(m.group(1)), 0) + 1
     for key, block in maps[0].items():
         text = block.text.strip()
         if not text or len(text) > 30 or text.isdigit():  # 연번 같은 숫자는 항목명이 아니다
@@ -169,13 +175,26 @@ def _document_fields(documents: tuple[Document, ...]) -> list[FieldCandidate]:
                 None,
             )
             values.append(hit.group(2) if hit else "")
-        if _norm(label) in found or not any(values):
+        if _norm(label) in found or not any(values) or label_counts.get(_norm(label), 0) > 1:
             continue
         query = rf"^\s*{re.escape(label)}\s*[:：]\s*(.+?)\s*$"
         found[_norm(label)] = FieldCandidate(
             label, FieldRule(label, "regex", query=query, group=1), tuple(values)
         )
     return list(found.values())
+
+
+def _ambiguous_labels(documents: tuple[Document, ...]) -> set[str]:
+    """첫 문서에서 둘 이상 나오는 라벨(표 칸·문단 "라벨:"). 항목 후보에서 빠진 이름이다."""
+    counts: dict[str, int] = {}
+    paragraph_label = re.compile(r"^\s*([^:：\s][^:：]{0,19}?)\s*[:：]")
+    for block in documents[0].blocks:
+        text = block.text.strip() if block.kind == "cell" else ""
+        if block.kind == "paragraph" and (m := paragraph_label.match(block.text)):
+            text = m.group(1)
+        if text:
+            counts[_norm(text)] = counts.get(_norm(text), 0) + 1
+    return {name for name, n in counts.items() if n > 1}
 
 
 def _related(name: str, columns) -> bool:
@@ -284,7 +303,7 @@ def _spans(request: str, names: list[str]) -> list[tuple[int, int, str]]:
     for variant, name in pairs:
         owners.setdefault(_compact(variant), set()).add(name)
     for variant, name in pairs:
-        if len(owners[_compact(variant)]) > 1:
+        if len(owners[_compact(variant)]) > 1 or re.fullmatch(ALLOWED_WORD, _compact(variant)):
             name = ""  # 비고(1)·비고(2)의 '비고': 어느 이름인지 모른다. 모르는 말로 남긴다(5차 검수 H3)
         pattern = r"(?<![가-힣A-Za-z0-9])" + r"\s*".join(map(re.escape, _compact(variant)))
         for match in re.finditer(pattern, request):
@@ -400,7 +419,7 @@ def _identifier_like(values: list[str]) -> bool:
 
 
 def _key_candidates(
-    fields: list[FieldCandidate], view: TargetView, *, named: bool = False
+    fields: list[FieldCandidate], view: TargetView, *, named: bool = False, any_hit: bool = False
 ) -> list[tuple[int, str, str]]:
     """(일치 수, 문서 항목, 대상 열): 문서 값이 그 열에 글자 그대로 있는 쌍.
 
@@ -428,7 +447,9 @@ def _key_candidates(
             if not named and not _same(field.name, column) and all(map(_numeric, hit_values)):
                 continue  # 이름이 다른 열의 날짜·금액은 우연히 같을 수 있다(2차 검수 K01·K02)
             hits = len(hit_values)
-            if named or hits >= max(2, 0.8 * len(samples)):
+            # 키를 말했어도 이름이 다른 열은 값 한두 개의 우연한 일치로 잇지 않는다(6차 검수 H2)
+            strong = hits >= max(2, 0.8 * len(samples))
+            if any_hit or (named and _same(field.name, column)) or strong:
                 result.append((hits, field.name, column))
     return sorted(result, key=lambda c: -c[0])
 
@@ -527,13 +548,15 @@ def interpret(
         # 행 전체를 봤고, 그 열에 값이 맞는 다른 문서 항목이 없을 때만(3차 H1 성명·추천인, 4차 H3 이름·이름)
         rivals = [
             c
-            for c in _key_candidates(fields, view, named=True)
+            for c in _key_candidates(fields, view, named=True, any_hit=True)
             if c[2] == key[1] and c[1] != key[0]
         ]
         if rivals or not _covers_all_rows(view):
             key = None
     if key is None:
-        options = tuple(dict.fromkeys(c[2] for c in _key_candidates(fields, view, named=True)))
+        options = tuple(
+            dict.fromkeys(c[2] for c in _key_candidates(fields, view, named=True, any_hit=True))
+        )
         questions.append(("key_column", options[:3]))
     key_field, key_column = key if key else (None, None)
 
@@ -569,7 +592,7 @@ def interpret(
                 pointing_unclear = True  # 나열한 이름 가운데 어느 것을 넣을지 모른다
             previous = before_previous = None
             continue
-        if SLOT.match(after) or DIRECTION.match(after):
+        if SLOT.match(after) or DIRECTION.match(after) or re.match(r"^(은|는)\x00", after):
             pointing_unclear = True
         if field is not None and column is not None:
             pairs.append((field, column, "match"))
@@ -611,6 +634,10 @@ def interpret(
         )
         if answer:
             pairs.append((field, answer, "model"))
+    # 문서에 같은 이름 라벨이 있지만 겹쳐서 뺀 열: 답은 그 라벨뿐이라 다른 항목을 고르게 하지 않는다(6차 A01)
+    ambiguous = _ambiguous_labels(documents)
+    held += [c for c in only_columns if _norm(c) in ambiguous]
+    only_columns = [c for c in only_columns if _norm(c) not in ambiguous]
     for column in only_columns:
         taken = {p[0] for p in pairs}
         options = _order(
