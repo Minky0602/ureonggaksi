@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 from openpyxl import load_workbook
 
@@ -149,3 +150,95 @@ def test_prepare_with_a_question_exits_3_and_tells_how_to_answer(tmp_path):
         *sources,
     )
     assert shown.returncode == 3 and "--answer work_type=" in shown.stdout
+
+
+def _digest(out):
+    return next(
+        line.split(": ", 1)[1] for line in out.stdout.splitlines() if line.startswith("계획 지문")
+    )
+
+
+def test_plan_file_never_overwrites_inputs_or_existing_files(tmp_path):
+    """--out이 대상 XLSX이거나 이미 있으면 쓰지 않는다(검수 H1)."""
+    sources, target = _files(tmp_path)
+    before = target.read_bytes()
+    same = _cli(
+        "prepare",
+        "--request",
+        "이름 기준으로 이수시간 채워줘",
+        "--target",
+        target,
+        "--out",
+        target,
+        "--rules-dir",
+        tmp_path / "r",
+        *sources,
+    )
+    assert same.returncode == 2 and target.read_bytes() == before
+    existing = tmp_path / "있음.plan.json"
+    existing.write_text("keep", encoding="utf-8")
+    again = _cli(
+        "prepare",
+        "--request",
+        "이름 기준으로 이수시간 채워줘",
+        "--target",
+        target,
+        "--out",
+        existing,
+        "--rules-dir",
+        tmp_path / "r",
+        *sources,
+    )
+    assert again.returncode == 2 and existing.read_text(encoding="utf-8") == "keep"
+
+
+def test_check_work_commits_and_a_tampered_request_is_refused(tmp_path):
+    """검토 작업도 prepare가 정한 경로로 저장한다(검수 M1). 계획 파일의 요청문을 바꾸면 거부한다(검수 M2)."""
+    import json
+
+    sources, target = _files(tmp_path)
+    plan, out, rules = tmp_path / "c.plan.json", tmp_path / "검토.xlsx", tmp_path / "r"
+    shown = _cli(
+        "prepare",
+        "--request",
+        "이름 기준으로 이수시간 확인해줘",
+        "--target",
+        target,
+        "--out",
+        plan,
+        "--output",
+        out,
+        "--rules-dir",
+        rules,
+        *sources,
+    )
+    assert shown.returncode == 0, shown.stderr + shown.stdout
+    digest = _digest(shown)
+    record = json.loads(plan.read_text(encoding="utf-8"))
+    tampered = tmp_path / "t.plan.json"
+    tampered.write_text(
+        json.dumps({**record, "request": "다른 요청"}, ensure_ascii=False), encoding="utf-8"
+    )
+    assert (
+        _cli("commit", "--plan", tampered, "--plan-hash", digest, "--rules-dir", rules).returncode
+        == 2
+    )
+    saved = _cli("commit", "--plan", plan, "--plan-hash", digest, "--rules-dir", rules)
+    assert saved.returncode in (0, 1), saved.stderr  # 표에 값이 없으면 직접 확인이 남는다(1)
+    written = [
+        line.split(": ", 1)[1] for line in saved.stdout.splitlines() if line.startswith("저장: ")
+    ]
+    assert (
+        not out.exists() and written and all(Path(p).exists() for p in written)
+    )  # 검토는 XLSX를 만들지 않는다
+
+
+def test_a_broken_plan_file_is_an_error_not_partial(tmp_path):
+    plan = tmp_path / "b.plan.json"
+    plan.write_text(
+        '{"format": "ureonggaksi-plan/1", "plan_hash": "x", "sources": 5}', encoding="utf-8"
+    )
+    assert (
+        _cli("commit", "--plan", plan, "--plan-hash", "x", "--rules-dir", tmp_path / "r").returncode
+        == 2
+    )

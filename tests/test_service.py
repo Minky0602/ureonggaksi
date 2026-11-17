@@ -138,3 +138,43 @@ def test_a_common_unit_problem_is_asked_once_and_the_answer_is_kept(tmp_path):
         "1500000",
         "2000000",
     }
+
+
+def test_answers_are_validated_and_rule_questions_cannot_be_skipped(files):
+    sources, target, out, _ = files
+    with pytest.raises(ServiceError) as bad:
+        prepare(
+            "이름 기준으로 이수시간",
+            sources,
+            target,
+            output_path=out,
+            answers=(("rounding", "foo"),),
+        )
+    assert bad.value.code == "INPUT_UNSUPPORTED"
+    with pytest.raises(ServiceError) as skipped:
+        prepare(
+            "이름 기준으로 이수시간",
+            sources,
+            target,
+            output_path=out,
+            answers=(("work_type", "__skip__"),),
+        )
+    assert skipped.value.code == "RULE_INVALID"
+
+
+def test_a_saved_rule_with_new_answers_is_saved_as_the_next_revision(files):
+    """'최근 작업'에 답을 더해 저장하면 같은 작업의 다음 revision이다(검수 M2)."""
+    sources, target, out, store = files
+    commit(prepare("이름 기준으로 이수시간 채워줘", sources, target, output_path=out), store)
+    saved = store.load(store.list()[0].workflow_id)
+    rerun = prepare(
+        "",
+        sources,
+        target,
+        workflow=saved,
+        answers=(("rounding", "__skip__"),),
+        output_path=out.with_name("2.xlsx"),
+    )
+    commit(rerun, store)
+    assert len(store.list()) == 1 and store.load(saved.workflow_id).revision == 2
+    assert store.load(saved.workflow_id).rule.answered("rounding")  # 건너뛴 답도 남는다

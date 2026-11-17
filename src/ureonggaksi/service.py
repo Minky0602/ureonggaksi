@@ -4,6 +4,7 @@
 질문에 답하면 호출자가 answers를 늘려 prepare를 다시 부른다.
 """
 
+import hashlib
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -12,12 +13,11 @@ from .errors import Pairs, ServiceError
 from .inputs import Inputs, inspect_source, open_inputs
 from .interpret import Chooser, build_rule, interpret
 from .manual import ManualItem
-from .rules import RuleSet, RuleStore, WorkflowVersion, validate_rule
-from .save import ResultPackage, approve, default_output_path, save_check, save_result
+from .rules import POLICY_VALUES, SKIP, RuleSet, RuleStore, WorkflowVersion, validate_rule
+from .save import ResultPackage, approve, default_output_path, save_result
 from .xlsx import TargetView, inspect_target
 
 QUESTION_RATIO = 0.30  # 공통 문제 질문 기준(api 2.0). Q01 정답셋으로 조정한다
-SKIP = "__skip__"  # 답: 건너뛰기. 해당 칸은 비워 둔다
 # 답 하나로 정해지는 공통 문제(PRD 6.2). 날짜 순서는 읽기 실패와 같은 코드라 아직 따로 묻지 못한다
 POLICY_SLOTS = {"ambiguous_unit": "default_unit", "needs_rounding": "rounding"}
 POLICY_CHOICES = {
@@ -118,6 +118,21 @@ def _full_view(inputs: Inputs, rule: RuleSet | None = None) -> TargetView:
     return inspect_target(inputs, first.sheet, first.header_row, preview_rows=rows)
 
 
+RULE_SLOTS = ("work_type", "key_column", "target_column")
+
+
+def _check_answers(answers: Pairs) -> None:
+    """답은 아는 질문의 허용 값만 받는다. 정책 답은 규칙 저장 형식과 같은 값(api 2.4)."""
+    for slot, value in answers:
+        ok = (
+            (slot == "work_type" and value in ("fill", "check", SKIP))
+            or (slot in ("key_column", "target_column") and isinstance(value, str) and value)
+            or (slot in POLICY_CHOICES and (value == SKIP or value in POLICY_VALUES.get(slot, ())))
+        )
+        if not ok:
+            raise ServiceError("INPUT_UNSUPPORTED", f"답이 올바르지 않습니다: {slot}")
+
+
 def _answer(answers: Pairs, slot: str) -> str | None:
     return next((value for key, value in answers if key == slot), None)
 
@@ -170,7 +185,7 @@ def _with_policy(rule: RuleSet, answers: Pairs) -> RuleSet:
     policy = dict(rule.policy)
     for slot in POLICY_CHOICES:
         value = _answer(answers, slot)
-        if value is not None and value != SKIP:
+        if value is not None:  # 건너뛴 답(SKIP)도 저장해 다시 묻지 않는다(AT-21)
             policy[slot] = value
     return replace(rule, policy=tuple(sorted(policy.items())))
 
@@ -182,7 +197,7 @@ def _policy_question(plan: Plan, answers: Pairs) -> Question | None:
     best = None
     for code, slot in POLICY_SLOTS.items():
         affects = int(counts.get(code, 0))
-        if not total or affects < QUESTION_RATIO * total or _answer(answers, slot) is not None:
+        if not total or affects < QUESTION_RATIO * total or plan.rule.answered(slot):
             continue
         if best is None or affects > best[1]:
             best = (slot, affects, code)
@@ -232,6 +247,7 @@ def prepare(
     cancel: Cancel | None = None,
 ) -> Prepared:
     """쓰기 없음. 규칙이 서지 않거나 공통 문제가 크면 질문 하나, 아니면 미리보기를 돌려준다."""
+    _check_answers(answers)
     out_dir = local_dir(output_path, target)
     inputs = open_inputs(list(sources), target, out_dir)
     warnings: list[str] = []
@@ -250,6 +266,13 @@ def prepare(
         rule = build_rule(result, view)
         if rule is None:
             slot, options = result.questions[0] if result.questions else ("target_column", ())
+            if (
+                _answer(answers, slot) is not None
+            ):  # 건너뛰었거나 답으로 정해지지 않았다: 같은 질문을 되풀이하지 않는다
+                raise ServiceError(
+                    "RULE_INVALID",
+                    "이 질문은 답으로 정할 수 없습니다. '자세히'에서 직접 지정하세요.",
+                )
             return _asking(request, answers, inputs, _rule_question(slot, options))
         warnings += [f"‘{name}’은(는) 정하지 못해 비워 둡니다." for name in result.excluded]
     rule = _with_policy(rule, answers)
@@ -306,8 +329,7 @@ def commit(
         base=prepared.workflow,
         request=prepared.request[:500],
     )
-    if plan.rule.work_type == "check":
-        return save_check(plan, progress=progress, cancel=cancel)
+    # 검토도 prepare가 정한 경로로 승인한다(기본 경로는 시각이 들어가 다시 만들면 달라진다, 검수 M1)
     approval = approve(plan, prepared.output_path)
     return save_result(plan, approval, progress=progress, cancel=cancel)
 
@@ -322,6 +344,7 @@ def replay(
     *,
     request: str = "",
     output_path: Path | None = None,
+    workflow: WorkflowVersion | None = None,
     progress: Progress = _no_progress,
     cancel: Cancel | None = None,
 ) -> Prepared:
@@ -345,14 +368,22 @@ def replay(
         (),
         manual_items(plan),
         path,
+        workflow,
     )
 
 
 def approval_hash(prepared: Prepared) -> str:
-    """[저장]이 승인할 계획 지문(plan_hash). 채우기는 출력 경로를, 검토는 기본 경로를 쓴다(commit과 같게)."""
+    """[저장]이 승인할 지문: 계획 지문(plan_hash)에 저장될 요청문·이어 저장할 작업을 더한 것.
+
+    commit이 쓰는 것(결과 파일·근거·규칙과 그 요청문·작업 revision)이 모두 들어가야 CLI가 본 것만 저장한다(검수 M2).
+    """
     plan = prepared.plan
     if plan is None:
         raise ServiceError("APPROVAL_INVALID", "질문에 먼저 답해야 저장할 수 있습니다.")
-    if plan.rule.work_type == "check":
-        return approve(plan).plan_hash
-    return approve(plan, prepared.output_path).plan_hash
+    workflow = prepared.workflow
+    parts = (
+        approve(plan, prepared.output_path).plan_hash,
+        prepared.request[:500],
+        f"{workflow.workflow_id}:{workflow.revision}" if workflow else "",
+    )
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
