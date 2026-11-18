@@ -18,6 +18,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
+from .errors import ServiceError
 from .extract import _normalized as normalized_label
 from .models import Block, Document
 from .rules import FieldRule, RecordRule, RuleSet, TargetRule
@@ -31,12 +32,12 @@ FILL_NEGATED = re.compile(  # 하지 않는 채우기: "채우지 마", "채워�
 )
 CHECK = re.compile(
     r"확인(?!서)|대조|검토(?!서)|비교|맞는지|맞나|같은지|일치|검증|틀린|다른지|차이|체크|점검|검사"
-    r"|괜찮은지|됐나|됐는지|제대로|봐\s?줘|살펴|없나|맞아|됐어|있어|있나|\?"
+    r"|괜찮은지|됐나|됐는지|제대로|봐\s?줘|살펴|없나|맞아|됐어|있어|있나"
 )  # "기입 상태 봐줘"·"입력 누락 없나": 채우기 낱말이 명사로 쓰인 검토 요청(P04 ① 2차 검수)
 # 이름 바로 뒤(공백 제거) 글자로 읽는 표현
 # "요청번호 기준", "이름으로 찾아", "이름으로 대조", "발급번호로 행을". '로'만으로는 키가 아니다:
 # "비고를 이름으로 채워줘"는 이름을 넣으라는 뜻일 수 있다(PR #18 6차 검수 H1). "직급별로"는 묶기다
-KEY_AFTER = re.compile(r"^(기준|(으로|로)(찾|대조|맞춰|비교|확인|검토|행))")
+KEY_AFTER = re.compile(r"^(기준|(으로|로)(찾|대조|맞추|맞춰|매칭|연결|비교|확인|검토|행))")
 NEGATED = re.compile(
     r"^(칸|열|란)?(에는|에|은|는|을|를|이|가|도|까지는|까지|만은|만)?"
     r"(빼(?!놓지|먹지)|제외|말고|그대로(?!옮|넣|채|입력|적|기입|반영)|손대지|건드리지|하지마|하지말|두고|놔두|참고|비워|비우"
@@ -80,6 +81,9 @@ NONE = "없음"
 
 # 모델 호출: (질문 글, 선택지) → 선택지 하나 또는 None
 Chooser = Callable[[str, tuple[str, ...]], str | None]
+# 여러 칸을 한 번에 묻기: (질문 글, {칸: 선택지}) → {칸: 답}. 목록 밖·빠진 칸은 없다(ai.LocalModel.ask_fields)
+AskMany = Callable[[str, dict[str, tuple[str, ...]]], dict[str, str]]
+ROLES = ("채움", "키", "제외", "무관")
 
 
 @dataclass(frozen=True)
@@ -94,7 +98,9 @@ class Interpretation:
     work_type: str | None
     record: RecordRule
     key: tuple[str, str] | None  # (문서 항목, 대상 열)
-    fields: tuple[tuple[str, str, str], ...]  # (문서 항목, 대상 열, 출처 "match"|"model")
+    # (문서 항목, 대상 열, 출처). match: 코드가 확신(같은 이름·정형 지목) / model: 모델이 고른 짝 /
+    # assumed: 모르는 말이 섞인 요청에서 모델이 읽은 짝. match가 아니면 미리보기에 '확인 필요'로 보인다
+    fields: tuple[tuple[str, str, str], ...]
     questions: tuple[tuple[str, tuple[str, ...]], ...]  # (슬롯, 후보) — 6.2 질문 재료
     excluded: tuple[str, ...] = ()  # 요청했지만 대응 열이 없는 항목·열
     candidates: tuple[
@@ -350,6 +356,50 @@ def _simple(request: str, names: list[str]) -> bool:
     return all(SIMPLE_TOKEN.fullmatch(t) for t in tokens)
 
 
+def _unknown_words(request: str, names: list[str]) -> list[str]:
+    """허용 낱말도 이름도 아닌 말(조사·'좀'·'요'를 뗀 것). 모델이 열 이름의 다른 말인지 읽는다."""
+    marked, last = [], 0
+    for start, end, name in _spans(request, names):
+        if name:
+            marked += [request[last:start], NAME_MARK]
+            last = end
+    marked.append(request[last:])
+    words = []
+    for token in re.split(r"[\s,.!~·、/]+", "".join(marked)):
+        if not token or SIMPLE_TOKEN.fullmatch(token):
+            continue
+        word = re.sub(rf"(?:{PARTICLE}|좀|요)+$", "", token.replace(NAME_MARK, ""))
+        if len(word) >= 2 and re.search(r"[가-힣A-Za-z]", word):
+            words.append(word)
+    return list(dict.fromkeys(words))[:12]
+
+
+def _read_request(ask_many: AskMany, request: str, names: list[str], words: list[str], columns):
+    """이름마다 역할, 모르는 말마다 뜻하는 열을 한 번에 묻는다. 순서를 뒤집어 두 번 묻고 같은 답만 받는다."""
+    fields: dict[str, tuple[str, ...]] = {f"[이름] {n}": ROLES for n in names}
+    fields |= {f"[말] {w}": (*columns, NONE) for w in words}
+
+    def prompt(order) -> str:
+        lines = [
+            f"요청: {request}",
+            "[이름]마다 요청에서의 역할을 고르세요. 채움=채우거나 대조하라는 항목, 키=행을 찾는 기준, "
+            "제외=빼거나 하지 말거나 나중에 하라는 항목, 무관=그 밖. 확신이 없으면 무관.",
+            f"[말]마다 그 말이 가리키는 취합표 열을 고르세요. 열 이름이 아니면 '{NONE}'.",
+        ]
+        return "\n".join([*lines, *(f"- {_clean(k, 40)}" for k in order)])
+
+    keys = list(fields)
+    first = ask_many(prompt(keys), fields)
+    flipped = {k: tuple(reversed(fields[k])) for k in reversed(keys)}
+    second = ask_many(prompt(list(flipped)), flipped)
+    agreed = {k: v for k, v in first.items() if second.get(k) == v}
+    roles = {k.removeprefix("[이름] "): v for k, v in agreed.items() if k.startswith("[이름] ")}
+    meant = {
+        k.removeprefix("[말] "): v for k, v in agreed.items() if k.startswith("[말] ") and v != NONE
+    }
+    return roles, meant
+
+
 def _resolve(name: str, pool: list[str]) -> str | None:
     """정규화(공백·끝 콜론·괄호 단위·대소문자)한 이름이 같은 것이 하나뿐일 때만. 둘 이상이면 정하지 않는다.
 
@@ -408,6 +458,12 @@ def _covers_all_rows(view: TargetView) -> bool:
     return last >= view.data_rows[1]
 
 
+def _code_like(values: list[str]) -> bool:
+    """번호처럼 생긴 값: 숫자가 들어 있고 3자 이상. 80% 이상이 그렇다."""
+    coded = [v for v in values if len(v) >= 3 and re.search(r"\d", v)]
+    return bool(values) and len(coded) >= 0.8 * len(values)
+
+
 def _numeric(value: str) -> bool:
     """날짜·금액·번호처럼 숫자와 구분 기호뿐인 값."""
     return bool(re.fullmatch(r"[\d\s.,:/\-]+", value))
@@ -423,8 +479,9 @@ def _key_candidates(
 ) -> list[tuple[int, str, str]]:
     """(일치 수, 문서 항목, 대상 열): 문서 값이 그 열에 글자 그대로 있는 쌍.
 
-    일치한 값은 식별자처럼 보여야 한다. 사용자가 키를 말했으면(named) 일치가 하나라도 있으면 된다.
-    추정할 때는 열 값이 서로 다르고(80%), 문서 값의 80% 이상이 그 열에 있어야 하며, 이름이 다른 열이면
+    일치한 값은 식별자처럼 보여야 한다. 사용자가 이름이 같은 키를 말했으면 일치가 하나라도 있으면 된다.
+    그 밖에는 문서 값의 60% 이상(2건 이상)이 그 열에 있어야 한다. 표에 없는 문서는 직접 처리로 남는다.
+    추정할 때는 열 값이 모두 서로 달라야 하고(키는 행을 하나로 가려야 한다), 이름이 다른 열이면
     숫자로만 된 값(날짜·금액)으로는 잇지 않는다.
     """
     result = []
@@ -434,7 +491,7 @@ def _key_candidates(
             continue
         if not named and (
             len(values) < 2
-            or len(set(values)) < max(2, 0.8 * len(values))
+            or len(set(values)) < len(values)  # 같은 값이 있는 열(대표자·단체명)은 키가 아니다
             or not _identifier_like(values)
         ):
             continue
@@ -448,7 +505,7 @@ def _key_candidates(
                 continue  # 이름이 다른 열의 날짜·금액은 우연히 같을 수 있다(2차 검수 K01·K02)
             hits = len(hit_values)
             # 키를 말했어도 이름이 다른 열은 값 한두 개의 우연한 일치로 잇지 않는다(6차 검수 H2)
-            strong = hits >= max(2, 0.8 * len(samples))
+            strong = hits >= max(2, 0.6 * len(samples))
             if any_hit or (named and _same(field.name, column)) or strong:
                 result.append((hits, field.name, column))
     return sorted(result, key=lambda c: -c[0])
@@ -490,7 +547,9 @@ def _ask_model(choose: Chooser | None, prompt_for, options: tuple[str, ...]) -> 
         return None
     second = first[1:] + first[:1]
     again = choose(prompt_for(tuple(o for o in second if o != NONE)), second)
-    return answer if again == answer else None
+    # 두 번째가 같은 답이거나 '없음'으로 물러서면 받는다(모델 짝은 '확인 필요'로 표시된다). 다른 열로 바뀌면 버린다
+    # 선택지가 하나면 '없음' 물러섬은 받지 않는다(첫 자리만 고르는 편향을 거를 수 없다)
+    return answer if again == answer or (again == NONE and len(options) > 1) else None
 
 
 def interpret(
@@ -499,6 +558,7 @@ def interpret(
     view: TargetView,
     *,
     choose: Chooser | None = None,
+    ask_many: AskMany | None = None,
 ) -> Interpretation:
     """코드가 확정하는 것은 이름이 정규화 후 완전히 같은 짝과, 사용자가 지목한 키뿐이다(P04 ① 검수).
 
@@ -542,7 +602,11 @@ def interpret(
             key = (picked[0][1], picked[0][2])
     else:  # 키를 말하지 않았다
         candidates = _key_candidates(fields, view)
-        if candidates and (len(candidates) == 1 or candidates[0][0] > 2 * candidates[1][0]):
+        # 번호처럼 생긴 열(신청번호 '대관-0091')이 하나뿐이면 그것이 키다. 이름·단체명 같은 글자보다 앞선다
+        coded = [c for c in candidates if _code_like(_column_values(view, c[2]))]
+        if len(coded) == 1:
+            key = (coded[0][1], coded[0][2])
+        elif candidates and (len(candidates) == 1 or candidates[0][0] > 2 * candidates[1][0]):
             key = (candidates[0][1], candidates[0][2])
     if key is not None:
         # 행 전체를 봤고, 그 열에 값이 맞는 다른 문서 항목이 없을 때만(3차 H1 성명·추천인, 4차 H3 이름·이름)
@@ -575,7 +639,8 @@ def interpret(
     )
     pointing_unclear = False  # "A를 B 칸에" 꼴이 아닌 지목(5차 검수 H): 짝을 정하지 않고 묻는다
     pointed_names: list[str] = []
-    for name, after in mentions:
+    slotted: list[int] = []  # "X 칸·빈칸"이 붙은 이름의 자리. 뒤에 넣을 다른 항목이 오면 지목이다
+    for position, (name, after) in enumerate(mentions):
         if name == hint:
             if SLOT.match(after) or (DIRECTION.match(after) and not KEY_AFTER.match(after)):
                 pointing_unclear = True  # 키로 말한 이름을 칸으로도 지목했다(5차 검수 M)
@@ -592,7 +657,9 @@ def interpret(
                 pointing_unclear = True  # 나열한 이름 가운데 어느 것을 넣을지 모른다
             previous = before_previous = None
             continue
-        if SLOT.match(after) or DIRECTION.match(after) or re.match(r"^(은|는)\x00", after):
+        if SLOT.match(after):
+            slotted.append(position)  # "이용일 칸 비어 있으면 채워"는 그 칸을 채우라는 말이다
+        if DIRECTION.match(after) or re.match(r"^(은|는)\x00", after):
             pointing_unclear = True
         if field is not None and column is not None:
             pairs.append((field, column, "match"))
@@ -604,6 +671,12 @@ def interpret(
         before_previous = previous[2] if previous else None
         previous = (name, field, after)
     # 지목은 요청에 단 하나, 그 두 이름 말고 다른 항목 이름이 없을 때만 확정한다("직급 이수시간을 비고 칸에", 5차 H1)
+    for (
+        position
+    ) in slotted:  # "이수시간 빈칸에 직급 채워": 칸 뒤에 다른 항목이 오면 무엇을 넣을지 갈린다
+        later = {n for n, _ in mentions[position + 1 :]} - {hint, mentions[position][0]}
+        if later and mentions[position][0] not in pointed_names:
+            pointing_unclear = True
     others = {n for n, _ in mentions if n != hint and n not in pointed_names}
     if len(linked) > 1 or (linked and others):
         pointing_unclear = True
@@ -615,14 +688,38 @@ def interpret(
     pairs = [p for p in dict.fromkeys(pairs) if p[0] not in unclear and p[1] not in unclear]
     only_fields = [n for n in only_fields if n not in unclear]
     only_columns = [n for n in only_columns if n not in unclear]
-    # 애매한 지목이나 모르는 말이 있으면 짝을 정하지도 모델에 묻지도 않고 모두 소명한다
+    # 애매한 지목이면 모두 묻는다. 모르는 말이 섞였으면 모델이 읽게 하고(있을 때만), 두 번 물어 모두 '채움'인
+    # 이름만 남긴다. 빼기는 코드 표지(이미 뺐다)나 모델 '제외' 가운데 하나만 말해도 뺀다. 이 경로의 짝은
+    # 모두 assumed로 표시해 미리보기에서 '확인 필요'로 보인다(P04 성능 개선, 2026-11-18 사용자 결정)
     mentioned = [*(p[0] for p in pairs), *(p[1] for p in pairs), *only_fields, *only_columns]
-    drop = set(mentioned) if pointing_unclear or not simple else set()
+    assumed = False
+    if pointing_unclear or (not simple and ask_many is None):
+        drop = set(mentioned)
+    elif not simple:
+        assumed = True
+        words = _unknown_words(request, columns + names)
+        targets = tuple(c for c in columns if c != key_column and c not in skip)
+        try:
+            roles, meant = _read_request(
+                ask_many, request, list(dict.fromkeys(mentioned)), words, targets
+            )
+        except ServiceError as error:
+            if not error.code.startswith("AI_"):
+                raise
+            roles, meant = {}, {}
+        drop = {n for n in mentioned if roles.get(n) != "채움"}
+        for column in dict.fromkeys(meant.values()):  # "이름" → 봉사자명: 요청한 열로 더한다
+            if column not in mentioned and column not in only_columns:
+                only_columns.append(column)
+    else:
+        drop = set()
     held = [n for n in mentioned if n in drop]
     pairs = [p for p in pairs if p[0] not in drop and p[1] not in drop]
+    if assumed:
+        pairs = [(f, c, "assumed") for f, c, _ in pairs]
     only_fields = [n for n in only_fields if n not in drop]
     only_columns = [n for n in only_columns if n not in drop]
-    off_limits = skip | set(unclear)  # 빼라고 한 열·이름은 모델 선택지에도 넣지 않는다
+    off_limits = skip | set(unclear) | drop  # 빼라고 한 열·이름은 모델 선택지에도 넣지 않는다
     for field in only_fields:
         taken = {p[1] for p in pairs}
         options = _order(
@@ -633,7 +730,7 @@ def interpret(
             choose, lambda o, f=field: _column_prompt(request, by_name[f], o, view), options
         )
         if answer:
-            pairs.append((field, answer, "model"))
+            pairs.append((field, answer, "assumed" if assumed else "model"))
     # 문서에 같은 이름 라벨이 있지만 겹쳐서 뺀 열: 답은 그 라벨뿐이라 다른 항목을 고르게 하지 않는다(6차 A01)
     ambiguous = _ambiguous_labels(documents)
     held += [c for c in only_columns if _norm(c) in ambiguous]
@@ -648,7 +745,7 @@ def interpret(
             choose, lambda o, c=column: _field_prompt(request, c, o, by_name, view), options
         )
         if answer:
-            pairs.append((answer, column, "model"))
+            pairs.append((answer, column, "assumed" if assumed else "model"))
 
     # 값 형태가 어긋나는 짝(코드형 값을 숫자 열에)은 확정하지 않는다
     fits = [p for p in pairs if _shape_fits(by_name[p[0]].samples, _column_values(view, p[1]))]

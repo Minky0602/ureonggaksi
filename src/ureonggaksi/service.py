@@ -11,7 +11,7 @@ from pathlib import Path
 from .analyze import Cancel, ChangeItem, Plan, Progress, analyze, manual_items
 from .errors import Pairs, ServiceError
 from .inputs import Inputs, inspect_source, open_inputs
-from .interpret import Chooser, build_rule, interpret
+from .interpret import AskMany, Chooser, build_rule, interpret
 from .manual import ManualItem
 from .rules import POLICY_VALUES, SKIP, RuleSet, RuleStore, WorkflowVersion, validate_rule
 from .save import ResultPackage, approve, default_output_path, save_result
@@ -60,6 +60,8 @@ class Prepared:
     workflow: WorkflowVersion | None = (
         None  # '최근 작업'으로 연 규칙. commit이 같은 작업에 이어 저장한다
     )
+    # 코드가 확신하지 못한 짝(모델이 고르거나 읽은 것): (문서 항목, 대상 열). 미리보기에 '확인 필요'로 보인다
+    unsure: tuple[tuple[str, str], ...] = ()
 
 
 # ---------- 해석 한 줄 ----------
@@ -73,8 +75,9 @@ def _letter(view: TargetView, column: str) -> str:
     return letters[index] if 0 <= index < len(letters) else ""
 
 
-def describe_rule(rule: RuleSet, view: TargetView) -> str:
-    """검증된 규칙에서 문장 틀로 만든 한 줄. AI가 쓴 문장이 아니다."""
+def describe_rule(rule: RuleSet, view: TargetView, unsure=()) -> str:
+    """검증된 규칙에서 문장 틀로 만든 한 줄. AI가 쓴 문장이 아니다. 확신하지 못한 짝에는 '(확인 필요)'."""
+    unsure = set(unsure)
     key = rule.target.key_column
     parts = []
     for field in rule.fields:
@@ -82,7 +85,8 @@ def describe_rule(rule: RuleSet, view: TargetView) -> str:
             continue
         letter = _letter(view, field.target_column)
         place = f"{letter}열({field.target_column})" if letter else f"‘{field.target_column}’ 열"
-        parts.append(f"‘{field.name}’을 {place}")
+        mark = " (확인 필요)" if (field.name, field.target_column) in unsure else ""
+        parts.append(f"‘{field.name}’을 {place}{mark}")
     joined = ", ".join(parts)
     if rule.work_type == "check":
         return f"검토: 표를 바꾸지 않고 {key}(으)로 행을 찾아 {joined}과 대조함"
@@ -249,6 +253,7 @@ def prepare(
     answers: Pairs = (),
     output_path: Path | None = None,
     choose: Chooser | None = None,
+    ask_many: AskMany | None = None,
     progress: Progress = _no_progress,
     cancel: Cancel | None = None,
 ) -> Prepared:
@@ -257,6 +262,7 @@ def prepare(
     out_dir = local_dir(output_path, target)
     inputs = open_inputs(list(sources), target, out_dir)
     warnings: list[str] = []
+    unsure: tuple[tuple[str, str], ...] = ()
     if workflow is not None:  # '최근 작업': AI도 해석도 부르지 않는다
         rule = workflow.rule
         view = _full_view(inputs, rule)
@@ -267,7 +273,7 @@ def prepare(
         )
         if not documents:
             raise ServiceError("INPUT_UNSUPPORTED", "읽을 수 있는 원본 문서가 없습니다.")
-        result = interpret(request, documents, view, choose=_safe(choose))
+        result = interpret(request, documents, view, choose=_safe(choose), ask_many=ask_many)
         result = _apply_answers(result, answers, view)
         rule = build_rule(result, view)
         if rule is None:
@@ -285,6 +291,7 @@ def prepare(
                 options = tuple(c for c in options if _key_field_for(result, view, c))
             return _asking(request, answers, inputs, _rule_question(slot, options))
         warnings += [f"‘{name}’은(는) 정하지 못해 비워 둡니다." for name in result.excluded]
+        unsure = tuple((f, c) for f, c, source in result.fields if source != "match")
     rule = _with_policy(rule, answers)
     issues = validate_rule(rule, inputs, view)
     if issues:
@@ -300,12 +307,13 @@ def prepare(
         inputs,
         None,
         plan,
-        describe_rule(rule, view),
+        describe_rule(rule, view, unsure),
         _samples(plan),
         tuple(warnings),
         manual_items(plan),
         path,
         workflow,
+        unsure,
     )
 
 

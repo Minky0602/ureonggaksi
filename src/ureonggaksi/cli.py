@@ -62,8 +62,9 @@ def _chooser(args):
     """실행 파일과 모델 파일이 모두 있으면 짝 선택에 쓴다. 없으면 모델 없이 해석한다."""
     status = ai_status(args.runtime, args.model)
     if not status.ready:
-        return None, "로컬 모델: 사용 안 함"
-    return LocalModel((str(args.runtime),), args.model).choose, "로컬 모델: 사용"
+        return None, None, "로컬 모델: 사용 안 함"
+    model = LocalModel((str(args.runtime),), args.model)
+    return model.choose, model.ask_fields, "로컬 모델: 사용"
 
 
 def _print_preview(prepared: Prepared) -> None:
@@ -81,6 +82,8 @@ def _print_preview(prepared: Prepared) -> None:
         )
     for item in prepared.samples:
         print(f"  예: {item.target_ref} ← {item.proposed.value} ({item.field})")
+    for field, column in prepared.unsure:
+        print(f"확인 필요: ‘{field}’ → {column} 열 (모델이 추정, 저장 전 확인)")
     for warning in prepared.warnings:
         print(f"참고: {warning}")
 
@@ -92,7 +95,7 @@ def run_prepare(args, parser) -> int:
         if args.workflow:
             workflow_id, _, revision = args.workflow.partition(":")
             workflow = store.load(workflow_id, int(revision) if revision else None)
-        choose, model_note = _chooser(args)
+        choose, ask_many, model_note = _chooser(args)
         print(model_note)
         prepared = prepare(
             args.request,
@@ -102,6 +105,7 @@ def run_prepare(args, parser) -> int:
             answers=_answers(args.answer, parser),
             output_path=args.output,
             choose=choose,
+            ask_many=ask_many,
         )
         if prepared.question is not None:
             question = prepared.question

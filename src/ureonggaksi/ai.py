@@ -81,6 +81,18 @@ class LocalModel:
         schema = {"type": "string", "enum": list(options)}
         return parse_choice(self._run(question, schema), options)
 
+    def ask_fields(self, question: str, fields: dict[str, tuple[str, ...]]) -> dict[str, str]:
+        """이름마다 선택지 하나를 한 번에 묻는다(JSON 객체 스키마, DIF-036). 목록 밖·빠진 이름은 뺀다."""
+        if not fields:
+            return {}
+        schema = {
+            "type": "object",
+            "properties": {name: {"type": "string", "enum": list(o)} for name, o in fields.items()},
+            "required": list(fields),
+            "additionalProperties": False,
+        }
+        return parse_fields(self._run(question, schema), fields)
+
     def _run(self, question: str, schema: dict) -> str:
         """질문 하나에 llama-completion을 한 번 띄운다. 실행할 수 없거나 시간을 넘으면 예외."""
         with tempfile.TemporaryDirectory(prefix="ureonggaksi-ai-") as folder:
@@ -122,6 +134,18 @@ class LocalModel:
                 "AI_UNAVAILABLE", f"로컬 AI 실행이 실패했습니다(종료 코드 {done.returncode})."
             )
         return done.stdout.decode("utf-8", "replace")
+
+
+def parse_fields(stdout: str, fields: dict[str, tuple[str, ...]]) -> dict[str, str]:
+    """출력의 첫 '{'부터 마지막 '}'까지를 JSON 객체로 읽는다. 읽을 수 없으면 AI_BAD_OUTPUT."""
+    start, end = stdout.find("{"), stdout.rfind("}")
+    try:
+        answer = json.loads(stdout[start : end + 1]) if 0 <= start < end else None
+    except (ValueError, RecursionError) as exc:
+        raise ServiceError("AI_BAD_OUTPUT", "로컬 AI의 답을 읽지 못했습니다.") from exc
+    if not isinstance(answer, dict):
+        raise ServiceError("AI_BAD_OUTPUT", "로컬 AI가 선택지가 아닌 형식으로 답했습니다.")
+    return {k: v for k, v in answer.items() if k in fields and v in fields[k]}
 
 
 def parse_choice(stdout: str, options: tuple[str, ...]) -> str | None:

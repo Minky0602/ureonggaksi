@@ -212,3 +212,75 @@ def test_a_path_conflict_saves_no_rule(files):
     with pytest.raises(ServiceError):
         commit(prepared, store)
     assert store.list() == () and out.read_bytes() == b"someone else"
+
+
+# ---------- 모르는 말이 섞인 요청: 모델이 읽고 '확인 필요'로 표시(2026-11-18) ----------
+
+
+def reader(roles, meant=None):
+    """가짜 ask_many: 이름 역할과 모르는 말이 뜻하는 열을 순서와 무관하게 같은 답으로 준다."""
+
+    def ask(prompt, fields):
+        out = {}
+        for key, options in fields.items():
+            name = key.split("] ", 1)[1]
+            answer = (
+                roles.get(name) if key.startswith("[이름]") else (meant or {}).get(name, "없음")
+            )
+            if answer in options:
+                out[key] = answer
+        return out
+
+    return ask
+
+
+def test_natural_wording_is_read_by_the_model_and_marked_unsure(files):
+    sources, target, out, _ = files
+    prepared = prepare(
+        "신청서 보고 이름 기준으로 이수시간 채워 주시면 돼요",
+        sources,
+        target,
+        output_path=out,
+        ask_many=reader({"이수시간": "채움"}),
+    )
+    assert prepared.plan is not None and ("이수시간", "이수시간") in prepared.unsure
+    assert "(확인 필요)" in prepared.interpretation
+
+
+def test_a_synonym_word_brings_in_its_column(files):
+    sources, target, out, _ = files
+
+    def knows(prompt, options):
+        return "직위" if "직위" in options else "없음"
+
+    prepared = prepare(
+        "이름 기준으로 직책이랑 이수시간 채워 주시면 돼요",
+        sources,
+        target,
+        output_path=out,
+        choose=knows,
+        ask_many=reader({"이수시간": "채움"}, {"직책": "직급"}),
+    )
+    targets = {f.name: f.target_column for f in prepared.plan.rule.fields if f.target_column}
+    assert (
+        targets == {"직위": "직급", "이수시간": "이수시간"} and ("직위", "직급") in prepared.unsure
+    )
+
+
+def test_model_exclusion_wins_and_model_errors_fall_back_to_asking(files):
+    sources, target, out, _ = files
+    request = "이름 기준으로 이수시간 채우고 직급은 현행 유지"
+    excluded = prepare(
+        request,
+        sources,
+        target,
+        output_path=out,
+        ask_many=reader({"이수시간": "채움", "직급": "제외"}),
+    )
+    assert [f.target_column for f in excluded.plan.rule.fields if f.target_column] == ["이수시간"]
+
+    def broken(prompt, fields):
+        raise ServiceError("AI_TIMEOUT", "시간 초과")
+
+    fallback = prepare(request, sources, target, output_path=out, ask_many=broken)
+    assert fallback.plan is None and fallback.question is not None
