@@ -1,5 +1,7 @@
 """한 줄 요청 → 미리보기 → [저장] (P04 ③, FR-05·06·14). 합성 자료만 쓴다."""
 
+from dataclasses import replace
+
 import pytest
 from conftest import cell, para, table, write_hwpx, write_xlsx
 
@@ -218,7 +220,7 @@ def test_a_path_conflict_saves_no_rule(files):
 
 
 def reader(roles, meant=None):
-    """가짜 ask_many: 이름 역할과 모르는 말이 뜻하는 열을 순서와 무관하게 같은 답으로 준다."""
+    """가짜 ask_many: 이름 역할과 모르는 말이 뜻하는 '열/역할'을 순서와 무관하게 같은 답으로 준다."""
 
     def ask(prompt, fields):
         out = {}
@@ -243,7 +245,7 @@ def test_natural_wording_is_read_by_the_model_and_marked_unsure(files):
         output_path=out,
         ask_many=reader({"이수시간": "채움"}),
     )
-    assert prepared.plan is not None and ("이수시간", "이수시간") in prepared.unsure
+    assert prepared.plan is not None and ("pair", "이수시간", "이수시간") in prepared.unsure
     assert "(확인 필요)" in prepared.interpretation
 
 
@@ -259,11 +261,12 @@ def test_a_synonym_word_brings_in_its_column(files):
         target,
         output_path=out,
         choose=knows,
-        ask_many=reader({"이수시간": "채움"}, {"직책": "직급"}),
+        ask_many=reader({"이수시간": "채움"}, {"직책": "직급/채움"}),
     )
     targets = {f.name: f.target_column for f in prepared.plan.rule.fields if f.target_column}
     assert (
-        targets == {"직위": "직급", "이수시간": "이수시간"} and ("직위", "직급") in prepared.unsure
+        targets == {"직위": "직급", "이수시간": "이수시간"}
+        and ("pair", "직위", "직급") in prepared.unsure
     )
 
 
@@ -278,9 +281,33 @@ def test_model_exclusion_wins_and_model_errors_fall_back_to_asking(files):
         ask_many=reader({"이수시간": "채움", "직급": "제외"}),
     )
     assert [f.target_column for f in excluded.plan.rule.fields if f.target_column] == ["이수시간"]
+    assert ("skip", "직급", "") in excluded.unsure and "빼라는 말로 읽고" in excluded.interpretation
+    assert not any("직급" in w for w in excluded.warnings)
 
     def broken(prompt, fields):
         raise ServiceError("AI_TIMEOUT", "시간 초과")
 
     fallback = prepare(request, sources, target, output_path=out, ask_many=broken)
     assert fallback.plan is None and fallback.question is not None
+
+
+def test_unsure_key_pair_and_exclusion_are_all_shown(files, capsys):
+    """DIF-050: 짝뿐 아니라 추정한 키와 빼기로 읽은 이름도 해석 문장과 CLI에 '확인 필요'로 보인다."""
+    from ureonggaksi.cli import _print_preview
+    from ureonggaksi.service import _full_view, describe_rule
+
+    sources, target, out, _ = files
+    prepared = prepare(
+        "이름 기준으로 이수시간 채우고 직급은 현행 유지",
+        sources,
+        target,
+        output_path=out,
+        ask_many=reader({"이수시간": "채움", "직급": "제외"}),
+    )
+    rule = prepared.plan.rule
+    key = ("key", rule.record.key_field, rule.target.key_column)
+    line = describe_rule(rule, _full_view(prepared.inputs, rule), {key, *prepared.unsure})
+    assert f"{rule.target.key_column} (확인 필요)(으)로" in line and "‘직급’은(는) 빼라는" in line
+    _print_preview(replace(prepared, unsure=(key, *prepared.unsure)))
+    shown = [x for x in capsys.readouterr().out.splitlines() if x.startswith("확인 필요:")]
+    assert len(shown) == 3 and "값으로 추정" in shown[0] and "빼라는 말로" in shown[-1]

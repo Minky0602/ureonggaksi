@@ -22,7 +22,7 @@ SYSTEM = (
     "값이나 규칙을 직접 쓰지 않는다. 이름이 달라도 같은 뜻인 것(예: 직급과 직위, 품명과 품목)을 고른다. "
     "뜻이 다르거나 확신이 없으면 '없음'을 고른다."
 )
-# S01과 같은 실행 조건(결정적 출력). 답이 선택지 하나라 짧게 끊는다
+# S01과 같은 실행 조건(결정적 출력). 생성 길이(-n)는 질문마다 _run이 붙인다
 ARGS = (
     "--offline",
     "-no-cnv",
@@ -31,11 +31,10 @@ ARGS = (
     "0",
     "--seed",
     "1",
-    "-n",
-    "64",
     "-c",
     "4096",
 )
+CHOICE_TOKENS = 64  # 답이 선택지 하나
 END_MARK = "[end of text]"  # llama-completion이 생성 뒤 stdout에 붙인다
 TIMEOUT_SECONDS = 60
 
@@ -91,9 +90,12 @@ class LocalModel:
             "required": list(fields),
             "additionalProperties": False,
         }
-        return parse_fields(self._run(question, schema), fields)
+        # 한 칸의 답은 '"이름": "선택지",'라 글자 수만큼 넉넉히 둔다. 짧으면 JSON이 잘린다(DIF-050 M4).
+        # 상한일 뿐이라 모델은 JSON이 닫히면 멈춘다
+        tokens = 32 + sum(2 * (len(k) + max(map(len, o), default=0)) + 8 for k, o in fields.items())
+        return parse_fields(self._run(question, schema, tokens), fields)
 
-    def _run(self, question: str, schema: dict) -> str:
+    def _run(self, question: str, schema: dict, tokens: int = CHOICE_TOKENS) -> str:
         """질문 하나에 llama-completion을 한 번 띄운다. 실행할 수 없거나 시간을 넘으면 예외."""
         with tempfile.TemporaryDirectory(prefix="ureonggaksi-ai-") as folder:
             prompt_path, schema_path = Path(folder) / "prompt.txt", Path(folder) / "schema.json"
@@ -108,6 +110,8 @@ class LocalModel:
                 "-f",
                 str(prompt_path),
                 *ARGS,
+                "-n",
+                str(tokens),
             ]
             try:
                 done = subprocess.run(

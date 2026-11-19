@@ -32,8 +32,9 @@ FILL_NEGATED = re.compile(  # 하지 않는 채우기: "채우지 마", "채워�
 )
 CHECK = re.compile(
     r"확인(?!서)|대조|검토(?!서)|비교|맞는지|맞나|같은지|일치|검증|틀린|다른지|차이|체크|점검|검사"
-    r"|괜찮은지|됐나|됐는지|제대로|봐\s?줘|살펴|없나|맞아|됐어|있어|있나"
-)  # "기입 상태 봐줘"·"입력 누락 없나": 채우기 낱말이 명사로 쓰인 검토 요청(P04 ① 2차 검수)
+    r"|괜찮은지|됐나|됐는지|제대로|봐\s?줘|살펴|없나|맞아|됐어|있어|있나|\?"
+)  # "기입 상태 봐줘"·"입력 누락 없나": 채우기 낱말이 명사로 쓰인 검토 요청(P04 ① 2차 검수).
+# '?'로 끝나는 묻는 말("입력했어?")은 채우기와 함께 나오면 작업 종류를 묻는다(DIF-050 M1)
 # 이름 바로 뒤(공백 제거) 글자로 읽는 표현
 # "요청번호 기준", "이름으로 찾아", "이름으로 대조", "발급번호로 행을". '로'만으로는 키가 아니다:
 # "비고를 이름으로 채워줘"는 이름을 넣으라는 뜻일 수 있다(PR #18 6차 검수 H1). "직급별로"는 묶기다
@@ -84,6 +85,7 @@ Chooser = Callable[[str, tuple[str, ...]], str | None]
 # 여러 칸을 한 번에 묻기: (질문 글, {칸: 선택지}) → {칸: 답}. 목록 밖·빠진 칸은 없다(ai.LocalModel.ask_fields)
 AskMany = Callable[[str, dict[str, tuple[str, ...]]], dict[str, str]]
 ROLES = ("채움", "키", "제외", "무관")
+FILL_ROLE, SKIP_ROLE = ROLES[0], ROLES[2]
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,8 @@ class Interpretation:
     candidates: tuple[
         FieldCandidate, ...
     ] = ()  # 문서에서 찾은 항목들(build_rule이 추출 규칙을 가져간다)
+    key_assumed: bool = False  # 요청에서 말하지 않은 키를 데이터 일치로 추정했다 → '확인 필요'
+    skipped: tuple[str, ...] = ()  # 모르는 말이 섞인 요청에서 빼라는 말로 읽은 이름 → '확인 필요'
 
 
 def _norm(text: str) -> str:
@@ -365,39 +369,57 @@ def _unknown_words(request: str, names: list[str]) -> list[str]:
             last = end
     marked.append(request[last:])
     words = []
-    for token in re.split(r"[\s,.!~·、/]+", "".join(marked)):
+    for token in re.split(r"[\s,.!~·、/?]+", "".join(marked)):
         if not token or SIMPLE_TOKEN.fullmatch(token):
             continue
         word = re.sub(rf"(?:{PARTICLE}|좀|요)+$", "", token.replace(NAME_MARK, ""))
+        # 코드가 이미 아는 동사·빼기 표현('채우고', '놔두세')은 열 이름의 다른 말이 아니다(DIF-050 M4)
+        if any(p.search(word) for p in (FILL, FILL_NEGATED, CHECK)) or NEGATED.match(word):
+            continue
         if len(word) >= 2 and re.search(r"[가-힣A-Za-z]", word):
             words.append(word)
-    return list(dict.fromkeys(words))[:12]
+    return list(dict.fromkeys(words))[:8]
 
 
 def _read_request(ask_many: AskMany, request: str, names: list[str], words: list[str], columns):
-    """이름마다 역할, 모르는 말마다 뜻하는 열을 한 번에 묻는다. 순서를 뒤집어 두 번 묻고 같은 답만 받는다."""
+    """이름마다 역할, 모르는 말마다 뜻하는 열과 그 역할을 한 번에 묻는다. 순서를 뒤집어 두 번 묻고 같은 답만 받는다.
+
+    돌려주는 것: (이름 → 역할, 채우라는 말이 가리킨 열, 빼라는 말이 가리킨 열).
+    """
+    word_options = (
+        *(f"{c}/{FILL_ROLE}" for c in columns),
+        *(f"{c}/{SKIP_ROLE}" for c in columns),
+        NONE,
+    )
     fields: dict[str, tuple[str, ...]] = {f"[이름] {n}": ROLES for n in names}
-    fields |= {f"[말] {w}": (*columns, NONE) for w in words}
+    fields |= {f"[말] {w}": word_options for w in words}
 
     def prompt(order) -> str:
         lines = [
             f"요청: {request}",
             "[이름]마다 요청에서의 역할을 고르세요. 채움=채우거나 대조하라는 항목, 키=행을 찾는 기준, "
             "제외=빼거나 하지 말거나 나중에 하라는 항목, 무관=그 밖. 확신이 없으면 무관.",
-            f"[말]마다 그 말이 가리키는 취합표 열을 고르세요. 열 이름이 아니면 '{NONE}'.",
+            "[말]마다 그 말이 가리키는 취합표 열과, 요청이 그 열을 채우라는지(채움) 빼라는지(제외)를 "
+            f"'열/역할'로 고르세요. 열 이름의 다른 말이 아니면 '{NONE}'.",
         ]
         return "\n".join([*lines, *(f"- {_clean(k, 40)}" for k in order)])
 
+    def asked(order: dict[str, tuple[str, ...]]) -> dict[str, str]:
+        # 계약을 어긴 답(목록 밖 이름·선택지)은 버린다(DIF-050 M6)
+        answer = ask_many(prompt(list(order)), order)
+        return {k: v for k, v in answer.items() if k in fields and v in fields[k]}
+
     keys = list(fields)
-    first = ask_many(prompt(keys), fields)
-    flipped = {k: tuple(reversed(fields[k])) for k in reversed(keys)}
-    second = ask_many(prompt(list(flipped)), flipped)
+    first = asked(fields)
+    second = asked({k: tuple(reversed(fields[k])) for k in reversed(keys)})
     agreed = {k: v for k, v in first.items() if second.get(k) == v}
     roles = {k.removeprefix("[이름] "): v for k, v in agreed.items() if k.startswith("[이름] ")}
-    meant = {
-        k.removeprefix("[말] "): v for k, v in agreed.items() if k.startswith("[말] ") and v != NONE
-    }
-    return roles, meant
+    meant = [v.rsplit("/", 1) for k, v in agreed.items() if k.startswith("[말] ") and v != NONE]
+    return (
+        roles,
+        list(dict.fromkeys(c for c, r in meant if r == FILL_ROLE)),
+        list(dict.fromkeys(c for c, r in meant if r == SKIP_ROLE)),
+    )
 
 
 def _resolve(name: str, pool: list[str]) -> str | None:
@@ -456,12 +478,6 @@ def _covers_all_rows(view: TargetView) -> bool:
     """미리보기가 데이터 행 끝까지 담았나. 일부만 보고 값을 비교하면 51행 아래 사람을 놓친다(3차 K04)."""
     last = max((int(re.sub(r"\D", "", c.address)) for c in view.cells), default=view.header_row)
     return last >= view.data_rows[1]
-
-
-def _code_like(values: list[str]) -> bool:
-    """번호처럼 생긴 값: 숫자가 들어 있고 3자 이상. 80% 이상이 그렇다."""
-    coded = [v for v in values if len(v) >= 3 and re.search(r"\d", v)]
-    return bool(values) and len(coded) >= 0.8 * len(values)
 
 
 def _numeric(value: str) -> bool:
@@ -533,7 +549,8 @@ def _pick_record(documents, view, mentions):
 
 
 def _ask_model(choose: Chooser | None, prompt_for, options: tuple[str, ...]) -> str | None:
-    """선택지를 한 칸씩 돌려 두 번 묻고 같은 답일 때만 받아들인다. 자리에 흔들리는 답은 믿지 않는다.
+    """선택지를 한 칸씩 돌려 두 번 묻는다. 같은 답이거나 두 번째가 '없음'으로 물러서면(선택지 둘 이상) 받고,
+    다른 열로 바뀌면 버린다. 받은 짝은 출처가 match가 아니라 미리보기에 '확인 필요'로 보인다.
 
     '없음'까지 돌리므로 모든 자리의 선택지가 바뀐다(뒤집기는 가운데 자리가 남는다, PR #18 3차 검수 L1).
     첫 답이 '없음'이거나 목록 밖이면 확정하지 않으므로 두 번째는 묻지 않는다.
@@ -601,12 +618,9 @@ def interpret(
         if len(picked) == 1:
             key = (picked[0][1], picked[0][2])
     else:  # 키를 말하지 않았다
+        # 1위가 뚜렷할 때만. 값 모양(번호처럼 생긴 열)으로 동점을 가르지 않는다: 남의 사번이 이긴다(DIF-050 H1)
         candidates = _key_candidates(fields, view)
-        # 번호처럼 생긴 열(신청번호 '대관-0091')이 하나뿐이면 그것이 키다. 이름·단체명 같은 글자보다 앞선다
-        coded = [c for c in candidates if _code_like(_column_values(view, c[2]))]
-        if len(coded) == 1:
-            key = (coded[0][1], coded[0][2])
-        elif candidates and (len(candidates) == 1 or candidates[0][0] > 2 * candidates[1][0]):
+        if candidates and (len(candidates) == 1 or candidates[0][0] > 2 * candidates[1][0]):
             key = (candidates[0][1], candidates[0][2])
     if key is not None:
         # 행 전체를 봤고, 그 열에 값이 맞는 다른 문서 항목이 없을 때만(3차 H1 성명·추천인, 4차 H3 이름·이름)
@@ -671,11 +685,12 @@ def interpret(
         before_previous = previous[2] if previous else None
         previous = (name, field, after)
     # 지목은 요청에 단 하나, 그 두 이름 말고 다른 항목 이름이 없을 때만 확정한다("직급 이수시간을 비고 칸에", 5차 H1)
-    for (
-        position
-    ) in slotted:  # "이수시간 빈칸에 직급 채워": 칸 뒤에 다른 항목이 오면 무엇을 넣을지 갈린다
-        later = {n for n, _ in mentions[position + 1 :]} - {hint, mentions[position][0]}
-        if later and mentions[position][0] not in pointed_names:
+    # "X 칸"은 X 하나만 말했을 때만 그 칸을 채우라는 말이다. 앞이든 뒤든 다른 항목이 있으면
+    # ("직급 비고 칸에", "이수시간 빈칸에 직급") 무엇을 넣을지 갈린다(DIF-050 H2)
+    for position in slotted:
+        name = mentions[position][0]
+        rest = {n for n, _ in mentions} - {hint, name}
+        if rest and name not in pointed_names:
             pointing_unclear = True
     others = {n for n, _ in mentions if n != hint and n not in pointed_names}
     if len(linked) > 1 or (linked and others):
@@ -693,33 +708,44 @@ def interpret(
     # 모두 assumed로 표시해 미리보기에서 '확인 필요'로 보인다(P04 성능 개선, 2026-11-18 사용자 결정)
     mentioned = [*(p[0] for p in pairs), *(p[1] for p in pairs), *only_fields, *only_columns]
     assumed = False
+    skipped: list[str] = []
     if pointing_unclear or (not simple and ask_many is None):
         drop = set(mentioned)
     elif not simple:
         assumed = True
         words = _unknown_words(request, columns + names)
-        targets = tuple(c for c in columns if c != key_column and c not in skip)
+        targets = tuple(c for c in columns if c != key_column)
+        coded_skip = [n for n in skip if n != hint]
         try:
-            roles, meant = _read_request(
-                ask_many, request, list(dict.fromkeys(mentioned)), words, targets
+            roles, meant, meant_skip = _read_request(
+                ask_many, request, list(dict.fromkeys([*mentioned, *coded_skip])), words, targets
             )
         except ServiceError as error:
             if not error.code.startswith("AI_"):
                 raise
-            roles, meant = {}, {}
-        drop = {n for n in mentioned if roles.get(n) != "채움"}
-        for column in dict.fromkeys(meant.values()):  # "이름" → 봉사자명: 요청한 열로 더한다
+            roles, meant, meant_skip = {}, [], []
+        skipped = list(
+            dict.fromkeys([*(n for n, r in roles.items() if r == SKIP_ROLE), *meant_skip])
+        )
+        filled = {n for n, r in roles.items() if r == FILL_ROLE} | set(meant)
+        # 코드가 빼기로 읽은 이름은 모델도 '제외'라고 해야 뺀다. 둘이 어긋나거나 같은 열을 채우라고도
+        # 빼라고도 읽었으면 짝을 정하지 않고 묻는다(DIF-050 H3·M2)
+        if any(roles.get(n) != SKIP_ROLE for n in coded_skip) or set(skipped) & filled:
+            drop, skipped, meant = set(mentioned), [], []
+        else:
+            drop = {n for n in mentioned if roles.get(n) != FILL_ROLE}
+        for column in meant:  # "이름" → 봉사자명: 채우라는 말이 가리킨 열을 요청한 열로 더한다
             if column not in mentioned and column not in only_columns:
                 only_columns.append(column)
     else:
         drop = set()
-    held = [n for n in mentioned if n in drop]
+    held = [n for n in mentioned if n in drop and n not in skipped]
     pairs = [p for p in pairs if p[0] not in drop and p[1] not in drop]
     if assumed:
         pairs = [(f, c, "assumed") for f, c, _ in pairs]
     only_fields = [n for n in only_fields if n not in drop]
     only_columns = [n for n in only_columns if n not in drop]
-    off_limits = skip | set(unclear) | drop  # 빼라고 한 열·이름은 모델 선택지에도 넣지 않는다
+    off_limits = skip | set(unclear) | drop | set(skipped)  # 뺀 열·이름은 모델 선택지에도 없다
     for field in only_fields:
         taken = {p[1] for p in pairs}
         options = _order(
@@ -770,7 +796,17 @@ def interpret(
     if not mapped:
         questions.append(("target_column", tuple(c for c in columns if c != key_column)[:3]))
     record = replace(record, key_field=key_field or "")
-    return Interpretation(work_type, record, key, mapped, tuple(questions), excluded, tuple(fields))
+    return Interpretation(
+        work_type,
+        record,
+        key,
+        mapped,
+        tuple(questions),
+        excluded,
+        tuple(fields),
+        key_assumed=key is not None and hint is None,
+        skipped=tuple(skipped),
+    )
 
 
 def _kind(value: str) -> str:

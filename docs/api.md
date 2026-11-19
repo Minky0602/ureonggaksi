@@ -69,12 +69,17 @@ class Prepared:
     warnings: tuple[str, ...]    # 해석 경보. 답할 수 없는 같은 문제가 QUESTION_RATIO 이상일 때(예: 대상 없음)
     manual: tuple[ManualItem, ...]    # 직접 처리 영역 전체(실패 파일 포함)
     output_path: Path            # 기본: 대상 폴더/<대상명>_우렁각시_<YYYYMMDD-HHMM>.xlsx
+    workflow: WorkflowVersion | None   # '최근 작업'으로 연 규칙
+    unsure: tuple[tuple[str, str, str], ...]   # 코드가 확신하지 못한 해석 (종류, 이름, 대상 열). 화면은 '확인 필요'로 보인다
+    #   pair: 모델이 고르거나 읽은 짝(문서 항목, 열) / key: 요청에 없는 키를 값으로 추정(문서 항목, 열) /
+    #   skip: 빼라는 말로 읽고 비워 둔 이름(이름, ""). '최근 작업'은 저장 때 사용자가 본 규칙이라 비어 있다
 
 def prepare(request: str, sources: list[Path], target: Path, *,
             workflow: WorkflowVersion | None = None,     # '최근 작업'을 눌렀으면 AI를 부르지 않는다
             answers: Pairs = (),                         # (slot, 답). SKIP이면 그 문제의 칸은 비워 둔다
             output_path: Path | None = None,
             choose: Chooser | None = None,               # 로컬 모델(ai.LocalModel.choose). 없으면 모델 없이 해석
+            ask_many: AskMany | None = None,             # 로컬 모델(ai.LocalModel.ask_fields). 모르는 말이 섞인 요청을 읽는다
             progress: Progress, cancel: Cancel) -> Prepared
     # 쓰기 없음. 질문에 답하면 UI가 answers를 늘려 다시 부른다(서비스는 대화 상태를 갖지 않는다).
     # question이 생기는 경우(PRD 6.2)만 묻는다:
@@ -271,12 +276,17 @@ class Interpretation:            # 요청 해석 결과. 규칙 초안의 재료
     work_type: Literal["fill", "check"] | None
     record: RecordRule
     key: tuple[str, str] | None                  # (문서 항목, 대상 열)
-    fields: tuple[tuple[str, str, str], ...]     # (문서 항목, 대상 열, 출처 "match"|"model")
+    fields: tuple[tuple[str, str, str], ...]     # (문서 항목, 대상 열, 출처 "match"|"model"|"assumed")
     questions: tuple[tuple[str, tuple[str, ...]], ...]   # (슬롯 work_type|key_column|target_column, 후보)
     excluded: tuple[str, ...]                    # 요청했지만 짝을 못 찾은 이름(질문 없이 빼고 소명)
     candidates: tuple[FieldCandidate, ...]
+    key_assumed: bool                            # 요청에서 말하지 않은 키를 값 일치로 추정했다
+    skipped: tuple[str, ...]                     # 모르는 말이 섞인 요청에서 빼라는 말로 읽은 이름
 
 Chooser = Callable[[str, tuple[str, ...]], str | None]   # (질문 글, 선택지) → 선택지 하나 또는 None
+AskMany = Callable[[str, dict[str, tuple[str, ...]]], dict[str, str]]
+    # (질문 글, {칸: 선택지}) → {칸: 답}. LocalModel.ask_fields는 JSON 객체 스키마 한 번으로 묻고, 생성 길이를
+    # 칸 수에 맞춘다. 잘리거나 객체가 아니면 AI_BAD_OUTPUT. 목록 밖 칸·답은 뺀다(interpret도 다시 거른다)
 
 @dataclass(frozen=True)
 class AiStatus:
@@ -292,23 +302,32 @@ class RuleDraft:
 
 def ai_status() -> AiStatus
 def interpret(request: str, documents: tuple[Document, ...], view: TargetView,
-              *, choose: Chooser | None = None) -> Interpretation
+              *, choose: Chooser | None = None, ask_many: AskMany | None = None) -> Interpretation
     # view는 데이터 행 전체를 담아야 한다(prepare는 preview_rows를 데이터 행 수 이상으로 연다).
     #   전체를 담지 못한 view로는 값으로 키를 잇지 않고 묻는다(51행 아래 사람을 놓친다).
-    # 코드가 확정하는 것은 둘뿐이다(P04 ① 독립 검수: 추정 확정이 틀린 칸을 채움).
+    # 코드가 확정(출처 match)하는 것은 둘뿐이다(P04 ① 독립 검수: 추정 확정이 틀린 칸을 채움).
     #   ① 정규화(공백·끝 콜론·대소문자) 후 이름과 괄호 단위가 모두 같은 짝, 또는 "A를 B 칸에"로 지목한 짝
     #   ② 사용자가 'X로 찾아·X 기준'으로 지목한 키(식별자 같은 값이 그 열에 글자 그대로 있는 쌍). 지목하지
-    #      않았으면 값이 80% 이상 서로 다른 열에서 문서 값 80% 이상이 일치하고 1위가 뚜렷할 때만.
+    #      않았으면 값이 모두 서로 다른 열에서 문서 값 60% 이상(2건 이상)이 일치하고 1위가 일치 수 2배를 넘을
+    #      때만 추정하고 key_assumed로 표시한다. 동점을 값 모양(번호처럼 생긴 열)으로 가르지 않는다(DIF-050 H1).
     #      이름이 다른 열은 숫자로만 된 값(날짜·금액)으로 잇지 않는다.
     #   한 문서에 같은 라벨이 둘 이상이면 그 항목은 후보가 아니다.
     # 항목 짝은 요청의 모든 낱말이 '이름+조사' 또는 허용 낱말(채우기·검토 동사, 키 표현, '칸에', 표·문서 이름,
-    #   부탁 표현, 다·모두)일 때만 확정하거나 모델에 묻는다. 모르는 말이 하나라도 있으면 모두 소명한다.
-    #   이름별 국소 판정·모델 역할 판독은 독립 검수에서 계속 새어 쓰지 않는다(DIF-037·041).
+    #   부탁 표현, 다·모두)일 때만 확정하거나 모델에 묻는다(출처 match·model).
+    # 모르는 말이 섞인 요청(2026-11-18 사용자 결정, DIF-048·050): ask_many가 없으면 모두 소명한다. 있으면
+    #   요청의 이름마다 역할(채움·키·제외·무관)과, 모르는 말(코드가 아는 동사·빼기 표현은 빼고 최대 8개)마다
+    #   '열/채움'·'열/제외'·없음을 한 번에 묻는다. 칸 순서와 선택지 순서를 뒤집어 두 번 묻고 같은 답만 받는다.
+    #   '채움'인 이름과 채우라는 말이 가리킨 열만 남기고, 이 경로의 짝은 모두 출처 assumed다.
+    #   빼기: 모델 '제외'면 빼고 skipped에 남긴다. 코드 빼기 표지가 붙은 이름은 모델도 '제외'여야 빼고, 어긋나면
+    #   (또는 같은 열을 채우라고도 빼라고도 읽으면) 짝을 정하지 않고 묻는다. 모델 오류(AI_*)면 모두 소명한다.
     # 지목: 이름 바로 뒤의 자리 낱말(칸·빈칸·열·란·셀·표, 앞에 '의' 허용)은 지목이다. "A를 B 칸에"처럼 '를' 바로
-    #   뒤에 B가 오면 지목대로, 아니면(다른 꼴·나열 뒤 지목·방향 조사) 모두 묻는다. 열 이름이 빼기 낱말과 같으면 묻는다.
-    # 모델 짝 선택은 선택지를 '없음'까지 한 칸 돌려 두 번 묻고 같은 답일 때만 받는다(첫 답이 '없음'이면 한 번).
+    #   뒤에 B가 오면 지목대로 확정한다. "X 칸"은 요청에 다른 항목 이름이 없을 때만 X를 채우라는 말로 읽고,
+    #   앞뒤에 다른 항목이 있으면("직급 비고 칸에") 묻는다. 그 밖의 꼴·나열 뒤 지목·방향 조사도 묻는다.
+    #   열 이름이 빼기 낱말과 같으면 묻는다.
+    # 모델 짝 선택은 선택지를 '없음'까지 한 칸 돌려 두 번 묻는다. 같은 답이거나, 선택지가 둘 이상인데 두 번째가
+    #   '없음'으로 물러서면 받는다(출처 model·assumed, '확인 필요'). 다른 열로 바뀌면 버린다(첫 답이 '없음'이면 한 번).
     #   키는 이름이 같아도 그 열과 값이 맞는 다른 문서 항목이 있거나 view가 행 전체를 담지 못하면 묻는다.
-    # 작업 종류: 채우기·검토 표현 중 하나만 있을 때. 둘 다·없음·"채우지 마"·의문문("맞아?") → 질문.
+    # 작업 종류: 채우기·검토 표현 중 하나만 있을 때. 둘 다·없음·"채우지 마"·'?'로 묻는 말("입력했어?") → 질문.
     # 요청의 이름은 단어로 나온 것만 읽는다('전화번호'의 '번호'는 아님). 작업 동사 자리는 열 이름이 아니다.
     # 이름이 다른 짝은 choose로 하나씩 묻는다(선택지 = 열 또는 항목 + "없음", 이름이 비슷한 것을 앞에 두고
     #   단서로 표시, 단위만 다른 같은 이름은 제외). 모델이 없거나 '없음'·목록 밖 답이면 확정하지 않고

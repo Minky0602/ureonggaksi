@@ -82,8 +82,13 @@ def _print_preview(prepared: Prepared) -> None:
         )
     for item in prepared.samples:
         print(f"  예: {item.target_ref} ← {item.proposed.value} ({item.field})")
-    for field, column in prepared.unsure:
-        print(f"확인 필요: ‘{field}’ → {column} 열 (모델이 추정, 저장 전 확인)")
+    notes = {
+        "key": "‘{}’로 {} 열의 행을 찾음 (요청에 없어 값으로 추정)",
+        "pair": "‘{}’ → {} 열 (모델이 추정)",
+        "skip": "‘{}’은(는) 빼라는 말로 읽고 비워 둠{}",
+    }
+    for kind, name, column in prepared.unsure:
+        print(f"확인 필요: {notes[kind].format(name, column)} — 저장 전에 확인하세요")
     for warning in prepared.warnings:
         print(f"참고: {warning}")
 

@@ -60,8 +60,10 @@ class Prepared:
     workflow: WorkflowVersion | None = (
         None  # '최근 작업'으로 연 규칙. commit이 같은 작업에 이어 저장한다
     )
-    # 코드가 확신하지 못한 짝(모델이 고르거나 읽은 것): (문서 항목, 대상 열). 미리보기에 '확인 필요'로 보인다
-    unsure: tuple[tuple[str, str], ...] = ()
+    # 코드가 확신하지 못한 해석: (종류, 이름, 대상 열). 미리보기에 '확인 필요'로 보인다(DIF-050).
+    # pair: 모델이 고르거나 읽은 짝(문서 항목, 열) / key: 말하지 않은 키를 데이터로 추정(문서 항목, 열) /
+    # skip: 빼라는 말로 읽고 비워 둔 이름(이름, "")
+    unsure: tuple[tuple[str, str, str], ...] = ()
 
 
 # ---------- 해석 한 줄 ----------
@@ -76,21 +78,25 @@ def _letter(view: TargetView, column: str) -> str:
 
 
 def describe_rule(rule: RuleSet, view: TargetView, unsure=()) -> str:
-    """검증된 규칙에서 문장 틀로 만든 한 줄. AI가 쓴 문장이 아니다. 확신하지 못한 짝에는 '(확인 필요)'."""
+    """검증된 규칙에서 문장 틀로 만든 한 줄. AI가 쓴 문장이 아니다. 확신하지 못한 해석에는 '(확인 필요)'."""
     unsure = set(unsure)
     key = rule.target.key_column
+    if any(kind == "key" and column == key for kind, _, column in unsure):
+        key = f"{key} (확인 필요)"
     parts = []
     for field in rule.fields:
         if not field.target_column:
             continue
         letter = _letter(view, field.target_column)
         place = f"{letter}열({field.target_column})" if letter else f"‘{field.target_column}’ 열"
-        mark = " (확인 필요)" if (field.name, field.target_column) in unsure else ""
+        mark = " (확인 필요)" if ("pair", field.name, field.target_column) in unsure else ""
         parts.append(f"‘{field.name}’을 {place}{mark}")
     joined = ", ".join(parts)
+    skipped = ", ".join(f"‘{name}’" for kind, name, _ in sorted(unsure) if kind == "skip")
+    tail = f"; {skipped}은(는) 빼라는 말로 읽고 비워 둠 (확인 필요)" if skipped else ""
     if rule.work_type == "check":
-        return f"검토: 표를 바꾸지 않고 {key}(으)로 행을 찾아 {joined}과 대조함"
-    return f"채우기: {key}(으)로 행을 찾아 {joined}에 넣음"
+        return f"검토: 표를 바꾸지 않고 {key}(으)로 행을 찾아 {joined}과 대조함{tail}"
+    return f"채우기: {key}(으)로 행을 찾아 {joined}에 넣음{tail}"
 
 
 # ---------- prepare ----------
@@ -262,7 +268,7 @@ def prepare(
     out_dir = local_dir(output_path, target)
     inputs = open_inputs(list(sources), target, out_dir)
     warnings: list[str] = []
-    unsure: tuple[tuple[str, str], ...] = ()
+    unsure: tuple[tuple[str, str, str], ...] = ()
     if workflow is not None:  # '최근 작업': AI도 해석도 부르지 않는다
         rule = workflow.rule
         view = _full_view(inputs, rule)
@@ -291,7 +297,12 @@ def prepare(
                 options = tuple(c for c in options if _key_field_for(result, view, c))
             return _asking(request, answers, inputs, _rule_question(slot, options))
         warnings += [f"‘{name}’은(는) 정하지 못해 비워 둡니다." for name in result.excluded]
-        unsure = tuple((f, c) for f, c, source in result.fields if source != "match")
+        guessed_key = [("key", *result.key)] if result.key_assumed and result.key else []
+        unsure = (
+            *guessed_key,
+            *(("pair", f, c) for f, c, source in result.fields if source != "match"),
+            *(("skip", name, "") for name in result.skipped),
+        )
     rule = _with_policy(rule, answers)
     issues = validate_rule(rule, inputs, view)
     if issues:

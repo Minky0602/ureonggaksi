@@ -82,3 +82,52 @@ def test_real_model_picks_the_synonym():
     question = "요청: 이름으로 찾아서 직급 채워줘\n취합표 열 '직급'에 넣을 문서 항목을 고르세요.\n- 성명\n- 직위\n- 이수시간"
     assert model.choose(question, ("성명", "직위", "이수시간", "없음")) == "직위"
     json.dumps(question)  # 질문은 평문이다(외부 전송 없음)
+
+
+# ---------- 여러 칸을 한 번에 묻기(ask_fields, DIF-048·050) ----------
+
+FAKE_FIELDS = """
+import json, sys
+args = sys.argv[1:]
+schema = json.load(open(args[args.index("-jf") + 1], encoding="utf-8"))
+mode = {mode!r}
+open({log!r}, "w", encoding="utf-8").write(args[args.index("-n") + 1])
+answer = {{k: p["enum"][-1] for k, p in schema["properties"].items()}}
+if mode == "outside":
+    answer = {{"[이름] 없는이름": "채움", **{{k: "없는열" for k in answer}}}}
+out = json.dumps(answer, ensure_ascii=False)
+if mode == "cut":
+    out = out[: len(out) // 2]
+if mode == "list":
+    out = "[1, 2]"
+sys.stdout.buffer.write((out + " [end of text]\\n").encode("utf-8"))
+"""
+
+
+def fields_model(tmp_path, mode):
+    script, log = tmp_path / f"fields_{mode}.py", tmp_path / "n.txt"
+    script.write_text(FAKE_FIELDS.format(mode=mode, log=str(log)), encoding="utf-8")
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+    return LocalModel((sys.executable, "-I", str(script)), model, 20), log
+
+
+def test_ask_fields_reads_every_name_and_sizes_the_answer_length(tmp_path):
+    """M4: 이름이 많아도 답이 잘리지 않게 생성 상한을 이름 수에 맞춘다."""
+    fields = {f"[말] 낱말{i}": ("이수시간/채움", "이수시간/제외", "없음") for i in range(9)}
+    model, log = fields_model(tmp_path, "ok")
+    assert model.ask_fields("q", fields) == dict.fromkeys(fields, "없음")
+    assert int(log.read_text(encoding="utf-8")) >= 9 * len('"[말] 낱말0": "이수시간/제외", ')
+
+
+@pytest.mark.parametrize("mode", ["cut", "list"])
+def test_ask_fields_reports_cut_or_non_object_answers(tmp_path, mode):
+    model, _ = fields_model(tmp_path, mode)
+    with pytest.raises(ServiceError) as caught:
+        model.ask_fields("q", {"[이름] 직급": ("채움", "제외")})
+    assert caught.value.code == "AI_BAD_OUTPUT"
+
+
+def test_ask_fields_drops_names_and_answers_outside_the_lists(tmp_path):
+    model, _ = fields_model(tmp_path, "outside")
+    assert model.ask_fields("q", {"[이름] 직급": ("채움", "제외")}) == {}
