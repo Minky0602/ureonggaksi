@@ -110,6 +110,7 @@ class Interpretation:
     ] = ()  # 문서에서 찾은 항목들(build_rule이 추출 규칙을 가져간다)
     key_assumed: bool = False  # 요청에서 말하지 않은 키를 데이터 일치로 추정했다 → '확인 필요'
     skipped: tuple[str, ...] = ()  # 모르는 말이 섞인 요청에서 빼라는 말로 읽은 이름 → '확인 필요'
+    unread: tuple[str, ...] = ()  # 모델이 어느 열과도 잇지 못한 모르는 말 → 경고
 
 
 def _norm(text: str) -> str:
@@ -384,7 +385,7 @@ def _unknown_words(request: str, names: list[str]) -> list[str]:
 def _read_request(ask_many: AskMany, request: str, names: list[str], words: list[str], columns):
     """이름마다 역할, 모르는 말마다 뜻하는 열과 그 역할을 한 번에 묻는다. 순서를 뒤집어 두 번 묻고 같은 답만 받는다.
 
-    돌려주는 것: (이름 → 역할, 채우라는 말이 가리킨 열, 빼라는 말이 가리킨 열).
+    돌려주는 것: (이름 → 역할, 채우라는 말이 가리킨 열, 빼라는 말이 가리킨 열, 열과 잇지 못한 말).
     """
     word_options = (
         *(f"{c}/{FILL_ROLE}" for c in columns),
@@ -398,7 +399,8 @@ def _read_request(ask_many: AskMany, request: str, names: list[str], words: list
         lines = [
             f"요청: {request}",
             "[이름]마다 요청에서의 역할을 고르세요. 채움=채우거나 대조하라는 항목, 키=행을 찾는 기준, "
-            "제외=빼거나 하지 말거나 나중에 하라는 항목, 무관=그 밖. 확신이 없으면 무관.",
+            "제외=빼거나 하지 말거나 그대로 두거나 나중에 하라는 항목(빼라고 했으면 무관이 아니라 제외), "
+            "무관=그 밖. 확신이 없으면 무관.",
             "[말]마다 그 말이 가리키는 취합표 열과, 요청이 그 열을 채우라는지(채움) 빼라는지(제외)를 "
             f"'열/역할'로 고르세요. 열 이름의 다른 말이 아니면 '{NONE}'.",
         ]
@@ -415,10 +417,12 @@ def _read_request(ask_many: AskMany, request: str, names: list[str], words: list
     agreed = {k: v for k, v in first.items() if second.get(k) == v}
     roles = {k.removeprefix("[이름] "): v for k, v in agreed.items() if k.startswith("[이름] ")}
     meant = [v.rsplit("/", 1) for k, v in agreed.items() if k.startswith("[말] ") and v != NONE]
+    unread = [w for w in words if agreed.get(f"[말] {w}", NONE) == NONE]
     return (
         roles,
         list(dict.fromkeys(c for c, r in meant if r == FILL_ROLE)),
         list(dict.fromkeys(c for c, r in meant if r == SKIP_ROLE)),
+        unread,
     )
 
 
@@ -496,7 +500,7 @@ def _key_candidates(
     """(일치 수, 문서 항목, 대상 열): 문서 값이 그 열에 글자 그대로 있는 쌍.
 
     일치한 값은 식별자처럼 보여야 한다. 사용자가 이름이 같은 키를 말했으면 일치가 하나라도 있으면 된다.
-    그 밖에는 문서 값의 60% 이상(2건 이상)이 그 열에 있어야 한다. 표에 없는 문서는 직접 처리로 남는다.
+    그 밖에는 문서 값의 60%(추정) 또는 80%(말한 키) 이상, 2건 이상이 그 열에 있어야 한다. 표에 없는 문서는 직접 처리로 남는다.
     추정할 때는 열 값이 모두 서로 달라야 하고(키는 행을 하나로 가려야 한다), 이름이 다른 열이면
     숫자로만 된 값(날짜·금액)으로는 잇지 않는다.
     """
@@ -520,8 +524,9 @@ def _key_candidates(
             if not named and not _same(field.name, column) and all(map(_numeric, hit_values)):
                 continue  # 이름이 다른 열의 날짜·금액은 우연히 같을 수 있다(2차 검수 K01·K02)
             hits = len(hit_values)
-            # 키를 말했어도 이름이 다른 열은 값 한두 개의 우연한 일치로 잇지 않는다(6차 검수 H2)
-            strong = hits >= max(2, 0.6 * len(samples))
+            # 키를 말했어도 이름이 다른 열은 값 한두 개의 우연한 일치로 잇지 않는다(6차 검수 H2).
+            # 추정('확인 필요'로 표시)은 60%, 말한 키(표시 없음)는 80%(DIF-050 2차 L-5)
+            strong = hits >= max(2, (0.8 if named else 0.6) * len(samples))
             if any_hit or (named and _same(field.name, column)) or strong:
                 result.append((hits, field.name, column))
     return sorted(result, key=lambda c: -c[0])
@@ -709,6 +714,7 @@ def interpret(
     mentioned = [*(p[0] for p in pairs), *(p[1] for p in pairs), *only_fields, *only_columns]
     assumed = False
     skipped: list[str] = []
+    unread: list[str] = []  # 모델이 열과 잇지 못한 모르는 말(2차 M-1)
     if pointing_unclear or (not simple and ask_many is None):
         drop = set(mentioned)
     elif not simple:
@@ -717,21 +723,29 @@ def interpret(
         targets = tuple(c for c in columns if c != key_column)
         coded_skip = [n for n in skip if n != hint]
         try:
-            roles, meant, meant_skip = _read_request(
+            roles, meant, meant_skip, unread = _read_request(
                 ask_many, request, list(dict.fromkeys([*mentioned, *coded_skip])), words, targets
             )
         except ServiceError as error:
             if not error.code.startswith("AI_"):
                 raise
-            roles, meant, meant_skip = {}, [], []
+            roles, meant, meant_skip, unread = {}, [], [], []
+        # 코드가 빼기로 읽은 이름은 모델이 두 번 모두 '채움'이 아닌 같은 답(제외·무관)이면 뺀다. 실제 4B는
+        # 뺄 항목을 '무관'으로 답한다(2차 M-2). 답이 어긋나거나 '채움'·'키'면, 또는 같은 열을 채우라고도
+        # 빼라고도 읽었으면 짝을 정하지 않고 묻는다(DIF-050 H3·M2)
         skipped = list(
-            dict.fromkeys([*(n for n, r in roles.items() if r == SKIP_ROLE), *meant_skip])
+            dict.fromkeys(
+                [
+                    *(n for n, r in roles.items() if r == SKIP_ROLE),
+                    *coded_skip,
+                    *meant_skip,
+                ]
+            )
         )
         filled = {n for n, r in roles.items() if r == FILL_ROLE} | set(meant)
-        # 코드가 빼기로 읽은 이름은 모델도 '제외'라고 해야 뺀다. 둘이 어긋나거나 같은 열을 채우라고도
-        # 빼라고도 읽었으면 짝을 정하지 않고 묻는다(DIF-050 H3·M2)
-        if any(roles.get(n) != SKIP_ROLE for n in coded_skip) or set(skipped) & filled:
-            drop, skipped, meant = set(mentioned), [], []
+        settled = all(roles.get(n) in (SKIP_ROLE, "무관") for n in coded_skip)
+        if not settled or set(skipped) & filled:
+            drop, skipped, meant, unread = set(mentioned), [], [], []
         else:
             drop = {n for n in mentioned if roles.get(n) != FILL_ROLE}
         for column in meant:  # "이름" → 봉사자명: 채우라는 말이 가리킨 열을 요청한 열로 더한다
@@ -806,6 +820,7 @@ def interpret(
         tuple(fields),
         key_assumed=key is not None and hint is None,
         skipped=tuple(skipped),
+        unread=tuple(unread),
     )
 
 

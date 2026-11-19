@@ -97,6 +97,14 @@ class LocalModel:
 
     def _run(self, question: str, schema: dict, tokens: int = CHOICE_TOKENS) -> str:
         """질문 하나에 llama-completion을 한 번 띄운다. 실행할 수 없거나 시간을 넘으면 예외."""
+        try:
+            return self._run_in(question, schema, tokens)
+        except (
+            OSError
+        ) as exc:  # 임시 파일을 쓰지 못함(디스크·권한): 모델 오류로 알려 질문으로 넘긴다
+            raise ServiceError("AI_UNAVAILABLE", "로컬 AI를 실행하지 못했습니다.") from exc
+
+    def _run_in(self, question: str, schema: dict, tokens: int) -> str:
         with tempfile.TemporaryDirectory(prefix="ureonggaksi-ai-") as folder:
             prompt_path, schema_path = Path(folder) / "prompt.txt", Path(folder) / "schema.json"
             prompt_path.write_text(chat_prompt(question), encoding="utf-8", newline="\n")

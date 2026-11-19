@@ -11,7 +11,7 @@ from pathlib import Path
 from .analyze import Cancel, ChangeItem, Plan, Progress, analyze, manual_items
 from .errors import Pairs, ServiceError
 from .inputs import Inputs, inspect_source, open_inputs
-from .interpret import AskMany, Chooser, build_rule, interpret
+from .interpret import AskMany, Chooser, _same, build_rule, interpret
 from .manual import ManualItem
 from .rules import POLICY_VALUES, SKIP, RuleSet, RuleStore, WorkflowVersion, validate_rule
 from .save import ResultPackage, approve, default_output_path, save_result
@@ -80,9 +80,14 @@ def _letter(view: TargetView, column: str) -> str:
 def describe_rule(rule: RuleSet, view: TargetView, unsure=()) -> str:
     """검증된 규칙에서 문장 틀로 만든 한 줄. AI가 쓴 문장이 아니다. 확신하지 못한 해석에는 '(확인 필요)'."""
     unsure = set(unsure)
-    key = rule.target.key_column
-    if any(kind == "key" and column == key for kind, _, column in unsure):
-        key = f"{key} (확인 필요)"
+    key = f"{rule.target.key_column}(으)로 행을 찾아"
+    by = [
+        name for kind, name, column in unsure if kind == "key" and column == rule.target.key_column
+    ]
+    if (
+        by
+    ):  # 키의 문서 항목도 보인다: 열만 보면 남의 번호(추천인사번)로 찾는 것을 알 수 없다(2차 H-1)
+        key = f"{rule.target.key_column}(으)로 행을 찾아(문서의 ‘{by[0]}’ 값으로, 확인 필요)"
     parts = []
     for field in rule.fields:
         if not field.target_column:
@@ -95,8 +100,8 @@ def describe_rule(rule: RuleSet, view: TargetView, unsure=()) -> str:
     skipped = ", ".join(f"‘{name}’" for kind, name, _ in sorted(unsure) if kind == "skip")
     tail = f"; {skipped}은(는) 빼라는 말로 읽고 비워 둠 (확인 필요)" if skipped else ""
     if rule.work_type == "check":
-        return f"검토: 표를 바꾸지 않고 {key}(으)로 행을 찾아 {joined}과 대조함{tail}"
-    return f"채우기: {key}(으)로 행을 찾아 {joined}에 넣음{tail}"
+        return f"검토: 표를 바꾸지 않고 {key} {joined}과 대조함{tail}"
+    return f"채우기: {key} {joined}에 넣음{tail}"
 
 
 # ---------- prepare ----------
@@ -280,6 +285,7 @@ def prepare(
         if not documents:
             raise ServiceError("INPUT_UNSUPPORTED", "읽을 수 있는 원본 문서가 없습니다.")
         result = interpret(request, documents, view, choose=_safe(choose), ask_many=ask_many)
+        named_key = result.key is not None and not result.key_assumed
         result = _apply_answers(result, answers, view)
         rule = build_rule(result, view)
         if rule is None:
@@ -297,7 +303,19 @@ def prepare(
                 options = tuple(c for c in options if _key_field_for(result, view, c))
             return _asking(request, answers, inputs, _rule_question(slot, options))
         warnings += [f"‘{name}’은(는) 정하지 못해 비워 둡니다." for name in result.excluded]
-        guessed_key = [("key", *result.key)] if result.key_assumed and result.key else []
+        if result.unread:  # 모델이 열과 잇지 못한 말. 빠진 항목일 수 있다(2차 M-1)
+            words = "·".join(f"‘{w}’" for w in result.unread)
+            warnings.append(
+                f"요청의 {words}은(는) 어느 열과도 잇지 못했습니다. 빠진 항목이 있으면 '자세히'에서 고르세요."
+            )
+        # 사용자가 말한 키만 표시하지 않는다. 추정했거나, 열만 답했는데 코드가 고른 문서 항목의 이름이
+        # 그 열과 다르면(추천인사번 → 사번) '확인 필요'다(DIF-050 2차 H-1)
+        answered = result.key is not None and not named_key and not result.key_assumed
+        guessed_key = (
+            [("key", *result.key)]
+            if result.key_assumed or (answered and not _same(*result.key))
+            else []
+        )
         unsure = (
             *guessed_key,
             *(("pair", f, c) for f, c, source in result.fields if source != "match"),

@@ -1047,3 +1047,19 @@ def test_unknown_words_leave_out_verbs_the_code_already_knows(setup):
 def test_question_mark_requests_ask_for_the_work_type(setup, request_text):
     """M1: 묻는 말은 채우기로 읽지 않는다."""
     assert interpret_with(setup, request_text, {"이수시간": "채움"}).work_type is None
+
+
+def test_a_code_negation_the_model_calls_unrelated_is_skipped_and_marked(setup):
+    """2차 M-2: 실제 4B는 뺄 항목을 '무관'으로 답한다. 코드 빼기 표지와 어긋나지 않으므로 빼고 표시한다."""
+    result = interpret_with(
+        setup,
+        "이름 기준으로 직급은 빼고 이수시간 채워 주시면 돼요",
+        {"직급": "무관", "이수시간": "채움"},
+    )
+    assert result.skipped == ("직급",) and [c for _, c, _ in result.fields] == ["이수시간"]
+
+
+def test_a_single_name_with_a_slot_word_is_still_filled(setup):
+    """2차 L-4: 'X 칸'은 다른 항목 이름이 없으면 X를 채우라는 말이다."""
+    result = run(setup, "이름 기준으로 이수시간 칸 채워줘")
+    assert result.fields == (("이수시간", "이수시간", "match"),)

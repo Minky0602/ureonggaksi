@@ -307,7 +307,58 @@ def test_unsure_key_pair_and_exclusion_are_all_shown(files, capsys):
     rule = prepared.plan.rule
     key = ("key", rule.record.key_field, rule.target.key_column)
     line = describe_rule(rule, _full_view(prepared.inputs, rule), {key, *prepared.unsure})
-    assert f"{rule.target.key_column} (확인 필요)(으)로" in line and "‘직급’은(는) 빼라는" in line
+    assert (
+        f"(문서의 ‘{rule.record.key_field}’ 값으로, 확인 필요)" in line
+        and "‘직급’은(는) 빼라는" in line
+    )
     _print_preview(replace(prepared, unsure=(key, *prepared.unsure)))
     shown = [x for x in capsys.readouterr().out.splitlines() if x.startswith("확인 필요:")]
     assert len(shown) == 3 and "값으로 추정" in shown[0] and "빼라는 말로" in shown[-1]
+
+
+def _referral_files(tmp_path):
+    """성명 + 추천인사번(다른 사람의 사번). 사번 열과 성명 열이 값 일치 수로 동점이다(2차 H-1)."""
+    people = [("가나다", "S-1002", "12"), ("라마바", "S-1003", "8"), ("사아자", "S-1001", "4")]
+    sources = []
+    for i, (name, referrer, hours) in enumerate(people):
+        rows = [("성명", name), ("추천인사번", referrer), ("이수시간", hours)]
+        body = table([[cell(k, r, 0), cell(v, r, 1)] for r, (k, v) in enumerate(rows)])
+        sources.append(
+            write_hwpx(tmp_path / f"r{i}.hwpx", ["<hp:p><hp:run>" + body + "</hp:run></hp:p>"])
+        )
+    sheet = [
+        ["사번", "성명", "이수시간"],
+        ["S-1001", "가나다", None],
+        ["S-1002", "라마바", None],
+        ["S-1003", "사아자", None],
+    ]
+    return sources, write_xlsx(tmp_path / "명단.xlsx", sheet, sheet="명단"), tmp_path / "out.xlsx"
+
+
+def test_a_key_answered_by_column_shows_which_document_field_it_uses(tmp_path):
+    """2차 H-1: 열만 답했는데 코드가 고른 문서 항목 이름이 다르면(추천인사번 → 사번) '확인 필요'로 보인다."""
+    sources, target, out = _referral_files(tmp_path)
+    asked = prepare("이수시간 채워줘", sources, target, output_path=out)
+    assert asked.question is not None and asked.question.slot == "key_column"
+    by_number = prepare(
+        "이수시간 채워줘", sources, target, answers=(("key_column", "사번"),), output_path=out
+    )
+    assert ("key", "추천인사번", "사번") in by_number.unsure
+    assert "문서의 ‘추천인사번’ 값으로, 확인 필요" in by_number.interpretation
+    by_name = prepare(
+        "이수시간 채워줘", sources, target, answers=(("key_column", "성명"),), output_path=out
+    )
+    assert not any(kind == "key" for kind, _, _ in by_name.unsure)
+
+
+def test_words_the_model_could_not_place_are_warned(files):
+    """2차 M-1: 모델이 열과 잇지 못한 모르는 말은 소리 없이 버리지 않고 경고로 보인다."""
+    sources, target, out, _ = files
+    prepared = prepare(
+        "이름 기준으로 직책이랑 이수시간 채워 주시면 돼요",
+        sources,
+        target,
+        output_path=out,
+        ask_many=reader({"이수시간": "채움"}),
+    )
+    assert any("‘직책’" in w and "잇지 못했습니다" in w for w in prepared.warnings)
