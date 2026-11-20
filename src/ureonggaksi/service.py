@@ -394,6 +394,10 @@ def prepare(
                 f"요청의 {words}은(는) 어느 열로도 정하지 못했습니다. 빠진 항목이 있으면 '자세히'에서 고르세요."
             )
         warnings += [f"‘{f}’ → {c} 열은 빼서 비워 둡니다." for f, c, _ in removed]
+        warnings += [  # 뺄 짝이 없는 이름: 뺐다고 믿지 않게 알린다(검수 L1)
+            f"‘{name}’은(는) 뺄 짝이 없습니다. 문서 항목 이름으로 빼세요."
+            for name in sorted(dropped - {p[0] for p in removed})
+        ]
         unsure = (
             *answered_key,
             *(("pair", f, c) for f, c, source in result.fields if source != "match"),

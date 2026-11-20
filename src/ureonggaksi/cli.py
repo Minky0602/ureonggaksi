@@ -85,7 +85,7 @@ def _print_preview(prepared: Prepared) -> None:
     for kind, name, column in prepared.unsure:
         if kind == "pair":
             shown = ", ".join(examples(prepared, name)) or "예시 없음"
-            note = f"{column} ← 문서 ‘{name}’  예: {shown}  (빼려면 --answer drop_field={name})"
+            note = f'{column} ← 문서 ‘{name}’  예: {shown}  (빼려면 --answer "drop_field={name}")'
         elif kind == "key":
             note = f"{column} 열의 행을 문서의 ‘{name}’ 값으로 찾음"
         else:
