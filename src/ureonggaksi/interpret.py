@@ -146,7 +146,10 @@ def _synonym(name: str, pool: tuple[str, ...]) -> str | None:
 
 
 # 낱말 뒤 같은 마디 안의 빼기·미루기 표현("생일이랑 이메일은 빼", "생일은 이번엔 놔두고", "다음 주에")
-SKIP_WORDS = re.compile(r"빼|제외|말고|놔두|두고|나중|다음|보류|생략|미루|손대지|건드리지|아직")
+SKIP_WORDS = re.compile(
+    r"빼(?!놓지|먹지)|제외|(?<!먹지 )(?<!먹지)말고|놔두|두고|비워|비우|그대로(?!옮|넣|채|입력|적|기입|반영)|참고|취소|보류|생략|미루"
+    r"|손대지|건드리지|하지\s*마|하지\s*말|나중에?|다음에|다음\s*(주|달|번)에|아직(이|은|\s*안|\s*하지)"
+)  # 이름 경로의 빼기 낱말(NEGATED)과 같은 뜻을 쓴다. '다음 주까지'·'아직 비어 있는'은 미루기가 아니다(검수 L-1)
 CLAUSE_END = re.compile(r"[,.;]|고\s")  # "생일 채우고 이수시간은 빼": '고 '에서 마디가 끝난다
 
 
@@ -154,8 +157,9 @@ def _said_to_skip(request: str, word: str) -> bool:
     """그 낱말이 나온 어느 자리든, 같은 마디 뒤쪽에 빼기·미루기 표현이 있다. 넓게 잡는다(틀리면 덜 채울 뿐)."""
     for found in re.finditer(re.escape(word), request):
         rest = request[found.end() :]
-        end = CLAUSE_END.search(rest)
-        if SKIP_WORDS.search(rest[: end.start()] if end else rest):
+        hit, end = SKIP_WORDS.search(rest), CLAUSE_END.search(rest)
+        # 빼기 낱말이 첫 마디 끝보다 앞에서 시작하면 그 마디의 말이다("비워 두고 " 자체가 '고 '로 끝난다, 검수 M-1)
+        if hit and (end is None or hit.start() < end.start()):
             return True
     return False
 
@@ -794,7 +798,8 @@ def interpret(
         alias_skip = [c for w, c in aliased.items() if _said_to_skip(request, w)]
         words = [w for w in words if w not in aliased]
         overflow = [w for w in overflow if w not in aliased]
-        coded_skip = [*(n for n in skip if n != hint), *alias_skip]
+        coded_skip = [n for n in skip if n != hint]
+        # 동의어로 추정한 열의 빼기는 그 열만 빼고 표시한다. 다른 칸까지 질문으로 돌리지 않는다(검수 L-1)
         asked_names = list(dict.fromkeys([*mentioned, *aliased.values(), *coded_skip]))
         try:
             roles, meant, meant_skip, unread = _read_request(
@@ -820,11 +825,14 @@ def interpret(
                 [
                     *(n for n, r in roles.items() if r == SKIP_ROLE),
                     *coded_skip,
+                    *alias_skip,
                     *meant_skip,
                 ]
             )
         )
-        filled = {n for n, r in roles.items() if r == FILL_ROLE} | set(meant)
+        filled = {n for n, r in roles.items() if r == FILL_ROLE and n not in alias_skip} | set(
+            meant
+        )
         settled = all(roles.get(n) in (SKIP_ROLE, "무관") for n in coded_skip)
         if not settled or set(skipped) & filled:
             drop, skipped, meant, unread = set(mentioned), [], [], []

@@ -1106,15 +1106,18 @@ def test_a_place_word_inside_another_word_is_not_pointing(setup):
 # ---------- 동의어표(DIF-055) ----------
 
 
-def _birth(number, name, birth):
-    rows = [("발급번호", number), ("성명", name), ("생년월일", birth), ("이수시간", "12")]
+def _birth(number, name, birth, hours="12"):
+    rows = [("발급번호", number), ("성명", name), ("생년월일", birth), ("이수시간", hours)]
     body = table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
     return ["<hp:p><hp:run>" + body + "</hp:run></hp:p>"]
 
 
 @pytest.fixture
 def birth_setup(tmp_path):
-    docs = [_birth("A-01", "가나다", "1990-01-02"), _birth("A-02", "라마바", "1985-03-04")]
+    docs = [
+        _birth("A-01", "가나다", "1990-01-02", "12"),
+        _birth("A-02", "라마바", "1985-03-04", "8"),
+    ]
     sheet = [
         ["발급번호", "신청인", "생일", "이수시간"],
         ["A-01", None, None, None],
@@ -1177,14 +1180,34 @@ def test_a_request_word_in_the_synonym_table_is_read_like_a_name(birth_setup):
         "발급번호 기준으로 이수시간 채우고 이름이랑 이메일은 빼 주세요",
         "발급번호 기준으로 이수시간 채우고 이름은 이번엔 놔두고요",
         "발급번호 기준으로 이수시간 채우고 이름 채우는 건 다음 주에요",
+        "발급번호 기준으로 이름은 비워 두고 이수시간 채워 주세요",
+        "발급번호 기준으로 이름은 그대로 두고 이수시간 채워 주세요",
     ],
 )
-def test_a_request_word_followed_by_a_skip_is_not_filled(birth_setup, request_text):
-    """같은 마디에 빼기·미루기 표현이 있는 말은 모델이 채우라고 해도 그 열을 채우지 않는다(검수 M1)."""
+@pytest.mark.parametrize("role", ["채움", "무관"])
+def test_a_request_word_followed_by_a_skip_is_not_filled(birth_setup, request_text, role):
+    """같은 마디에 빼기·미루기 표현이 있는 동의어 열은 모델 답과 무관하게 그 열만 빼고 표시한다.
+    다른 칸(이수시간)은 그대로 채운다(검수 M1·M-1·L-1·L-2)."""
     _, docs, view = birth_setup
-    reader = reads({"이수시간": "채움", "신청인": "채움"})
+    reader = reads({"이수시간": "채움", "신청인": role})
     result = interpret(request_text, docs, view, ask_many=reader)
-    assert all(c != "신청인" for _, c, _ in result.fields)
+    assert [c for _, c, _ in result.fields] == ["이수시간"] and "신청인" in result.skipped
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 이름이랑 이수시간 다음 주까지 채워 주세요",
+        "발급번호 기준으로 이름 빼먹지 말고 이수시간이랑 채워 주세요",
+    ],
+)
+def test_ordinary_words_are_not_read_as_skips(birth_setup, request_text):
+    """'다음 주까지'·'빼먹지 말고'는 미루거나 빼라는 말이 아니다(검수 L-1)."""
+    _, docs, view = birth_setup
+    result = interpret(
+        request_text, docs, view, ask_many=reads({"이수시간": "채움", "신청인": "채움"})
+    )
+    assert {c for _, c, _ in result.fields} == {"이수시간", "신청인"}
 
 
 @pytest.mark.parametrize(
