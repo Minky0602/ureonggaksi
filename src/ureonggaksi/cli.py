@@ -15,7 +15,7 @@ from .ai import LocalModel, ai_status
 from .errors import ServiceError
 from .rules import RuleError, RuleStore, rule_from_dict, rule_to_dict
 from .save import _companions, publish_new
-from .service import Prepared, approval_hash, commit, prepare, replay
+from .service import Prepared, approval_hash, commit, examples, prepare, replay
 from .storage import local_path
 
 PLAN_FORMAT = "ureonggaksi-plan/1"
@@ -82,14 +82,15 @@ def _print_preview(prepared: Prepared) -> None:
         )
     for item in prepared.samples:
         print(f"  예: {item.target_ref} ← {item.proposed.value} ({item.field})")
-    notes = {
-        "key": "{1} 열의 행을 문서의 ‘{0}’ 값으로 찾음",
-        "pair": "‘{}’ → {} 열 (채우라는 뜻을 모델이 읽음)",
-        "blank": "‘{}’은(는) 어느 열인지 확실하지 않아 비워 둠 (추천: {} 열)",
-        "skip": "‘{}’은(는) 빼라는 말로 읽고 비워 둠{}",
-    }
     for kind, name, column in prepared.unsure:
-        print(f"확인 필요: {notes[kind].format(name, column)} — 저장 전에 확인하세요")
+        if kind == "pair":
+            shown = ", ".join(examples(prepared, name)) or "예시 없음"
+            note = f"{column} ← 문서 ‘{name}’  예: {shown}  (빼려면 --answer drop_field={name})"
+        elif kind == "key":
+            note = f"{column} 열의 행을 문서의 ‘{name}’ 값으로 찾음"
+        else:
+            note = f"‘{name}’은(는) 빼라는 말로 읽고 비워 둠"
+        print(f"확인 필요: {note}")
     for warning in prepared.warnings:
         print(f"참고: {warning}")
 

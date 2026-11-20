@@ -71,9 +71,8 @@ class Prepared:
     output_path: Path            # 기본: 대상 폴더/<대상명>_우렁각시_<YYYYMMDD-HHMM>.xlsx
     workflow: WorkflowVersion | None   # '최근 작업'으로 연 규칙
     unsure: tuple[tuple[str, str, str], ...]   # 코드가 확신하지 못한 해석 (종류, 이름, 대상 열). 화면은 '확인 필요'로 보인다
-    #   확실한 칸만 채운다(2026-11-20 사용자 결정).
-    #   pair: 이름은 같고 '채우라는 뜻'만 모델이 읽은 짝(문서 항목, 열). 채운다 /
-    #   blank: 어느 열인지 모델이 고른 짝(문서 항목, 추천 열). 쓰지 않고 비워 두며 warnings에도 추천을 적는다 /
+    #   pair: 모델이 읽은 짝(문서 항목, 열). 같은 이름이지만 채우라는 뜻을 모델이 읽은 짝과, 이름이 다른 짝(성명→신청인)을
+    #   모두 채운다(2026-11-20 사용자 결정). 화면은 열마다 값 예시 2개(service.examples)와 [빼기](답 drop_field)를 보인다 /
     #   skip: 빼라는 말로 읽고 비워 둔 이름(이름, "") /
     #   key: 키 질문에 열만 답했는데 값이 맞는 문서 항목의 이름이 그 열과 다름(문서 항목, 열). 해석 줄에도 적는다.
     #   키로 쓴 항목·열의 짝은 채우지 않고 warnings로 알린다. '최근 작업'은 저장 때 사용자가 본 규칙이라 비어 있다
@@ -81,12 +80,14 @@ class Prepared:
 
 def prepare(request: str, sources: list[Path], target: Path, *,
             workflow: WorkflowVersion | None = None,     # '최근 작업'을 눌렀으면 AI를 부르지 않는다
-            answers: Pairs = (),                         # (slot, 답). SKIP이면 그 문제의 칸은 비워 둔다
+            answers: Pairs = (),                         # (slot, 답). SKIP이면 그 문제의 칸은 비워 둔다.
+                                                         # drop_field=문서 항목: 미리보기에서 뺀 짝(여러 번 가능)
             output_path: Path | None = None,
             choose: Chooser | None = None,               # 로컬 모델(ai.LocalModel.choose). 없으면 모델 없이 해석
             ask_many: AskMany | None = None,             # 로컬 모델(ai.LocalModel.ask_fields). 모르는 말이 섞인 요청을 읽는다
             progress: Progress, cancel: Cancel) -> Prepared
     # 쓰기 없음. 질문에 답하면 UI가 answers를 늘려 다시 부른다(서비스는 대화 상태를 갖지 않는다).
+    # 작업 종류·키 질문이 남으면 모델을 부르지 않고 바로 묻는다(둘은 코드만으로 정해진다, DIF-054).
     # question이 생기는 경우(PRD 6.2)만 묻는다:
     #   ① 규칙이 서지 않음: key_column·target_column·work_type 미정 또는 validate_rule 이슈.
     #   ② 공통 문제: 답 하나로 정해지는 원인(default_unit·rounding·date_order)의 칸이
@@ -282,7 +283,7 @@ class Interpretation:            # 요청 해석 결과. 규칙 초안의 재료
     record: RecordRule
     key: tuple[str, str] | None                  # (문서 항목, 대상 열)
     fields: tuple[tuple[str, str, str], ...]     # (문서 항목, 대상 열, 출처 "match"|"assumed"|"model")
-    #   match: 코드가 확정 / assumed: 같은 이름, 채우라는 뜻을 모델이 읽음 / model: 열을 모델이 고름(prepare는 쓰지 않음)
+    #   match: 코드가 확정 / assumed: 같은 이름, 채우라는 뜻을 모델이 읽음 / model: 열을 모델이 고름(채우고 '확인 필요')
     questions: tuple[tuple[str, tuple[str, ...]], ...]   # (슬롯 work_type|key_column|target_column, 후보)
     excluded: tuple[str, ...]                    # 요청했지만 짝을 못 찾은 이름(질문 없이 빼고 소명)
     candidates: tuple[FieldCandidate, ...]
@@ -320,11 +321,11 @@ def interpret(request: str, documents: tuple[Document, ...], view: TargetView,
     #      이름이 다른 열은 숫자로만 된 값(날짜·금액)으로 잇지 않는다.
     #   한 문서에 같은 라벨이 둘 이상이면 그 항목은 후보가 아니다.
     # 항목 짝은 요청의 모든 낱말이 '이름+조사' 또는 허용 낱말(채우기·검토 동사, 키 표현, '칸에', 표·문서 이름,
-    #   부탁 표현, 다·모두)일 때만 확정한다(출처 match). 이름이 다른 짝은 모델이 고른 추천일 뿐이다(출처 model).
+    #   부탁 표현, 다·모두)일 때만 확정한다(출처 match). 이름이 다른 짝은 모델이 고른다(출처 model).
     # 모르는 말이 섞인 요청(2026-11-18 사용자 결정, DIF-048·050): ask_many가 없으면 모두 소명한다. 있으면
     #   요청의 이름마다 역할(채움·키·제외·무관)과, 모르는 말(코드가 아는 동사·빼기 표현은 빼고 최대 8개)마다
     #   '열/채움'·'열/제외'·없음을 한 번에 묻는다. 칸 순서와 선택지 순서를 뒤집어 두 번 묻고 같은 답만 받는다.
-    #   '채움'인 이름만 남긴다. 같은 이름 짝은 출처 assumed(채움), 채우라는 말이 가리킨 열의 짝은 model(추천).
+    #   '채움'인 이름만 남긴다. 같은 이름 짝은 출처 assumed(채움), 채우라는 말이 가리킨 열의 짝은 model.
     #   빼기: 모델 '제외'면 빼고 skipped에 남긴다. 코드 빼기 표지가 붙은 이름은 모델이 두 번 모두 같은
     #   '제외'·'무관'이면 빼고 skipped에 남긴다. '채움'·'키'이거나 답이 어긋나면(또는 같은 열을 채우라고도
     #   빼라고도 읽으면) 짝을 정하지 않고 묻는다. 열과 잇지 못한 모르는 말은 unread로 남긴다.
@@ -334,12 +335,12 @@ def interpret(request: str, documents: tuple[Document, ...], view: TargetView,
     #   앞뒤에 다른 항목이 있으면("직급 비고 칸에") 묻는다. 그 밖의 꼴·나열 뒤 지목·방향 조사도 묻는다.
     #   열 이름이 빼기 낱말과 같으면 묻는다.
     # 모델 짝 선택은 선택지를 '없음'까지 한 칸 돌려 두 번 묻는다. 같은 답이거나, 선택지가 둘 이상인데 두 번째가
-    #   '없음'으로 물러서면 추천으로 받는다(출처 model, 쓰지 않음). 다른 열로 바뀌면 버린다(첫 답이 '없음'이면 한 번).
+    #   '없음'으로 물러서면 받는다(출처 model). 다른 열로 바뀌면 버린다(첫 답이 '없음'이면 한 번).
     #   키는 이름이 같아도 그 열과 값이 맞는 다른 문서 항목이 있거나 view가 행 전체를 담지 못하면 묻는다.
     # 작업 종류: 채우기·검토 표현 중 하나만 있을 때. 둘 다·없음·"채우지 마"·'?'로 묻는 말("입력했어?") → 질문.
     # 요청의 이름은 단어로 나온 것만 읽는다('전화번호'의 '번호'는 아님). 작업 동사 자리는 열 이름이 아니다.
     # 이름이 다른 짝은 choose로 하나씩 묻는다(선택지 = 열 또는 항목 + "없음", 이름이 비슷한 것을 앞에 두고
-    #   단서로 표시, 단위만 다른 같은 이름은 제외). 받은 답은 추천(model)이라 그 칸은 비워 둔다. 모델이 없거나
+    #   단서로 표시, 단위만 다른 같은 이름은 제외). 받은 답(model)은 채우고 '확인 필요'로 보인다. 모델이 없거나
     #   '없음'·목록 밖 답이면 excluded로 소명한다. 한 열에 둘이 몰리면 둘 다 뺀다.
     # 값 형태 검증: 문서 값과 취합표 열 기존 값의 주된 형태(날짜·연락처·숫자·코드형·글자)가 둘 다 뚜렷한데
     #   다르면 그 짝은 확정하지 않고 소명한다. 열이 비었거나 한쪽이 글자면 판단하지 않는다.

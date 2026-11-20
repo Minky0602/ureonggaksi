@@ -61,9 +61,9 @@ class Prepared:
         None  # '최근 작업'으로 연 규칙. commit이 같은 작업에 이어 저장한다
     )
     # 코드가 확신하지 못한 해석: (종류, 이름, 대상 열). 미리보기에 '확인 필요'로 보인다(DIF-050).
-    # pair: 이름은 같고 '채우라는 뜻'을 모델이 읽은 짝(채움) / blank: 어느 열인지 모델이 고른 짝(비워 둠,
-    # 열은 추천) / skip: 빼라는 말로 읽고 비워 둔 이름(이름, "") / key: 키 질문에 열만 답했는데 값이 맞는
-    # 문서 항목의 이름이 그 열과 다름(문서 항목, 열). 확실한 칸만 채운다(2026-11-20 사용자 결정)
+    # pair: 모델이 읽은 짝(문서 항목, 열). 이름이 다른 짝(성명→신청인)도 같은 이름 짝처럼 채운다(2026-11-20
+    # 사용자 결정). 미리보기는 값 예시와 [빼기](답 drop_field)를 보인다 / skip: 빼라는 말로 읽고 비워 둔 이름
+    # (이름, "") / key: 키 질문에 열만 답했는데 값이 맞는 문서 항목의 이름이 그 열과 다름(문서 항목, 열)
     unsure: tuple[tuple[str, str, str], ...] = ()
 
 
@@ -76,6 +76,18 @@ def _letter(view: TargetView, column: str) -> str:
     )
     index = view.columns.index(column) if column in view.columns else -1
     return letters[index] if 0 <= index < len(letters) else ""
+
+
+def examples(prepared: "Prepared", field: str, limit: int = 2) -> tuple[str, ...]:
+    """그 문서 항목이 실제로 들어갈 값 예시. 이름 짝보다 값을 보면 틀린 짝을 바로 알 수 있다."""
+    if prepared.plan is None:
+        return ()
+    values = (
+        str(i.proposed.value)
+        for i in prepared.plan.items
+        if i.field == field and i.area == "done" and i.proposed
+    )
+    return tuple(dict.fromkeys(values))[:limit]
 
 
 def describe_rule(rule: RuleSet, view: TargetView, unsure=()) -> str:
@@ -95,9 +107,7 @@ def describe_rule(rule: RuleSet, view: TargetView, unsure=()) -> str:
         parts.append(f"‘{field.name}’을 {place}{mark}")
     joined = ", ".join(parts)
     skipped = ", ".join(f"‘{name}’" for kind, name, _ in sorted(unsure) if kind == "skip")
-    blank = ", ".join(f"‘{name}’" for kind, name, _ in sorted(unsure) if kind == "blank")
     tail = f"; {skipped}은(는) 빼라는 말로 읽고 비워 둠 (확인 필요)" if skipped else ""
-    tail += f"; {blank}은(는) 어느 열인지 확실하지 않아 비워 둠" if blank else ""
     if rule.work_type == "check":
         return f"검토: 표를 바꾸지 않고 {key} {joined}과 대조함{tail}"
     return f"채우기: {key} {joined}에 넣음{tail}"
@@ -141,7 +151,11 @@ def _check_answers(answers: Pairs) -> None:
     for slot, value in answers:
         ok = (
             (slot == "work_type" and value in ("fill", "check", SKIP))
-            or (slot in ("key_column", "target_column") and isinstance(value, str) and value)
+            or (
+                slot in ("key_column", "target_column", "drop_field")
+                and isinstance(value, str)
+                and value
+            )
             or (slot in POLICY_CHOICES and (value == SKIP or value in POLICY_VALUES.get(slot, ())))
         )
         if not ok:
@@ -301,17 +315,26 @@ def prepare(
         )
         if not documents:
             raise ServiceError("INPUT_UNSUPPORTED", "읽을 수 있는 원본 문서가 없습니다.")
-        result = interpret(request, documents, view, choose=_safe(choose), ask_many=ask_many)
-        unnamed_key = result.key is None
-        result, used_for_key = _apply_answers(result, answers, view)
+
+        def read(chooser, reader):
+            found = interpret(request, documents, view, choose=chooser, ask_many=reader)
+            unnamed = found.key is None
+            return (*_apply_answers(found, answers, view), unnamed)
+
+        # 작업 종류·키를 물어야 하면 모델을 부르지 않고 바로 묻는다. 둘은 코드만으로 정해진다(DIF-054)
+        result, used_for_key, unnamed_key = read(None, None)
+        pending = any(q[0] in ("work_type", "key_column") for q in result.questions)
+        if not pending and (choose is not None or ask_many is not None):
+            result, used_for_key, unnamed_key = read(_safe(choose), ask_many)
         # 열만 답한 키의 문서 항목 이름이 열과 다르면(추천인사번 → 사번) 미리보기에도 보인다(3차 M1)
         answered_key = (
             [("key", *result.key)] if unnamed_key and result.key and not _same(*result.key) else []
         )
-        # 어느 열인지를 모델이 고른 짝은 쓰지 않고 비워 둔다. 추천으로만 보인다(2026-11-20 사용자 결정)
-        guessed = tuple((f, c) for f, c, source in result.fields if source == "model")
-        if guessed:
-            kept = tuple(p for p in result.fields if p[2] != "model")
+        # 사용자가 미리보기에서 [빼기]한 짝은 쓰지 않는다(답 drop_field = 문서 항목)
+        dropped = {value for slot, value in answers if slot == "drop_field"}
+        removed = tuple(p for p in result.fields if p[0] in dropped)
+        if removed:
+            kept = tuple(p for p in result.fields if p[0] not in dropped)
             asks = result.questions if kept else (*result.questions, ("target_column", ()))
             result = replace(result, fields=kept, questions=asks)
         rule = build_rule(result, view)
@@ -330,14 +353,6 @@ def prepare(
                 options = tuple(c for c in options if _key_field_for(result, view, c))
                 return _asking(request, answers, inputs, _key_question(result, view, options))
             question = _rule_question(slot, options)
-            if (
-                slot == "target_column" and guessed
-            ):  # 남은 짝이 모두 추천이면 그 이름과 추천 열을 보인다(3차 M4)
-                hints = ", ".join(f"‘{f}’(추천: {c} 열)" for f, c in guessed)
-                question = replace(
-                    question,
-                    text=f"어느 열인지 확실한 항목이 없습니다. {hints}. '자세히'에서 직접 지정해 주세요.",
-                )
             return _asking(request, answers, inputs, question)
         warnings += [f"‘{name}’은(는) 정하지 못해 비워 둡니다." for name in result.excluded]
         warnings += [  # 키로 쓴 항목·열의 짝은 채우지 않는다(4차 M1)
@@ -349,14 +364,10 @@ def prepare(
             warnings.append(
                 f"요청의 {words}은(는) 어느 열로도 정하지 못했습니다. 빠진 항목이 있으면 '자세히'에서 고르세요."
             )
-        warnings += [
-            f"‘{f}’은(는) 어느 열인지 확실하지 않아 비워 둡니다(추천: {c} 열). '자세히'에서 지정하면 채웁니다."
-            for f, c in guessed
-        ]
+        warnings += [f"‘{f}’ → {c} 열은 빼서 비워 둡니다." for f, c, _ in removed]
         unsure = (
             *answered_key,
             *(("pair", f, c) for f, c, source in result.fields if source != "match"),
-            *(("blank", f, c) for f, c in guessed),
             *(("skip", name, "") for name in result.skipped),
         )
     rule = _with_policy(rule, answers)
