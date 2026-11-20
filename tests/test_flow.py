@@ -195,3 +195,12 @@ def test_closing_stops_further_model_calls(window, app):
     window.cancel()
     idle(window, app)
     assert len(calls) == 1
+
+
+def test_a_check_run_reports_a_review_not_a_fill(window, app):
+    """R01 검수 M3: 값 검토는 XLSX를 쓰지 않으므로 '채웠다'고 말하지 않는다."""
+    ask(window, app, "이름 기준으로 이수시간 맞는지 확인해줘")
+    assert window.prepared.plan.rule.work_type == "check"
+    window.save_button.click()
+    idle(window, app)
+    assert window.result.text().startswith("값 검토를 마쳤습니다")

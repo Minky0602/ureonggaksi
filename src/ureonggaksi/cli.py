@@ -194,6 +194,13 @@ def run_commit(args) -> int:
             if path:
                 print(f"저장: {path}")
         print(f"상태: {package.status}")
+        if package.status in (
+            "failed",
+            "cancelled",
+        ):  # 결과 파일이 없다: '일부 저장'과 구분한다(R01 검수 M2)
+            if package.error:
+                print(package.error, file=sys.stderr)
+            return EXIT_ERROR
         return EXIT_OK if package.status == "completed" else EXIT_PARTIAL
     except (
         ServiceError,

@@ -460,7 +460,18 @@ class FlowWindow(QMainWindow):
         self.package = package
         self.message.setText("")
         self.save_button.setEnabled(False)  # 같은 미리보기로 두 번 저장하지 않는다
-        lines = [f"저장했습니다 ({package.status})."]
+        check = self.prepared is not None and self.prepared.plan.rule.work_type == "check"
+        if package.status in ("failed", "cancelled"):
+            head = "저장하지 못했습니다. 만든 파일은 지웠습니다."
+        elif check:
+            head = "값 검토를 마쳤습니다. 다른 값과 빈칸은 확인필요 파일에 있습니다."
+        elif package.status == "completed":
+            head = "저장했습니다. 모두 채웠습니다."
+        elif package.manual_path:
+            head = "저장했습니다. 직접 처리할 칸은 확인필요 파일에 있습니다."
+        else:
+            head = "저장했습니다. 읽지 못한 원본이 있습니다."
+        lines = [head]
         for title, path in (
             ("결과", package.output_path),
             ("확인필요", package.manual_path),

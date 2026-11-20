@@ -531,6 +531,7 @@ ureonggaksi prepare --request "…" --target 표.xlsx --out 계획.plan.json [--
                     [--answer slot=값]… [--workflow ID[:rev]] [--rules-dir 폴더]
                     [--runtime llama-completion.exe --model 모델.gguf] 문서/*.hwpx
     # 미리보기 요약을 출력하고 plan_hash를 표시한다(종료 코드 0). 질문이 있으면 종료 코드 3과 답하는 법을 출력한다.
+    # 종료 코드: prepare 0 미리보기·3 질문·2 오류. commit 0 모두 채움·1 일부(직접 처리 남음)·2 오류·지문 불일치·저장 실패(결과 파일 없음).
     # 계획 파일에는 원문 값을 넣지 않는다: 형식, 요청, 경로, 입력 지문, RuleSet, 출력 경로, plan_hash.
 ureonggaksi commit --plan 계획.plan.json --plan-hash <값>
     # plan.json의 규칙으로 AI 없이 다시 분석해 계산한 해시가 --plan-hash와 같을 때만 commit한다.
