@@ -365,7 +365,7 @@ def test_words_the_model_could_not_place_are_warned(files):
         output_path=out,
         ask_many=reader({"이수시간": "채움"}),
     )
-    assert any("‘직책’" in w and "잇지 못했습니다" in w for w in prepared.warnings)
+    assert any("‘직책’" in w and "정하지 못했습니다" in w for w in prepared.warnings)
 
 
 def test_answering_the_key_drops_the_key_column_from_the_pairs(tmp_path):
@@ -399,6 +399,7 @@ def test_answering_the_key_drops_the_key_column_from_the_pairs(tmp_path):
         )
         fields = [f.target_column for f in answered.plan.rule.fields if f.target_column]
         assert fields == ["이수시간"]
+        assert any("‘성명’ 열은 행을 찾는 데" in w for w in answered.warnings)
 
 
 def test_a_key_answered_ahead_still_shows_its_document_field(tmp_path):

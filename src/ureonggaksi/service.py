@@ -193,7 +193,8 @@ def _key_field_for(result, view: TargetView, column: str) -> str | None:
 
 
 def _apply_answers(result, answers: Pairs, view: TargetView):
-    """규칙이 서지 않을 때의 답(work_type·key_column)을 해석 결과에 반영한다."""
+    """규칙이 서지 않을 때의 답(work_type·key_column)을 해석 결과에 반영한다. (결과, 키 때문에 뺀 짝)."""
+    dropped: tuple[tuple[str, str, str], ...] = ()
     work_type = _answer(answers, "work_type")
     if work_type in ("fill", "check") and result.work_type is None:
         result = replace(
@@ -207,6 +208,7 @@ def _apply_answers(result, answers: Pairs, view: TargetView):
         if field is not None:
             # 키를 모를 때 만든 짝 가운데 키 항목·키 열의 짝은 뺀다. 키 열은 이미 값이 있는 열이다(3차 H1)
             kept = tuple(p for p in result.fields if p[0] != field and p[1] != column)
+            dropped = tuple(p for p in result.fields if p not in kept)
             result = replace(
                 result,
                 fields=kept,
@@ -214,7 +216,7 @@ def _apply_answers(result, answers: Pairs, view: TargetView):
                 record=replace(result.record, key_field=field),
                 questions=tuple(q for q in result.questions if q[0] != "key_column"),
             )
-    return result
+    return result, dropped
 
 
 def _with_policy(rule: RuleSet, answers: Pairs) -> RuleSet:
@@ -301,7 +303,7 @@ def prepare(
             raise ServiceError("INPUT_UNSUPPORTED", "읽을 수 있는 원본 문서가 없습니다.")
         result = interpret(request, documents, view, choose=_safe(choose), ask_many=ask_many)
         unnamed_key = result.key is None
-        result = _apply_answers(result, answers, view)
+        result, used_for_key = _apply_answers(result, answers, view)
         # 열만 답한 키의 문서 항목 이름이 열과 다르면(추천인사번 → 사번) 미리보기에도 보인다(3차 M1)
         answered_key = (
             [("key", *result.key)] if unnamed_key and result.key and not _same(*result.key) else []
@@ -338,10 +340,14 @@ def prepare(
                 )
             return _asking(request, answers, inputs, question)
         warnings += [f"‘{name}’은(는) 정하지 못해 비워 둡니다." for name in result.excluded]
+        warnings += [  # 키로 쓴 항목·열의 짝은 채우지 않는다(4차 M1)
+            f"‘{c}’ 열은 행을 찾는 데 쓴 ‘{f}’과(와) 겹쳐 채우지 않고 비워 둡니다."
+            for f, c, _ in used_for_key
+        ]
         if result.unread:  # 모델이 열과 잇지 못한 말. 빠진 항목일 수 있다(2차 M-1)
             words = "·".join(f"‘{w}’" for w in result.unread)
             warnings.append(
-                f"요청의 {words}은(는) 어느 열과도 잇지 못했습니다. 빠진 항목이 있으면 '자세히'에서 고르세요."
+                f"요청의 {words}은(는) 어느 열로도 정하지 못했습니다. 빠진 항목이 있으면 '자세히'에서 고르세요."
             )
         warnings += [
             f"‘{f}’은(는) 어느 열인지 확실하지 않아 비워 둡니다(추천: {c} 열). '자세히'에서 지정하면 채웁니다."

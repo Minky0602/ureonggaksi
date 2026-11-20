@@ -1084,3 +1084,13 @@ def test_other_place_words_are_pointing_too(setup, request_text):
     """3차 M2: '부분·자리'도 '칸'처럼 지목이다. 직급을 직급 열에 넣지 않고 묻는다."""
     result = interpret_with(setup, request_text, {"직급": "채움", "비고": "채움"})
     assert result.fields == ()
+
+
+def test_a_place_word_inside_another_word_is_not_pointing(setup):
+    """4차 L1: '부분적으로'는 지목이 아니다."""
+    result = interpret_with(
+        setup,
+        "이름 기준으로 직급 이수시간 부분적으로 채워 주세요",
+        {"직급": "채움", "이수시간": "채움"},
+    )
+    assert result.fields == (("이수시간", "이수시간", "assumed"),)
