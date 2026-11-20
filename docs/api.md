@@ -81,7 +81,8 @@ class Prepared:
 def prepare(request: str, sources: list[Path], target: Path, *,
             workflow: WorkflowVersion | None = None,     # '최근 작업'을 눌렀으면 AI를 부르지 않는다
             answers: Pairs = (),                         # (slot, 답). SKIP이면 그 문제의 칸은 비워 둔다.
-                                                         # drop_field=문서 항목: 미리보기에서 뺀 짝(여러 번 가능)
+                                                         # drop_field=문서 항목: 미리보기에서 뺀 짝(여러 번 가능). 뺄 짝이 없는
+                                                         # 이름은 경고만 남긴다. 모두 빼면 target_column 질문
             output_path: Path | None = None,
             choose: Chooser | None = None,               # 로컬 모델(ai.LocalModel.choose). 없으면 모델 없이 해석
             ask_many: AskMany | None = None,             # 로컬 모델(ai.LocalModel.ask_fields). 모르는 말이 섞인 요청을 읽는다
@@ -344,6 +345,8 @@ def interpret(request: str, documents: tuple[Document, ...], view: TargetView,
     #   '없음'·목록 밖 답이면 excluded로 소명한다. 한 열에 둘이 몰리면 둘 다 뺀다.
     # 값 형태 검증: 문서 값과 취합표 열 기존 값의 주된 형태(날짜·연락처·숫자·코드형·글자)가 둘 다 뚜렷한데
     #   다르면 그 짝은 확정하지 않고 소명한다. 열이 비었거나 한쪽이 글자면 판단하지 않는다.
+def examples(prepared: Prepared, field: str, limit: int = 2) -> tuple[str, ...]   # service
+    # 그 문서 항목이 들어갈 값 예시(완료 영역: 쓸 칸과 이미 같은 값, 중복 없이 계획 순서). 화면 '확인 필요' 줄용
 def build_rule(result: Interpretation, view: TargetView) -> RuleSet | None
     # 질문이 남았으면 None. RuleSet은 validate_rule과 analyze(자기 대조)를 거친다.
     # 기존 AiSelection(블록 번호 전체 선택)·suggest_rule은 폐기했다(2026-11-13 사용자 승인, P04).

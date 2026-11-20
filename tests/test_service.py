@@ -462,3 +462,22 @@ def test_a_pending_key_question_is_asked_without_running_the_model(tmp_path):
         ask_many=reading,
     )
     assert calls  # 키가 정해진 뒤에야 모델이 읽는다
+
+
+def test_dropping_a_name_with_no_pair_is_warned(files):
+    """검수 L1: 열 이름이나 없는 이름으로 빼면 아무것도 빠지지 않으므로 그렇다고 알린다."""
+    sources, target, out, _ = files
+
+    def knows(prompt, options):
+        return "직위" if "직위" in options else "없음"
+
+    prepared = prepare(
+        "이름 기준으로 직급이랑 이수시간 채워줘",
+        sources,
+        target,
+        answers=(("drop_field", "직급"),),
+        output_path=out,
+        choose=knows,
+    )
+    assert ("pair", "직위", "직급") in prepared.unsure
+    assert any("‘직급’은(는) 뺄 짝이 없습니다" in w for w in prepared.warnings)

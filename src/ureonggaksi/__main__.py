@@ -50,12 +50,12 @@ def main(argv=None):
     from PySide6.QtCore import QCoreApplication, QEvent, QTimer
     from PySide6.QtWidgets import QApplication
 
-    from .ui.window import MainWindow
+    from .ui.flow import FlowWindow
 
     app = QApplication(sys.argv[:1])
     app.setApplicationName("우렁각시")
     app.setOrganizationName("ureonggaksi")
-    window = MainWindow()
+    window = FlowWindow()
     window.show()
     if args.smoke_test:
 
@@ -69,7 +69,8 @@ def main(argv=None):
     # Destroy native widgets before QApplication/Python finalization. Signal
     # closures can otherwise retain windows until after the Qt runtime is gone.
     window.cancel()
-    window.pool.waitForDone()
+    # 로컬 AI 호출은 끊을 수 없다(질문마다 최대 60초). 창을 닫은 뒤 오래 붙잡지 않는다(검수 M2)
+    window.pool.waitForDone(5000)
     app.processEvents()
     window.close()
     window.deleteLater()

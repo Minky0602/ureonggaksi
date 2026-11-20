@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,21 @@ ARGS = (
     "-c",
     "4096",
 )
+_RUNNING: set[subprocess.Popen] = set()  # 지금 도는 모델 프로세스. 창을 닫으면 stop_all이 끝낸다
+_RUNNING_LOCK = threading.Lock()
+
+
+def stop_all() -> None:
+    """도는 모델 프로세스를 모두 끝낸다(창 닫기·취소). 그 호출은 AI_UNAVAILABLE로 끝난다."""
+    with _RUNNING_LOCK:
+        running = list(_RUNNING)
+    for process in running:
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
 CHOICE_TOKENS = 64  # 답이 선택지 하나
 END_MARK = "[end of text]"  # llama-completion이 생성 뒤 stdout에 붙인다
 TIMEOUT_SECONDS = 60
@@ -122,11 +138,11 @@ class LocalModel:
                 str(tokens),
             ]
             try:
-                done = subprocess.run(
+                process = subprocess.Popen(
                     cmd,
                     stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    timeout=self.timeout_s,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
                     if os.name == "nt"
                     else 0,
@@ -137,15 +153,24 @@ class LocalModel:
                 ) from exc
             except OSError as exc:  # 권한·잠금 등 실행 파일을 띄울 수 없는 경우
                 raise ServiceError("AI_UNAVAILABLE", "로컬 AI를 실행하지 못했습니다.") from exc
+            with _RUNNING_LOCK:
+                _RUNNING.add(process)
+            try:
+                stdout, _ = process.communicate(timeout=self.timeout_s)
             except subprocess.TimeoutExpired as exc:
+                process.kill()
+                process.communicate()
                 raise ServiceError(
                     "AI_TIMEOUT", f"로컬 AI가 {self.timeout_s}초 안에 답하지 않았습니다."
                 ) from exc
-        if done.returncode != 0:
+            finally:
+                with _RUNNING_LOCK:
+                    _RUNNING.discard(process)
+        if process.returncode != 0:
             raise ServiceError(
-                "AI_UNAVAILABLE", f"로컬 AI 실행이 실패했습니다(종료 코드 {done.returncode})."
+                "AI_UNAVAILABLE", f"로컬 AI 실행이 실패했습니다(종료 코드 {process.returncode})."
             )
-        return done.stdout.decode("utf-8", "replace")
+        return stdout.decode("utf-8", "replace")
 
 
 def parse_fields(stdout: str, fields: dict[str, tuple[str, ...]]) -> dict[str, str]:

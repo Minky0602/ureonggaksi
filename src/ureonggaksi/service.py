@@ -41,7 +41,7 @@ class Question:
     slot: str
     text: str
     examples: tuple[str, ...]
-    choices: tuple[str, ...]  # 비면 버튼 없이 '자세히'의 직접 선택으로 안내한다
+    choices: tuple[str, ...]  # 비면 버튼 없이 요청을 고쳐 다시 하라고 안내한다
     affects: int  # 이 답으로 정해지는 칸 수. 규칙이 서지 않는 질문은 0
 
 
@@ -116,8 +116,8 @@ def describe_rule(rule: RuleSet, view: TargetView, unsure=()) -> str:
 # ---------- prepare ----------
 
 
-def _safe(choose: Chooser | None) -> Chooser | None:
-    """모델 오류는 그 짝만 질문으로 남기고 계속한다(P04 ③ 사용자 결정 2026-11-17)."""
+def _safe(choose: Chooser | None, failures: list[str] | None = None) -> Chooser | None:
+    """모델 오류는 그 짝만 질문으로 남기고 계속한다(P04 ③ 사용자 결정 2026-11-17). 오류는 failures에 모은다."""
     if choose is None:
         return None
 
@@ -126,7 +126,25 @@ def _safe(choose: Chooser | None) -> Chooser | None:
             return choose(prompt, options)
         except ServiceError as error:
             if error.code in AI_ERRORS:
+                if failures is not None:
+                    failures.append(error.message)
                 return None
+            raise
+
+    return ask
+
+
+def _noted(ask_many: AskMany | None, failures: list[str]) -> AskMany | None:
+    """interpret가 AI 오류를 받아 모델 없이 계속하므로, 오류를 failures에 남기고 그대로 넘긴다."""
+    if ask_many is None:
+        return None
+
+    def ask(prompt: str, fields: dict[str, tuple[str, ...]]) -> dict[str, str]:
+        try:
+            return ask_many(prompt, fields)
+        except ServiceError as error:
+            if error.code in AI_ERRORS:
+                failures.append(error.message)
             raise
 
     return ask
@@ -175,7 +193,7 @@ def _rule_question(slot: str, options: tuple[str, ...]) -> Question:
         )
     return Question(
         slot,
-        "어느 항목을 어느 열에 넣을지 정하지 못했습니다. '자세히'에서 직접 골라 주세요.",
+        "어느 항목을 어느 열에 넣을지 정하지 못했습니다. 요청에 취합표의 열 이름을 그대로 넣어 다시 해 주세요.",
         (),
         (),
         0,
@@ -321,11 +339,16 @@ def prepare(
             unnamed = found.key is None
             return (*_apply_answers(found, answers, view), unnamed)
 
+        failures: list[
+            str
+        ] = []  # 모델 오류(모델 없이 해석한 부분이 있음). 사용자에게 알린다(DIF-053)
         # 작업 종류·키를 물어야 하면 모델을 부르지 않고 바로 묻는다. 둘은 코드만으로 정해진다(DIF-054)
         result, used_for_key, unnamed_key = read(None, None)
         pending = any(q[0] in ("work_type", "key_column") for q in result.questions)
         if not pending and (choose is not None or ask_many is not None):
-            result, used_for_key, unnamed_key = read(_safe(choose), ask_many)
+            result, used_for_key, unnamed_key = read(
+                _safe(choose, failures), _noted(ask_many, failures)
+            )
         # 열만 답한 키의 문서 항목 이름이 열과 다르면(추천인사번 → 사번) 미리보기에도 보인다(3차 M1)
         answered_key = (
             [("key", *result.key)] if unnamed_key and result.key and not _same(*result.key) else []
@@ -345,15 +368,21 @@ def prepare(
             ):  # 건너뛰었거나 답으로 정해지지 않았다: 같은 질문을 되풀이하지 않는다
                 raise ServiceError(
                     "RULE_INVALID",
-                    "이 질문은 답으로 정할 수 없습니다. '자세히'에서 직접 지정하세요.",
+                    "이 질문은 답으로 정할 수 없습니다. 요청을 고쳐 다시 해 주세요.",
                 )
             if (
                 slot == "key_column"
-            ):  # 답으로 정해지는 열만 선택지로 준다(검수 M-a). 없으면 '자세히'로 안내
+            ):  # 답으로 정해지는 열만 선택지로 준다(검수 M-a). 없으면 요청을 고치라고 안내
                 options = tuple(c for c in options if _key_field_for(result, view, c))
                 return _asking(request, answers, inputs, _key_question(result, view, options))
             question = _rule_question(slot, options)
+            if failures:  # 모델이 돌지 않아 질문이 생겼을 수 있다(DIF-053)
+                question = replace(
+                    question, text=f"{question.text} (로컬 AI를 쓰지 못했습니다: {failures[0]})"
+                )
             return _asking(request, answers, inputs, question)
+        if failures:
+            warnings.append(f"로컬 AI를 쓰지 못해 일부를 AI 없이 해석했습니다({failures[0]}).")
         warnings += [f"‘{name}’은(는) 정하지 못해 비워 둡니다." for name in result.excluded]
         warnings += [  # 키로 쓴 항목·열의 짝은 채우지 않는다(4차 M1)
             f"‘{c}’ 열은 행을 찾는 데 쓴 ‘{f}’과(와) 겹쳐 채우지 않고 비워 둡니다."
@@ -362,9 +391,13 @@ def prepare(
         if result.unread:  # 모델이 열과 잇지 못한 말. 빠진 항목일 수 있다(2차 M-1)
             words = "·".join(f"‘{w}’" for w in result.unread)
             warnings.append(
-                f"요청의 {words}은(는) 어느 열로도 정하지 못했습니다. 빠진 항목이 있으면 '자세히'에서 고르세요."
+                f"요청의 {words}은(는) 어느 열로도 정하지 못했습니다. 빠진 항목이 있으면 요청에 열 이름으로 적어 주세요."
             )
         warnings += [f"‘{f}’ → {c} 열은 빼서 비워 둡니다." for f, c, _ in removed]
+        warnings += [  # 뺄 짝이 없는 이름: 뺐다고 믿지 않게 알린다(검수 L1)
+            f"‘{name}’은(는) 뺄 짝이 없습니다. 문서 항목 이름으로 빼세요."
+            for name in sorted(dropped - {p[0] for p in removed})
+        ]
         unsure = (
             *answered_key,
             *(("pair", f, c) for f, c, source in result.fields if source != "match"),
