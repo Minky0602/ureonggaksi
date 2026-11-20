@@ -15,6 +15,6 @@ The build (`scripts/collect_licenses.py`) copies the license files that each ins
 Optional local AI (not bundled; the user downloads and selects these files):
 
 - llama.cpp `llama-completion` (tested release b12125): MIT; https://github.com/ggml-org/llama.cpp
-- Qwen3.5-4B GGUF Q4_K_M (tested: unsloth/Qwen3.5-4B-GGUF, original Qwen/Qwen3.5-4B): Apache-2.0; https://huggingface.co/Qwen
+- Qwen3.5-4B GGUF Q4_K_M (tested: unsloth/Qwen3.5-4B-GGUF, original Qwen/Qwen3.5-4B): Apache-2.0; https://huggingface.co/unsloth/Qwen3.5-4B-GGUF and https://huggingface.co/Qwen/Qwen3.5-4B
 
 No third-party sample documents are stored in this repository or bundled with the application. Synthetic examples in this repository are authored for parser tests and contain no real personal information.

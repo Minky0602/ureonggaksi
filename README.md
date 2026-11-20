@@ -91,7 +91,20 @@ uv run ureonggaksi commit --plan 작업.plan.json --plan-hash <출력된 지문>
 # 파일이나 계획이 prepare 때와 달라졌으면 저장하지 않는다.
 ```
 
-commit의 종료 코드는 모두 채웠으면 `0`, 직접 처리할 칸이 남았으면(`partial`) `1`이다.
+| 종료 코드 | prepare | commit |
+|---|---|---|
+| `0` | 미리보기 | 모두 채움 |
+| `1` | – | 일부 채움(직접 처리할 칸이나 읽지 못한 원본이 남음) |
+| `2` | 오류 | 오류, 지문 불일치, 저장 실패(결과 파일 없음) |
+| `3` | 질문(답하는 법을 출력) | – |
+
+시연 자료로 같은 일을 명령행에서 할 수도 있다.
+
+```powershell
+uv run ureonggaksi prepare --request "발급번호 기준으로 신청인이랑 생일, 이수시간 채워줘" `
+  --target examples/generated/demo/교육이수현황.xlsx --out examples/generated/demo/작업.plan.json `
+  examples/generated/demo/이수확인서_홍길동.hwpx examples/generated/demo/이수확인서_김영희.hwpx examples/generated/demo/이수확인서_박민수.hwpx
+```
 
 로컬 모델을 쓰려면 prepare에 `--runtime`(llama-completion 실행 파일)과 `--model`(GGUF)을 준다. 없으면 모델 없이 해석한다.
 
@@ -112,7 +125,9 @@ SHA-256은 변경 감지용이며 전자서명이 아니다.
 앱은 Python의 인터넷 소켓과 DNS를 실행 시 차단하지만 OS 수준의 차단은 아니다. 강제 차단이 필요하면 망분리나 방화벽을 함께 적용한다.
 
 - 민감 문서와 결과는 OneDrive 등 동기화되지 않는 로컬 폴더에서 처리한다.
-- 결과 XLSX는 작성한 칸만 원본과 다르다. 근거 JSON과 `확인필요.txt`에는 원문 값과 원본 파일 이름이 들어가므로 원본과 같은 보안 등급으로 관리한다.
+- 한 줄 요청으로 채운 결과 XLSX는 작성한 칸만 원본과 다르다. 함께 만드는 근거 JSON과 `_확인필요.txt`에는 원문 값과 원본 파일 경로(사용자 폴더 이름 포함)가 들어간다.
+- `extract` 명령의 결과 XLSX에는 `출처` 시트에 원본 경로·해시·원문 블록이 들어간다.
+- 모두 원본과 같은 보안 등급으로 관리한다.
 
 데이터 흐름과 입력 제한은 [SECURITY.md](SECURITY.md)에 있다.
 
