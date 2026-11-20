@@ -383,13 +383,13 @@ def test_words_the_model_could_not_place_are_warned(files):
     """2차 M-1: 모델이 열과 잇지 못한 모르는 말은 소리 없이 버리지 않고 경고로 보인다."""
     sources, target, out, _ = files
     prepared = prepare(
-        "이름 기준으로 직책이랑 이수시간 채워 주시면 돼요",
+        "이름 기준으로 담당업무랑 이수시간 채워 주시면 돼요",
         sources,
         target,
         output_path=out,
         ask_many=reader({"이수시간": "채움"}),
     )
-    assert any("‘직책’" in w and "정하지 못했습니다" in w for w in prepared.warnings)
+    assert any("‘담당업무’" in w and "정하지 못했습니다" in w for w in prepared.warnings)
 
 
 def test_answering_the_key_drops_the_key_column_from_the_pairs(tmp_path):

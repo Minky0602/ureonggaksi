@@ -22,6 +22,7 @@ from .errors import ServiceError
 from .extract import _normalized as normalized_label
 from .models import Block, Document
 from .rules import FieldRule, RecordRule, RuleSet, TargetRule
+from .synonyms import GROUPS
 from .xlsx import TargetView
 
 # 작업 종류 동사. "확인서"·"검토서"처럼 문서 이름에 든 글자는 동사가 아니다
@@ -104,7 +105,8 @@ class Interpretation:
     key: tuple[str, str] | None  # (문서 항목, 대상 열)
     # (문서 항목, 대상 열, 출처). match: 코드가 확신(같은 이름·정형 지목) /
     # assumed: 이름은 같은데 모르는 말이 섞여 '채우라는 뜻'을 모델이 읽은 짝 → 채우고 '확인 필요' /
-    # model: 어느 열인지를 모델이 고른 짝 → 쓰지 않고 비워 둔다(추천으로만 보인다, 2026-11-20 사용자 결정)
+    # synonym: 동의어표·'명/일자' 규칙으로 지은 짝 / model: 어느 열인지를 모델이 고른 짝.
+    # assumed·synonym·model은 채우고 '확인 필요'로 보인다(2026-11-20 사용자 결정 "동일 취급")
     fields: tuple[tuple[str, str, str], ...]
     questions: tuple[tuple[str, tuple[str, ...]], ...]  # (슬롯, 후보) — 6.2 질문 재료
     excluded: tuple[str, ...] = ()  # 요청했지만 대응 열이 없는 항목·열
@@ -119,6 +121,47 @@ def _norm(text: str) -> str:
     """비교용: 공백·끝 콜론 제거, 괄호 안(단위 등) 제거, 대소문자 무시."""
     text = re.sub(r"\([^)]*\)|（[^）]*）", "", text or "")
     return normalized_label(text)
+
+
+_GROUP_OF = {normalized_label(word): i for i, group in enumerate(GROUPS) for word in group}
+
+
+def _stem(name: str) -> str:
+    """끝의 '명'·'일자'만 다른 이름을 같게 본다(사업장명=사업장, 참석일자=참석일). 두 글자 이름(성명)은 그대로."""
+    text = re.sub(r"일자$", "일", _norm(name))
+    return re.sub(r"(?<=..)명$", "", text)
+
+
+def _synonym(name: str, pool: tuple[str, ...]) -> str | None:
+    """name과 같은 동의어 묶음에 들었거나 끝의 '명'·'일자'만 다른 후보가 pool에 하나뿐이면 그것.
+    없거나 둘 이상이면 None(모델에 넘긴다)."""
+    group, stem = _GROUP_OF.get(_norm(name)), _stem(name)
+    found = [
+        p
+        for p in pool
+        if _norm(p) != _norm(name)
+        and ((group is not None and _GROUP_OF.get(_norm(p)) == group) or _stem(p) == stem)
+    ]
+    return found[0] if len(found) == 1 else None
+
+
+# 낱말 뒤 같은 마디 안의 빼기·미루기 표현("생일이랑 이메일은 빼", "생일은 이번엔 놔두고", "다음 주에")
+SKIP_WORDS = re.compile(
+    r"빼(?!놓지|먹지)|제외|(?<!먹지 )(?<!먹지)말고|놔두|두고|비워|비우|그대로(?!옮|넣|채|입력|적|기입|반영)|참고|취소|보류|생략|미루"
+    r"|손대지|건드리지|하지\s*마|하지\s*말|나중에?|다음에|다음\s*(주|달|번)에|아직(이|은|\s*안|\s*하지)"
+)  # 이름 경로의 빼기 낱말(NEGATED)과 같은 뜻을 쓴다. '다음 주까지'·'아직 비어 있는'은 미루기가 아니다(검수 L-1)
+CLAUSE_END = re.compile(r"[,.;]|고\s")  # "생일 채우고 이수시간은 빼": '고 '에서 마디가 끝난다
+
+
+def _said_to_skip(request: str, word: str) -> bool:
+    """그 낱말이 나온 어느 자리든, 같은 마디 뒤쪽에 빼기·미루기 표현이 있다. 넓게 잡는다(틀리면 덜 채울 뿐)."""
+    for found in re.finditer(re.escape(word), request):
+        rest = request[found.end() :]
+        hit, end = SKIP_WORDS.search(rest), CLAUSE_END.search(rest)
+        # 빼기 낱말이 첫 마디 끝보다 앞에서 시작하면 그 마디의 말이다("비워 두고 " 자체가 '고 '로 끝난다, 검수 M-1)
+        if hit and (end is None or hit.start() < end.start()):
+            return True
+    return False
 
 
 # ---------- 항목 찾기 ----------
@@ -277,9 +320,19 @@ def _roster_fields(documents, section, table, top, names) -> list[FieldCandidate
 # ---------- 요청 읽기 ----------
 
 
+# "넣어 줄래?", "채워 줄 수 있어?": 부탁으로 끝나는 '?'는 묻는 말(검토)이 아니다(DIF-055)
+POLITE_ASK = re.compile(
+    r"(채워|넣어|입력해|기입해|적어|옮겨|반영해|써)\s*"
+    r"(줄래요?|줄\s*수\s*(있어|있어요|있나요|있을까요?)|주실\s*(래요|수\s*있나요)|주시겠어요|주실래요?)\s*\?"
+)
+
+
 def _work_type(request: str) -> str | None:
     """채우기·검토 동사가 하나만 있을 때만 정한다. 하지 않는 채우기("채우지 마")는 채우기가 아니고,
     그것과 다른 채우기가 함께 있으면("직급 채워줘, 이수시간은 안 채워도 돼") 묻는다."""
+    request = POLITE_ASK.sub(
+        lambda m: m.group(1) + " ", request
+    )  # 부탁 어미째 지운다("있어"는 검토 표지이기도 하다)
     negated = bool(FILL_NEGATED.search(request))
     fill = bool(FILL.search(FILL_NEGATED.sub(" ", request)))
     if negated and fill:
@@ -557,7 +610,7 @@ def _pick_record(documents, view, mentions):
 
 def _ask_model(choose: Chooser | None, prompt_for, options: tuple[str, ...]) -> str | None:
     """선택지를 한 칸씩 돌려 두 번 묻는다. 같은 답이거나 두 번째가 '없음'으로 물러서면(선택지 둘 이상) 받고,
-    다른 열로 바뀌면 버린다. 받은 짝은 추천(출처 model)이라 prepare가 쓰지 않고 비워 둔다.
+    다른 열로 바뀌면 버린다. 받은 짝(출처 model)은 채우고 '확인 필요'로 보인다.
 
     '없음'까지 돌리므로 모든 자리의 선택지가 바뀐다(뒤집기는 가운데 자리가 남는다, PR #18 3차 검수 L1).
     첫 답이 '없음'이거나 목록 밖이면 확정하지 않으므로 두 번째는 묻지 않는다.
@@ -734,16 +787,36 @@ def interpret(
             every_word[8:],
         )  # 넘친 말은 묻지 않고 경고로 남긴다(3차 M3)
         targets = tuple(c for c in columns if c != key_column)
+        # 동의어표: 요청의 모르는 말이 열 하나만 가리키면("생일"→생년월일) 그 열을 요청한 이름처럼 다룬다.
+        # 채우라는 뜻인지는 다른 이름과 같이 모델의 역할 판단으로 정하고, 같은 마디에 빼기·미루기 표현이
+        # 있으면 빼기로 본다(DIF-055, 검수 M1)
+        aliased: dict[str, str] = {}
+        for word in every_word:
+            column = _synonym(word, targets)
+            if column and column not in mentioned and column not in aliased.values():
+                aliased[word] = column
+        alias_skip = [c for w, c in aliased.items() if _said_to_skip(request, w)]
+        words = [w for w in words if w not in aliased]
+        overflow = [w for w in overflow if w not in aliased]
         coded_skip = [n for n in skip if n != hint]
+        # 동의어로 추정한 열의 빼기는 그 열만 빼고 표시한다. 다른 칸까지 질문으로 돌리지 않는다(검수 L-1)
+        asked_names = list(dict.fromkeys([*mentioned, *aliased.values(), *coded_skip]))
         try:
             roles, meant, meant_skip, unread = _read_request(
-                ask_many, request, list(dict.fromkeys([*mentioned, *coded_skip])), words, targets
+                ask_many, request, asked_names, words, targets
             )
         except ServiceError as error:
             if not error.code.startswith("AI_"):
                 raise
             roles, meant, meant_skip, unread = {}, [], [], []
         unread = [*unread, *overflow]
+        for word, column in aliased.items():
+            if column in alias_skip:
+                continue
+            if roles.get(column) == FILL_ROLE:
+                meant = list(dict.fromkeys([*meant, column]))
+            elif roles.get(column) != SKIP_ROLE:
+                unread.append(word)  # 모델이 채우라고 읽지 않았다: 빠진 항목일 수 있어 알린다
         # 코드가 빼기로 읽은 이름은 모델이 두 번 모두 '채움'이 아닌 같은 답(제외·무관)이면 뺀다. 실제 4B는
         # 뺄 항목을 '무관'으로 답한다(2차 M-2). 답이 어긋나거나 '채움'·'키'면, 또는 같은 열을 채우라고도
         # 빼라고도 읽었으면 짝을 정하지 않고 묻는다(DIF-050 H3·M2)
@@ -752,11 +825,14 @@ def interpret(
                 [
                     *(n for n, r in roles.items() if r == SKIP_ROLE),
                     *coded_skip,
+                    *alias_skip,
                     *meant_skip,
                 ]
             )
         )
-        filled = {n for n, r in roles.items() if r == FILL_ROLE} | set(meant)
+        filled = {n for n, r in roles.items() if r == FILL_ROLE and n not in alias_skip} | set(
+            meant
+        )
         settled = all(roles.get(n) in (SKIP_ROLE, "무관") for n in coded_skip)
         if not settled or set(skipped) & filled:
             drop, skipped, meant, unread = set(mentioned), [], [], []
@@ -780,6 +856,14 @@ def interpret(
             field,
             tuple(c for c in columns if c != key_column and c not in taken and c not in off_limits),
         )
+        listed = _synonym(field, tuple(c for c in columns if c != key_column))
+        if (
+            listed in options
+            and _synonym(listed, tuple(n for n in names if n != key_field)) == field
+        ):
+            # 동의어표: 양쪽 모두 후보가 하나뿐일 때만(DIF-055, 검수 M3)
+            pairs.append((field, listed, "synonym"))
+            continue
         answer = _ask_model(
             choose, lambda o, f=field: _column_prompt(request, by_name[f], o, view), options
         )
@@ -795,6 +879,14 @@ def interpret(
             column,
             tuple(n for n in names if n != key_field and n not in taken and n not in off_limits),
         )
+        listed = _synonym(column, tuple(n for n in names if n != key_field))
+        if (
+            listed in options
+            and _synonym(listed, tuple(c for c in columns if c != key_column)) == column
+        ):
+            # 동의어표: 양쪽 모두 후보가 하나뿐일 때만(DIF-055, 검수 M3)
+            pairs.append((listed, column, "synonym"))
+            continue
         answer = _ask_model(
             choose, lambda o, c=column: _field_prompt(request, c, o, by_name, view), options
         )
