@@ -12,4 +12,9 @@ Runtime dependencies (exact versions: uv.lock):
 
 The build (`scripts/collect_licenses.py`) copies the license files that each installed runtime distribution ships into `licenses/` of the bundle and fails if a distribution ships none. The copied set has not yet been reviewed for completeness, in particular for Qt. PyInstaller uses its GPL license with a bootloader distribution exception. The app is distributed as an onedir bundle using dynamically loaded Qt libraries; retain the directory structure and notices. Review upstream obligations before public distribution; this file does not replace the license texts.
 
+Optional local AI (not bundled; the user downloads and selects these files):
+
+- llama.cpp `llama-completion` (tested release b12125): MIT; https://github.com/ggml-org/llama.cpp
+- Qwen3.5-4B GGUF Q4_K_M (tested: unsloth/Qwen3.5-4B-GGUF, original Qwen/Qwen3.5-4B): Apache-2.0; https://huggingface.co/Qwen
+
 No third-party sample documents are stored in this repository or bundled with the application. Synthetic examples in this repository are authored for parser tests and contain no real personal information.

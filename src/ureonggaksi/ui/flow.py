@@ -460,7 +460,11 @@ class FlowWindow(QMainWindow):
         self.package = package
         self.message.setText("")
         self.save_button.setEnabled(False)  # 같은 미리보기로 두 번 저장하지 않는다
-        lines = [f"저장했습니다 ({package.status})."]
+        status = {
+            "completed": "모두 채웠습니다",
+            "partial": "채울 수 있는 칸을 채웠습니다. 직접 처리할 칸은 확인필요 파일에 있습니다",
+        }.get(package.status, "저장하지 못한 부분이 있습니다")
+        lines = [f"저장했습니다. {status}."]
         for title, path in (
             ("결과", package.output_path),
             ("확인필요", package.manual_path),
