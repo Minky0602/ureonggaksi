@@ -283,8 +283,8 @@ class Interpretation:            # 요청 해석 결과. 규칙 초안의 재료
     work_type: Literal["fill", "check"] | None
     record: RecordRule
     key: tuple[str, str] | None                  # (문서 항목, 대상 열)
-    fields: tuple[tuple[str, str, str], ...]     # (문서 항목, 대상 열, 출처 "match"|"assumed"|"model")
-    #   match: 코드가 확정 / assumed: 같은 이름, 채우라는 뜻을 모델이 읽음 / model: 열을 모델이 고름(채우고 '확인 필요')
+    fields: tuple[tuple[str, str, str], ...]     # (문서 항목, 대상 열, 출처 "match"|"assumed"|"synonym"|"model")
+    #   match: 코드가 확정 / assumed: 같은 이름, 채우라는 뜻을 모델이 읽음 / synonym: 동의어표(synonyms.GROUPS)로 지음 / model: 열을 모델이 고름. synonym·model은 채우고 '확인 필요'
     questions: tuple[tuple[str, tuple[str, ...]], ...]   # (슬롯 work_type|key_column|target_column, 후보)
     excluded: tuple[str, ...]                    # 요청했지만 짝을 못 찾은 이름(질문 없이 빼고 소명)
     candidates: tuple[FieldCandidate, ...]
@@ -340,7 +340,9 @@ def interpret(request: str, documents: tuple[Document, ...], view: TargetView,
     #   키는 이름이 같아도 그 열과 값이 맞는 다른 문서 항목이 있거나 view가 행 전체를 담지 못하면 묻는다.
     # 작업 종류: 채우기·검토 표현 중 하나만 있을 때. 둘 다·없음·"채우지 마"·'?'로 묻는 말("입력했어?") → 질문.
     # 요청의 이름은 단어로 나온 것만 읽는다('전화번호'의 '번호'는 아님). 작업 동사 자리는 열 이름이 아니다.
-    # 이름이 다른 짝은 choose로 하나씩 묻는다(선택지 = 열 또는 항목 + "없음", 이름이 비슷한 것을 앞에 두고
+    # 이름이 다른 짝은 먼저 동의어표에서 찾는다. 같은 묶음의 후보가 열(또는 문서 항목) 전체에서 하나뿐이고
+    #   그 후보가 선택지에 있으면 출처 synonym으로 짓는다(모델 호출 없음). 그 밖에는
+    # choose로 하나씩 묻는다(선택지 = 열 또는 항목 + "없음", 이름이 비슷한 것을 앞에 두고
     #   단서로 표시, 단위만 다른 같은 이름은 제외). 받은 답(model)은 채우고 '확인 필요'로 보인다. 모델이 없거나
     #   '없음'·목록 밖 답이면 excluded로 소명한다. 한 열에 둘이 몰리면 둘 다 뺀다.
     # 값 형태 검증: 문서 값과 취합표 열 기존 값의 주된 형태(날짜·연락처·숫자·코드형·글자)가 둘 다 뚜렷한데

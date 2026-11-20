@@ -22,6 +22,7 @@ from .errors import ServiceError
 from .extract import _normalized as normalized_label
 from .models import Block, Document
 from .rules import FieldRule, RecordRule, RuleSet, TargetRule
+from .synonyms import GROUPS
 from .xlsx import TargetView
 
 # 작업 종류 동사. "확인서"·"검토서"처럼 문서 이름에 든 글자는 동사가 아니다
@@ -119,6 +120,18 @@ def _norm(text: str) -> str:
     """비교용: 공백·끝 콜론 제거, 괄호 안(단위 등) 제거, 대소문자 무시."""
     text = re.sub(r"\([^)]*\)|（[^）]*）", "", text or "")
     return normalized_label(text)
+
+
+_GROUP_OF = {normalized_label(word): i for i, group in enumerate(GROUPS) for word in group}
+
+
+def _synonym(name: str, pool: tuple[str, ...]) -> str | None:
+    """name과 같은 동의어 묶음에 든 후보가 pool에 하나뿐이면 그것. 없거나 둘 이상이면 None(모델에 넘긴다)."""
+    group = _GROUP_OF.get(_norm(name))
+    if group is None:
+        return None
+    found = [p for p in pool if _GROUP_OF.get(_norm(p)) == group and _norm(p) != _norm(name)]
+    return found[0] if len(found) == 1 else None
 
 
 # ---------- 항목 찾기 ----------
@@ -780,6 +793,10 @@ def interpret(
             field,
             tuple(c for c in columns if c != key_column and c not in taken and c not in off_limits),
         )
+        listed = _synonym(field, tuple(c for c in columns if c != key_column))
+        if listed in options:  # 동의어표: 열 전체에서 하나뿐일 때만(DIF-055)
+            pairs.append((field, listed, "synonym"))
+            continue
         answer = _ask_model(
             choose, lambda o, f=field: _column_prompt(request, by_name[f], o, view), options
         )
@@ -795,6 +812,10 @@ def interpret(
             column,
             tuple(n for n in names if n != key_field and n not in taken and n not in off_limits),
         )
+        listed = _synonym(column, tuple(n for n in names if n != key_field))
+        if listed in options:  # 동의어표: 문서 항목 전체에서 하나뿐일 때만(DIF-055)
+            pairs.append((listed, column, "synonym"))
+            continue
         answer = _ask_model(
             choose, lambda o, c=column: _field_prompt(request, c, o, by_name, view), options
         )

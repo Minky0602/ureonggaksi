@@ -112,8 +112,8 @@ def test_names_that_only_look_alike_go_to_the_model_with_a_hint(setup):
 
 
 def test_model_answer_outside_the_options_is_ignored(setup):
-    result = run(setup, "이름으로 찾아서 직급 채워줘", lambda prompt, options: "주소")
-    assert result.fields == () and result.excluded == ("직급",)
+    result = run(setup, "이름으로 찾아서 점수 채워줘", lambda prompt, options: "주소")
+    assert result.fields == () and result.excluded == ("점수",)
 
 
 def test_user_pointing_at_a_cell_links_the_pair(setup):
@@ -169,7 +169,7 @@ def test_roster_table_reads_every_participant(tmp_path):
         choose=picks({"부서": "소속부서", "참석일": "참석일자"}),
     )
     assert result.record.kind == "table_rows" and result.key == ("성명", "이름")
-    assert set(result.fields) == {("부서", "소속부서", "model"), ("참석일", "참석일자", "model")}
+    assert set(result.fields) == {("부서", "소속부서", "synonym"), ("참석일", "참석일자", "model")}
     plan = analyze(inputs, build_rule(result, view))
     done = sorted(i.target_ref for i in plan.items if i.area == "done")
     assert done == ["B2", "B3", "B4", "C2", "C3", "C4"]
@@ -509,7 +509,10 @@ def test_requests_with_unknown_words_confirm_no_pair(setup, request_text):
     "request_text, expected",
     [
         ("이름 기준으로 이수시간 채워줘", {("이수시간", "이수시간")}),
-        ("이름으로 찾아서 이수시간이랑 직급 넣어 주세요", {("이수시간", "이수시간")}),
+        (
+            "이름으로 찾아서 이수시간이랑 직급 넣어 주세요",
+            {("이수시간", "이수시간"), ("직위", "직급")},
+        ),
         ("이수시간이 취합표랑 같은지 이름으로 대조해 줘", {("이수시간", "이수시간")}),
         ("이름 기준으로 직원번호를 번호 칸에 넣어줘", {("직원번호", "번호")}),
         ("이름 기준 이수시간 체크좀", {("이수시간", "이수시간")}),
@@ -630,7 +633,8 @@ def test_verb_or_negation_letters_inside_names_are_part_of_the_name(
         ("이름 기준으로 이수시간 채워줘. 제외: 직급", set()),
         ("이름 기준으로 직급 대신 이수시간 채워줘", set()),
         ("이름 기준으로 이수시간을 채우고 비고 칸에 직급을 적어줘", set()),
-        ("이름 기준으로 직급이랑 이수시간 채워줘", {("이수시간", "이수시간")}),  # 문서는 직위
+        # 문서는 직위: 동의어표로 짓는다(DIF-055)
+        ("이름 기준으로 직급이랑 이수시간 채워줘", {("이수시간", "이수시간"), ("직위", "직급")}),
     ],
 )
 def test_any_unknown_word_confirms_no_pair(setup, request_text, expected):
@@ -1093,4 +1097,41 @@ def test_a_place_word_inside_another_word_is_not_pointing(setup):
         "이름 기준으로 직급 이수시간 부분적으로 채워 주세요",
         {"직급": "채움", "이수시간": "채움"},
     )
-    assert result.fields == (("이수시간", "이수시간", "assumed"),)
+    assert set(result.fields) == {("이수시간", "이수시간", "assumed"), ("직위", "직급", "synonym")}
+
+
+# ---------- 동의어표(DIF-055) ----------
+
+
+def test_a_listed_synonym_pairs_without_the_model(setup):
+    """같은 묶음의 후보가 하나뿐이면 모델 없이 짝짓는다. 출처는 synonym이라 '확인 필요'로 보인다."""
+    asked = []
+    result = run(setup, "이름으로 찾아서 직급 채워줘", first_option(asked))
+    assert result.fields == (("직위", "직급", "synonym"),) and asked == []
+
+
+def test_two_candidates_in_one_synonym_group_go_to_the_model(tmp_path):
+    """문서에 성명과 신청인명이 함께 있으면 '이름' 열에 어느 것인지 표로 정하지 않고 모델에 묻는다."""
+    rows = [("발급번호", "A-01"), ("성명", "가나다"), ("신청인명", "라마바"), ("이수시간", "12")]
+    body = table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
+    docs = [["<hp:p><hp:run>" + body + "</hp:run></hp:p>"]]
+    sheet = [["발급번호", "이름", "이수시간"], ["A-01", None, None]]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    asked = []
+    result = interpret("발급번호 기준으로 이름 채워줘", documents, view, choose=first_option(asked))
+    assert asked and all(src != "synonym" for _, _, src in result.fields)
+
+
+def test_a_synonym_pair_still_needs_matching_value_shapes(tmp_path):
+    """동의어표로 지은 짝도 값 형태 검사를 거친다(날짜 값을 연락처 열에 넣지 않는다)."""
+    rows = [("발급번호", "A-01"), ("연락처", "2026-03-01"), ("이수시간", "12")]
+    body = table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
+    docs = [["<hp:p><hp:run>" + body + "</hp:run></hp:p>"]]
+    sheet = [
+        ["발급번호", "휴대폰", "이수시간"],
+        ["A-01", "010-1111-2222", None],
+        ["A-02", None, None],
+    ]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("발급번호 기준으로 휴대폰 채워줘", documents, view)
+    assert result.fields == ()
