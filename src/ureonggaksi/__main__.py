@@ -69,7 +69,8 @@ def main(argv=None):
     # Destroy native widgets before QApplication/Python finalization. Signal
     # closures can otherwise retain windows until after the Qt runtime is gone.
     window.cancel()
-    window.pool.waitForDone()
+    # 로컬 AI 호출은 끊을 수 없다(질문마다 최대 60초). 창을 닫은 뒤 오래 붙잡지 않는다(검수 M2)
+    window.pool.waitForDone(5000)
     app.processEvents()
     window.close()
     window.deleteLater()

@@ -34,7 +34,13 @@ from ..service import POLICY_CHOICES, Prepared, commit, examples, prepare
 from .jobs import Job
 from .theme import STYLE
 
-CHOICE_TEXT = {"fill": "빈칸 채우기", "check": "값만 대조"}
+CHOICE_TEXT = {
+    "fill": "빈칸 채우기",
+    "check": "값만 대조",
+    "down": "버림",
+    "up": "올림",
+    "half_up": "반올림",
+}
 KIND_TITLE = {k.kind: k.title for k in KINDS}
 # 시스템 다크 모드에서도 읽히도록 페이지 바탕을 밝게 고정한다(글자 색은 theme.STYLE이 정한다)
 PAGE_STYLE = "QWidget#page, QScrollArea { background: #F5F7F5; } QFrame#card { background: #FFFFFF; border: 1px solid #D4DFD7; border-radius: 8px; }"
@@ -84,6 +90,7 @@ class FlowWindow(QMainWindow):
         self.prepared: Prepared | None = None
         self.package = None
         self.choose = self.ask_many = None  # 로컬 모델(없으면 모델 없이 해석)
+        self.generation = 0  # 입력이 바뀔 때마다 오른다. 끝난 미리보기가 지금 입력의 것인지 가린다
         self._build()
         self.load_model()
 
@@ -110,15 +117,18 @@ class FlowWindow(QMainWindow):
         self.source_list.setMaximumHeight(110)
         left.addWidget(self.source_list)
         row = QHBoxLayout()
-        row.addWidget(_button("원본 추가", self.pick_sources))
-        row.addWidget(_button("비우기", self.clear_sources))
+        self.add_button = _button("원본 추가", self.pick_sources)
+        self.clear_button = _button("비우기", self.clear_sources)
+        row.addWidget(self.add_button)
+        row.addWidget(self.clear_button)
         row.addStretch()
         left.addLayout(row)
         right = QVBoxLayout()
         right.addWidget(_label("취합표(XLSX)", "section"))
         self.target_label = _label("아직 고르지 않았습니다.", "muted")
         right.addWidget(self.target_label)
-        right.addWidget(_button("취합표 선택", self.pick_target))
+        self.target_button = _button("취합표 선택", self.pick_target)
+        right.addWidget(self.target_button)
         right.addStretch()
         files.addLayout(left, 3)
         files.addLayout(right, 2)
@@ -137,7 +147,8 @@ class FlowWindow(QMainWindow):
         model_row = QHBoxLayout()
         self.model_label = _label("", "muted")
         model_row.addWidget(self.model_label, 1)
-        model_row.addWidget(_button("로컬 AI 지정", self.pick_model))
+        self.model_button = _button("로컬 AI 지정", self.pick_model)
+        model_row.addWidget(self.model_button)
         page.addLayout(model_row)
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
@@ -180,6 +191,8 @@ class FlowWindow(QMainWindow):
         self.manual.setColumnWidth(0, 190)
         self.manual.setColumnWidth(1, 160)
         preview.addWidget(self.manual)
+        self.manual_more = _label("", "muted")
+        preview.addWidget(self.manual_more)
         self.preview_box.hide()
         page.addWidget(self.preview_box)
 
@@ -260,6 +273,8 @@ class FlowWindow(QMainWindow):
         """보이는 미리보기가 입력과 맞지 않게 되면 저장할 수 없다."""
         if reset_answers:
             self.answers.clear()
+        self.generation += 1
+        self.message.setText("")
         self.prepared = None
         self.package = None
         self.save_button.setEnabled(False)
@@ -296,7 +311,19 @@ class FlowWindow(QMainWindow):
                 return error
 
         self.message.setText("문서를 읽고 요청을 해석하는 중입니다…")
-        self._run(work, self.show_prepared)
+        generation = self.generation
+
+        def done(prepared) -> None:
+            if (
+                generation != self.generation
+            ):  # 그사이 입력이 바뀌었다: 지난 입력의 미리보기는 보이지 않는다
+                self.message.setText(
+                    "입력이 바뀌어 이전 미리보기를 버렸습니다. 다시 [미리보기]를 누르세요."
+                )
+                return
+            self.show_prepared(prepared)
+
+        self._run(work, done)
 
     def show_prepared(self, prepared) -> None:
         if isinstance(prepared, ServiceError):
@@ -331,6 +358,10 @@ class FlowWindow(QMainWindow):
             self.manual.addTopLevelItem(
                 QTreeWidgetItem([KIND_TITLE.get(item.kind, item.kind), item.where, item.reason])
             )
+        more = len(prepared.manual) - MANUAL_LIMIT
+        self.manual_more.setText(
+            f"외 {more}건은 저장 뒤 확인필요 파일에 있습니다." if more > 0 else ""
+        )
         self.preview_box.show()
         self.save_button.setEnabled(True)
 
@@ -351,8 +382,19 @@ class FlowWindow(QMainWindow):
         self.unsure_title.setVisible(bool(prepared.unsure))
 
     def show_question(self, question) -> None:
-        self.question_text.setText(question.text)
         _clear(self.choice_row)
+        if not question.choices and question.slot not in POLICY_CHOICES:
+            # 버튼으로 답할 수 없는 질문(어느 항목을 어느 열에). 이 화면에는 직접 선택이 아직 없다
+            self.question_text.setText(
+                "어느 항목을 어느 열에 넣을지 정하지 못했습니다. 요청에 취합표의 열 이름을 그대로 넣어 "
+                "다시 [미리보기]를 누르세요. 예: ‘이름 기준으로 직급이랑 이수시간 채워줘’"
+            )
+            if self.answers:
+                self.choice_row.addWidget(_button("답과 빼기 모두 취소", self.restart))
+            self.choice_row.addStretch()
+            self.question_box.show()
+            return
+        self.question_text.setText(question.text)
         for choice in question.choices:
             self.choice_row.addWidget(
                 _button(
@@ -369,6 +411,10 @@ class FlowWindow(QMainWindow):
 
     def answer(self, slot: str, value: str) -> None:
         self.answers.append((slot, value))
+        self.preview()
+
+    def restart(self) -> None:
+        self.answers.clear()
         self.preview()
 
     def drop(self, field: str) -> None:
@@ -431,7 +477,17 @@ class FlowWindow(QMainWindow):
     def _busy(self, busy: bool) -> None:
         self.busy = busy
         self.progress.setVisible(busy)
-        for widget in (self.preview_button, self.request):
+        # 작업 중에는 입력을 바꾸는 모든 것을 끈다(보인 미리보기 = 지금 입력, 검수 H1)
+        for widget in (
+            self.preview_button,
+            self.request,
+            self.add_button,
+            self.clear_button,
+            self.target_button,
+            self.model_button,
+            self.question_box,
+            self.preview_box,
+        ):
             widget.setEnabled(not busy)
         if busy:
             self.save_button.setEnabled(False)

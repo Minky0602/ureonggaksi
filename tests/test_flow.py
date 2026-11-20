@@ -77,7 +77,7 @@ def test_preview_then_save_writes_a_new_file_and_keeps_the_original(window, app)
     before = hashlib.sha256(window.target.read_bytes()).hexdigest()
     assert not window.save_button.isEnabled()
     ask(window, app, "이름 기준으로 이수시간 채워줘")
-    assert window.preview_box.isVisible() is not None and window.prepared.plan is not None
+    assert not window.preview_box.isHidden() and window.prepared.plan is not None
     assert "이수시간" in window.interpretation.text() and "채울 칸 2" in window.counts.text()
     assert window.save_button.isEnabled()
     window.save_button.click()
@@ -139,3 +139,36 @@ def test_missing_inputs_are_explained(app, tmp_path):
     assert "먼저 고르세요" in win.message.text() and not win.busy
     win.close()
     win.deleteLater()
+
+
+def test_a_preview_finishing_after_the_input_changed_is_discarded(window, app, tmp_path):
+    """검수 H1: 미리보기 중에 입력이 바뀌면 끝난 미리보기를 보이지도 저장하게 두지도 않는다."""
+
+    def slow(prompt, options):
+        time.sleep(0.5)
+        return "직위" if "직위" in options else "없음"
+
+    window.choose = slow
+    window.request.setText("이름 기준으로 직급이랑 이수시간 채워줘")
+    window.preview_button.click()
+    assert (
+        window.busy and not window.target_button.isEnabled() and not window.add_button.isEnabled()
+    )
+    other = write_xlsx(tmp_path / "다른표.xlsx", SHEET, sheet="이수현황")
+    window.set_target(other)  # 버튼은 꺼져 있지만 코드 경로로도 막히는지 본다
+    idle(window, app)
+    assert window.prepared is None and not window.save_button.isEnabled()
+    assert "이전 미리보기를 버렸습니다" in window.message.text()
+
+
+def test_a_question_without_buttons_explains_how_to_continue(window, app):
+    """검수 M1: 짝을 모두 빼면 버튼 없는 질문 대신 다시 하는 방법과 취소 버튼을 보인다."""
+    ask(window, app, "이름 기준으로 이수시간 채워줘")
+    window.drop("이수시간")
+    idle(window, app)
+    assert "열 이름을 그대로" in window.question_text.text()
+    buttons = [window.choice_row.itemAt(i).widget() for i in range(window.choice_row.count())]
+    undo = next(b for b in buttons if b is not None and b.text() == "답과 빼기 모두 취소")
+    undo.click()
+    idle(window, app)
+    assert window.prepared.plan is not None and window.answers == []
