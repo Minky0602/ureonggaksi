@@ -514,7 +514,7 @@ def test_requests_with_unknown_words_confirm_no_pair(setup, request_text):
         ("이름 기준으로 이수시간 채워줘", {("이수시간", "이수시간")}),
         (
             "이름으로 찾아서 이수시간이랑 직급 넣어 주세요",
-            {("이수시간", "이수시간"), ("직위", "직급")},
+            {("이수시간", "이수시간")},
         ),
         ("이수시간이 취합표랑 같은지 이름으로 대조해 줘", {("이수시간", "이수시간")}),
         ("이름 기준으로 직원번호를 번호 칸에 넣어줘", {("직원번호", "번호")}),
@@ -636,8 +636,8 @@ def test_verb_or_negation_letters_inside_names_are_part_of_the_name(
         ("이름 기준으로 이수시간 채워줘. 제외: 직급", set()),
         ("이름 기준으로 직급 대신 이수시간 채워줘", set()),
         ("이름 기준으로 이수시간을 채우고 비고 칸에 직급을 적어줘", set()),
-        # 문서는 직위: 동의어표로 짓는다(DIF-055)
-        ("이름 기준으로 직급이랑 이수시간 채워줘", {("이수시간", "이수시간"), ("직위", "직급")}),
+        # 문서는 직위: 직급과 직위는 값이 다른 항목이라 동의어표에 없다(DIF-055)
+        ("이름 기준으로 직급이랑 이수시간 채워줘", {("이수시간", "이수시간")}),
     ],
 )
 def test_any_unknown_word_confirms_no_pair(setup, request_text, expected):
@@ -1100,17 +1100,38 @@ def test_a_place_word_inside_another_word_is_not_pointing(setup):
         "이름 기준으로 직급 이수시간 부분적으로 채워 주세요",
         {"직급": "채움", "이수시간": "채움"},
     )
-    assert set(result.fields) == {("이수시간", "이수시간", "assumed"), ("직위", "직급", "synonym")}
+    assert set(result.fields) == {("이수시간", "이수시간", "assumed")}
 
 
 # ---------- 동의어표(DIF-055) ----------
 
 
-def test_a_listed_synonym_pairs_without_the_model(setup):
-    """같은 묶음의 후보가 하나뿐이면 모델 없이 짝짓는다. 출처는 synonym이라 '확인 필요'로 보인다."""
+def _birth(number, name, birth):
+    rows = [("발급번호", number), ("성명", name), ("생년월일", birth), ("이수시간", "12")]
+    body = table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
+    return ["<hp:p><hp:run>" + body + "</hp:run></hp:p>"]
+
+
+@pytest.fixture
+def birth_setup(tmp_path):
+    docs = [_birth("A-01", "가나다", "1990-01-02"), _birth("A-02", "라마바", "1985-03-04")]
+    sheet = [
+        ["발급번호", "신청인", "생일", "이수시간"],
+        ["A-01", None, None, None],
+        ["A-02", None, None, None],
+    ]
+    return build(tmp_path, docs, sheet, "명단")
+
+
+def test_a_listed_synonym_pairs_without_the_model(birth_setup):
+    """같은 묶음의 후보가 양쪽 모두 하나뿐이면 모델 없이 짝짓는다. 출처는 synonym이라 '확인 필요'로 보인다."""
+    _, docs, view = birth_setup
     asked = []
-    result = run(setup, "이름으로 찾아서 직급 채워줘", first_option(asked))
-    assert result.fields == (("직위", "직급", "synonym"),) and asked == []
+    result = interpret(
+        "발급번호로 찾아서 신청인이랑 생일 채워줘", docs, view, choose=first_option(asked)
+    )
+    assert set(result.fields) == {("성명", "신청인", "synonym"), ("생년월일", "생일", "synonym")}
+    assert asked == []
 
 
 def test_two_candidates_in_one_synonym_group_go_to_the_model(tmp_path):
@@ -1140,20 +1161,30 @@ def test_a_synonym_pair_still_needs_matching_value_shapes(tmp_path):
     assert result.fields == ()
 
 
-def test_a_request_word_in_the_synonym_table_points_to_its_column(setup):
-    """요청의 '생일'·'직책'처럼 표에 든 말은 모델이 '없음'이라 해도 그 열을 채우라는 말로 읽는다(DIF-055)."""
-    result = interpret_with(
-        setup, "이름 기준으로 직책이랑 이수시간 채워 주시면 돼요", {"이수시간": "채움"}
-    )
-    assert ("직위", "직급", "synonym") in result.fields and "직책" not in result.unread
+def test_a_request_word_in_the_synonym_table_is_read_like_a_name(birth_setup):
+    """요청의 '이름'은 동의어표로 신청인 열을 가리키고, 채우라는 뜻인지는 모델의 역할 판단으로 정한다(검수 M1)."""
+    _, docs, view = birth_setup
+    request = "발급번호 기준으로 이름이랑 이수시간 채워 주시면 돼요"
+    filled = interpret(request, docs, view, ask_many=reads({"이수시간": "채움", "신청인": "채움"}))
+    assert ("성명", "신청인", "synonym") in filled.fields
+    unsure = interpret(request, docs, view, ask_many=reads({"이수시간": "채움"}))
+    assert all(c != "신청인" for _, c, _ in unsure.fields) and "이름" in unsure.unread
 
 
-def test_a_request_word_followed_by_a_skip_is_not_filled(setup):
-    """'직책은 빼고'처럼 빼기 표현이 붙은 말은 동의어표로 열을 더하지 않는다."""
-    result = interpret_with(
-        setup, "이름 기준으로 이수시간 채우고 직책은 빼고요", {"이수시간": "채움"}
-    )
-    assert all(c != "직급" for _, c, _ in result.fields)
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 이수시간 채우고 이름이랑 이메일은 빼 주세요",
+        "발급번호 기준으로 이수시간 채우고 이름은 이번엔 놔두고요",
+        "발급번호 기준으로 이수시간 채우고 이름 채우는 건 다음 주에요",
+    ],
+)
+def test_a_request_word_followed_by_a_skip_is_not_filled(birth_setup, request_text):
+    """같은 마디에 빼기·미루기 표현이 있는 말은 모델이 채우라고 해도 그 열을 채우지 않는다(검수 M1)."""
+    _, docs, view = birth_setup
+    reader = reads({"이수시간": "채움", "신청인": "채움"})
+    result = interpret(request_text, docs, view, ask_many=reader)
+    assert all(c != "신청인" for _, c, _ in result.fields)
 
 
 @pytest.mark.parametrize(
@@ -1163,7 +1194,19 @@ def test_a_request_word_followed_by_a_skip_is_not_filled(setup):
         ("이름 기준으로 이수시간 채워 줄 수 있어?", "fill"),
         ("이름 기준으로 이수시간 입력했어?", None),
         ("이름 기준으로 이수시간 맞는지 확인해 줄래?", "check"),
+        ("이름 기준으로 이수시간 입력했는지 봐 줄래?", None),
     ],
 )
 def test_polite_requests_ending_in_a_question_mark_are_requests(setup, request_text, expected):
     assert run(setup, request_text).work_type == expected
+
+
+def test_a_synonym_needs_a_single_candidate_in_both_directions(tmp_path):
+    """문서에 신청인(보호자)과 대상자명이 함께 있으면 '신청인 채워줘'도 성명 열에 표로 짓지 않는다(검수 M3)."""
+    rows = [("발급번호", "A-01"), ("신청인", "보호자"), ("대상자명", "본인"), ("이수시간", "12")]
+    body = table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
+    sheet = [["발급번호", "성명", "이수시간"], ["A-01", None, None]]
+    docs = [["<hp:p><hp:run>" + body + "</hp:run></hp:p>"]]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("발급번호 기준으로 신청인 채워줘", documents, view)
+    assert all(src != "synonym" for _, _, src in result.fields)

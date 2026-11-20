@@ -68,12 +68,9 @@ def test_model_errors_leave_that_pair_out_and_continue(files):
     prepared = prepare(
         "이름 기준으로 직급이랑 이수시간 채워줘", sources, target, output_path=out, choose=broken
     )
-    # 직위→직급은 동의어표로 지어져 모델이 고장 나도 채운다(DIF-055). 모델 오류는 그대로 계속 진행한다
     assert prepared.plan is not None
-    assert [f.target_column for f in prepared.plan.rule.fields if f.target_column] == [
-        "이수시간",
-        "직급",
-    ]
+    assert [f.target_column for f in prepared.plan.rule.fields if f.target_column] == ["이수시간"]
+    assert any("직급" in w for w in prepared.warnings)
 
 
 def test_a_column_the_model_picked_is_filled_and_marked_with_examples(files):
