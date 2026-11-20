@@ -26,12 +26,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..ai import LocalModel, ai_status
+from ..ai import LocalModel, ai_status, stop_all
 from ..errors import ServiceError
 from ..manual import KINDS
 from ..rules import SKIP, RuleStore
 from ..service import POLICY_CHOICES, Prepared, commit, examples, prepare
-from .jobs import Job
+from .jobs import Cancelled, Job
 from .theme import STYLE
 
 CHOICE_TEXT = {
@@ -295,6 +295,18 @@ class FlowWindow(QMainWindow):
         request, sources, target = self.request.text().strip(), list(self.sources), self.target
         answers, choose, ask_many = tuple(self.answers), self.choose, self.ask_many
 
+        def guarded(job: Job, call):
+            """취소(창 닫기) 뒤에는 모델을 더 부르지 않는다."""
+            if call is None:
+                return None
+
+            def run(*args):
+                if job.stop.is_set():
+                    raise Cancelled
+                return call(*args)
+
+            return run
+
         def work(job: Job):
             try:
                 return prepare(
@@ -302,8 +314,8 @@ class FlowWindow(QMainWindow):
                     sources,
                     target,
                     answers=answers,
-                    choose=choose,
-                    ask_many=ask_many,
+                    choose=guarded(job, choose),
+                    ask_many=guarded(job, ask_many),
                     progress=lambda _stage, done, total: job.signals.progress.emit(done, total, ""),
                     cancel=job.stop,
                 )
@@ -384,11 +396,8 @@ class FlowWindow(QMainWindow):
     def show_question(self, question) -> None:
         _clear(self.choice_row)
         if not question.choices and question.slot not in POLICY_CHOICES:
-            # 버튼으로 답할 수 없는 질문(어느 항목을 어느 열에). 이 화면에는 직접 선택이 아직 없다
-            self.question_text.setText(
-                "어느 항목을 어느 열에 넣을지 정하지 못했습니다. 요청에 취합표의 열 이름을 그대로 넣어 "
-                "다시 [미리보기]를 누르세요. 예: ‘이름 기준으로 직급이랑 이수시간 채워줘’"
-            )
+            # 버튼으로 답할 수 없는 질문: 서비스 문구(로컬 AI 실패 안내 포함)를 그대로 보이고 되돌릴 길만 준다
+            self.question_text.setText(question.text)
             if self.answers:
                 self.choice_row.addWidget(_button("답과 빼기 모두 취소", self.restart))
             self.choice_row.addStretch()
@@ -410,14 +419,20 @@ class FlowWindow(QMainWindow):
         self.question_box.show()
 
     def answer(self, slot: str, value: str) -> None:
+        if self.busy:
+            return
         self.answers.append((slot, value))
         self.preview()
 
     def restart(self) -> None:
+        if self.busy:
+            return
         self.answers.clear()
         self.preview()
 
     def drop(self, field: str) -> None:
+        if self.busy:
+            return
         self.answers.append(("drop_field", field))
         self.preview()
 
@@ -495,5 +510,7 @@ class FlowWindow(QMainWindow):
             self.save_button.setEnabled(True)
 
     def cancel(self) -> None:
+        """창 닫기: 작업을 멈추고 도는 로컬 AI 프로세스를 끝낸다(질문당 최대 60초를 기다리지 않는다)."""
         if self.job is not None:
             self.job.stop.set()
+        stop_all()

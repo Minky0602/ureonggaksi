@@ -41,7 +41,7 @@ class Question:
     slot: str
     text: str
     examples: tuple[str, ...]
-    choices: tuple[str, ...]  # 비면 버튼 없이 '자세히'의 직접 선택으로 안내한다
+    choices: tuple[str, ...]  # 비면 버튼 없이 요청을 고쳐 다시 하라고 안내한다
     affects: int  # 이 답으로 정해지는 칸 수. 규칙이 서지 않는 질문은 0
 
 
@@ -193,7 +193,7 @@ def _rule_question(slot: str, options: tuple[str, ...]) -> Question:
         )
     return Question(
         slot,
-        "어느 항목을 어느 열에 넣을지 정하지 못했습니다. '자세히'에서 직접 골라 주세요.",
+        "어느 항목을 어느 열에 넣을지 정하지 못했습니다. 요청에 취합표의 열 이름을 그대로 넣어 다시 해 주세요.",
         (),
         (),
         0,
@@ -368,11 +368,11 @@ def prepare(
             ):  # 건너뛰었거나 답으로 정해지지 않았다: 같은 질문을 되풀이하지 않는다
                 raise ServiceError(
                     "RULE_INVALID",
-                    "이 질문은 답으로 정할 수 없습니다. '자세히'에서 직접 지정하세요.",
+                    "이 질문은 답으로 정할 수 없습니다. 요청을 고쳐 다시 해 주세요.",
                 )
             if (
                 slot == "key_column"
-            ):  # 답으로 정해지는 열만 선택지로 준다(검수 M-a). 없으면 '자세히'로 안내
+            ):  # 답으로 정해지는 열만 선택지로 준다(검수 M-a). 없으면 요청을 고치라고 안내
                 options = tuple(c for c in options if _key_field_for(result, view, c))
                 return _asking(request, answers, inputs, _key_question(result, view, options))
             question = _rule_question(slot, options)
@@ -391,7 +391,7 @@ def prepare(
         if result.unread:  # 모델이 열과 잇지 못한 말. 빠진 항목일 수 있다(2차 M-1)
             words = "·".join(f"‘{w}’" for w in result.unread)
             warnings.append(
-                f"요청의 {words}은(는) 어느 열로도 정하지 못했습니다. 빠진 항목이 있으면 '자세히'에서 고르세요."
+                f"요청의 {words}은(는) 어느 열로도 정하지 못했습니다. 빠진 항목이 있으면 요청에 열 이름으로 적어 주세요."
             )
         warnings += [f"‘{f}’ → {c} 열은 빼서 비워 둡니다." for f, c, _ in removed]
         warnings += [  # 뺄 짝이 없는 이름: 뺐다고 믿지 않게 알린다(검수 L1)

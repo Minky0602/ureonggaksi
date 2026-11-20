@@ -131,3 +131,33 @@ def test_ask_fields_reports_cut_or_non_object_answers(tmp_path, mode):
 def test_ask_fields_drops_names_and_answers_outside_the_lists(tmp_path):
     model, _ = fields_model(tmp_path, "outside")
     assert model.ask_fields("q", {"[이름] 직급": ("채움", "제외")}) == {}
+
+
+def test_stop_all_ends_a_running_model_call_quickly(tmp_path):
+    """창을 닫으면 도는 모델 프로세스를 끝내 질문당 최대 60초를 기다리지 않는다(화면 검수 M2)."""
+    import threading
+    import time
+
+    from ureonggaksi.ai import stop_all
+
+    script = tmp_path / "slow.py"
+    script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"GGUF")
+    slow = LocalModel((sys.executable, "-I", str(script)), model, 60)
+    outcome = []
+
+    def call():
+        try:
+            slow.choose("q", ("a", "없음"))
+        except ServiceError as error:
+            outcome.append(error.code)
+
+    worker = threading.Thread(target=call)
+    started = time.monotonic()
+    worker.start()
+    time.sleep(1.0)
+    stop_all()
+    worker.join(10)
+    assert not worker.is_alive() and outcome == ["AI_UNAVAILABLE"]
+    assert time.monotonic() - started < 10
