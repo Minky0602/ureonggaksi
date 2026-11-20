@@ -50,12 +50,12 @@ def main(argv=None):
     from PySide6.QtCore import QCoreApplication, QEvent, QTimer
     from PySide6.QtWidgets import QApplication
 
-    from .ui.window import MainWindow
+    from .ui.flow import FlowWindow
 
     app = QApplication(sys.argv[:1])
     app.setApplicationName("우렁각시")
     app.setOrganizationName("ureonggaksi")
-    window = MainWindow()
+    window = FlowWindow()
     window.show()
     if args.smoke_test:
 

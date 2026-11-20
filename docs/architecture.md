@@ -60,7 +60,7 @@ flowchart LR
 | `manual.py` | 6.3절 소명 종류·문장 틀을 데이터로. `manual_items`가 화면과 확인필요 파일이 함께 쓰는 목록을 만든다 |
 | `storage.py` | 로컬 경로 검사와 원자적 저장 |
 | `offline.py` | 파이썬 네트워크 차단(audit hook) |
-| `ui/` | PySide6 화면, 작업 스레드, 대화상자 |
+| `ui/` | PySide6 화면. `flow.py`가 주 화면(파일 → 한 줄 요청 → 미리보기 → [저장])이고 `prepare`·`commit`만 부른다. 작업은 `jobs.Job`(스레드 풀)으로 돌린다. `window.py`는 이전 프로토타입(블록 선택 → 새 XLSX)으로 진입점에서 뺐다 |
 | `__main__.py` | 화면과 명령행 진입점. 시작할 때 네트워크를 막는다 |
 
 ### 3.2 객체
