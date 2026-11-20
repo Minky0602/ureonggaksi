@@ -169,7 +169,10 @@ def test_roster_table_reads_every_participant(tmp_path):
         choose=picks({"부서": "소속부서", "참석일": "참석일자"}),
     )
     assert result.record.kind == "table_rows" and result.key == ("성명", "이름")
-    assert set(result.fields) == {("부서", "소속부서", "synonym"), ("참석일", "참석일자", "model")}
+    assert set(result.fields) == {
+        ("부서", "소속부서", "synonym"),
+        ("참석일", "참석일자", "synonym"),
+    }
     plan = analyze(inputs, build_rule(result, view))
     done = sorted(i.target_ref for i in plan.items if i.area == "done")
     assert done == ["B2", "B3", "B4", "C2", "C3", "C4"]
@@ -1074,10 +1077,10 @@ def test_words_beyond_the_model_limit_are_warned_not_dropped(setup):
     """3차 M3: 모델에 묻는 모르는 말은 8개까지다. 넘친 말은 unread로 남긴다."""
     request = (
         "이름 기준으로 이수시간 채워 주시면 정말 너무너무 감사하겠습니다 그리고 혹시 가능하시다면 "
-        "오늘 안으로 직책도 부탁드려요"
+        "오늘 안으로 담당업무도 부탁드려요"
     )
     result = interpret_with(setup, request, {"이수시간": "채움"})
-    assert "직책" in result.unread
+    assert "담당업무" in result.unread
 
 
 @pytest.mark.parametrize(
@@ -1135,3 +1138,32 @@ def test_a_synonym_pair_still_needs_matching_value_shapes(tmp_path):
     _, documents, view = build(tmp_path, docs, sheet, "명단")
     result = interpret("발급번호 기준으로 휴대폰 채워줘", documents, view)
     assert result.fields == ()
+
+
+def test_a_request_word_in_the_synonym_table_points_to_its_column(setup):
+    """요청의 '생일'·'직책'처럼 표에 든 말은 모델이 '없음'이라 해도 그 열을 채우라는 말로 읽는다(DIF-055)."""
+    result = interpret_with(
+        setup, "이름 기준으로 직책이랑 이수시간 채워 주시면 돼요", {"이수시간": "채움"}
+    )
+    assert ("직위", "직급", "synonym") in result.fields and "직책" not in result.unread
+
+
+def test_a_request_word_followed_by_a_skip_is_not_filled(setup):
+    """'직책은 빼고'처럼 빼기 표현이 붙은 말은 동의어표로 열을 더하지 않는다."""
+    result = interpret_with(
+        setup, "이름 기준으로 이수시간 채우고 직책은 빼고요", {"이수시간": "채움"}
+    )
+    assert all(c != "직급" for _, c, _ in result.fields)
+
+
+@pytest.mark.parametrize(
+    "request_text, expected",
+    [
+        ("이름 기준으로 이수시간 넣어 줄래?", "fill"),
+        ("이름 기준으로 이수시간 채워 줄 수 있어?", "fill"),
+        ("이름 기준으로 이수시간 입력했어?", None),
+        ("이름 기준으로 이수시간 맞는지 확인해 줄래?", "check"),
+    ],
+)
+def test_polite_requests_ending_in_a_question_mark_are_requests(setup, request_text, expected):
+    assert run(setup, request_text).work_type == expected

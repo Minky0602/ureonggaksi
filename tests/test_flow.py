@@ -125,8 +125,11 @@ def test_a_failing_local_ai_is_reported(window, app):
     def broken(prompt, options):
         raise ServiceError("AI_UNAVAILABLE", "로컬 AI 실행이 실패했습니다(종료 코드 1).")
 
-    window.choose = broken
-    ask(window, app, "이름 기준으로 직급이랑 이수시간 채워줘")
+    def broken_reader(prompt, fields):
+        raise ServiceError("AI_UNAVAILABLE", "로컬 AI 실행이 실패했습니다(종료 코드 1).")
+
+    window.choose, window.ask_many = broken, broken_reader
+    ask(window, app, "이름 기준으로 이수시간 채워 주세요 ㅎㅎ")  # 말투 해석은 늘 모델을 부른다
     shown = window.warnings.text() + window.question_text.text()
     assert "로컬 AI를 쓰지 못해" in shown or "로컬 AI를 쓰지 못했습니다" in shown
 

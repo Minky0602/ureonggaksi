@@ -125,13 +125,29 @@ def _norm(text: str) -> str:
 _GROUP_OF = {normalized_label(word): i for i, group in enumerate(GROUPS) for word in group}
 
 
+def _stem(name: str) -> str:
+    """끝의 '명'·'일자'만 다른 이름을 같게 본다(사업장명=사업장, 참석일자=참석일). 두 글자 이름(성명)은 그대로."""
+    text = re.sub(r"일자$", "일", _norm(name))
+    return re.sub(r"(?<=..)명$", "", text)
+
+
 def _synonym(name: str, pool: tuple[str, ...]) -> str | None:
-    """name과 같은 동의어 묶음에 든 후보가 pool에 하나뿐이면 그것. 없거나 둘 이상이면 None(모델에 넘긴다)."""
-    group = _GROUP_OF.get(_norm(name))
-    if group is None:
-        return None
-    found = [p for p in pool if _GROUP_OF.get(_norm(p)) == group and _norm(p) != _norm(name)]
+    """name과 같은 동의어 묶음에 들었거나 끝의 '명'·'일자'만 다른 후보가 pool에 하나뿐이면 그것.
+    없거나 둘 이상이면 None(모델에 넘긴다)."""
+    group, stem = _GROUP_OF.get(_norm(name)), _stem(name)
+    found = [
+        p
+        for p in pool
+        if _norm(p) != _norm(name)
+        and ((group is not None and _GROUP_OF.get(_norm(p)) == group) or _stem(p) == stem)
+    ]
     return found[0] if len(found) == 1 else None
+
+
+def _said_to_skip(request: str, word: str) -> bool:
+    """요청에서 그 낱말 바로 뒤에 빼기 표현이 붙었다("생일은 빼고")."""
+    at = request.find(word)
+    return at >= 0 and bool(NEGATED.match(_compact(request[at + len(word) :])))
 
 
 # ---------- 항목 찾기 ----------
@@ -290,9 +306,16 @@ def _roster_fields(documents, section, table, top, names) -> list[FieldCandidate
 # ---------- 요청 읽기 ----------
 
 
+# "넣어 줄래?", "채워 줄 수 있어?": 부탁으로 끝나는 '?'는 묻는 말(검토)이 아니다(DIF-055)
+POLITE_ASK = re.compile(
+    r"(줄래요?|줄\s*수\s*(있어|있어요|있나요|있을까요?)|주실\s*(래요|수\s*있나요)|주시겠어요|주실래요?)\s*\?"
+)
+
+
 def _work_type(request: str) -> str | None:
     """채우기·검토 동사가 하나만 있을 때만 정한다. 하지 않는 채우기("채우지 마")는 채우기가 아니고,
     그것과 다른 채우기가 함께 있으면("직급 채워줘, 이수시간은 안 채워도 돼") 묻는다."""
+    request = POLITE_ASK.sub(" ", request)  # 부탁 어미째 지운다("있어"는 검토 표지이기도 하다)
     negated = bool(FILL_NEGATED.search(request))
     fill = bool(FILL.search(FILL_NEGATED.sub(" ", request)))
     if negated and fill:
@@ -757,6 +780,13 @@ def interpret(
                 raise
             roles, meant, meant_skip, unread = {}, [], [], []
         unread = [*unread, *overflow]
+        # 동의어표: 요청의 모르는 말이 열 하나만 가리키면("이름"→신청인, "생일"→생년월일) 채우라는 말로 더한다.
+        # 모델이 '없음'이라 해도 쓰지만, 빼기 표현이 붙었거나 모델이 그 열을 빼라고 읽었으면 쓰지 않는다(DIF-055)
+        for word in every_word:
+            column = _synonym(word, targets)
+            if column and column not in meant_skip and not _said_to_skip(request, word):
+                meant = list(dict.fromkeys([*meant, column]))
+                unread = [w for w in unread if w != word]
         # 코드가 빼기로 읽은 이름은 모델이 두 번 모두 '채움'이 아닌 같은 답(제외·무관)이면 뺀다. 실제 4B는
         # 뺄 항목을 '무관'으로 답한다(2차 M-2). 답이 어긋나거나 '채움'·'키'면, 또는 같은 열을 채우라고도
         # 빼라고도 읽었으면 짝을 정하지 않고 묻는다(DIF-050 H3·M2)
