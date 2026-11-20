@@ -11,7 +11,7 @@ from pathlib import Path
 from .analyze import Cancel, ChangeItem, Plan, Progress, analyze, manual_items
 from .errors import Pairs, ServiceError
 from .inputs import Inputs, inspect_source, open_inputs
-from .interpret import AskMany, Chooser, build_rule, interpret
+from .interpret import AskMany, Chooser, _same, build_rule, interpret
 from .manual import ManualItem
 from .rules import POLICY_VALUES, SKIP, RuleSet, RuleStore, WorkflowVersion, validate_rule
 from .save import ResultPackage, approve, default_output_path, save_result
@@ -62,7 +62,8 @@ class Prepared:
     )
     # 코드가 확신하지 못한 해석: (종류, 이름, 대상 열). 미리보기에 '확인 필요'로 보인다(DIF-050).
     # pair: 이름은 같고 '채우라는 뜻'을 모델이 읽은 짝(채움) / blank: 어느 열인지 모델이 고른 짝(비워 둠,
-    # 열은 추천) / skip: 빼라는 말로 읽고 비워 둔 이름(이름, ""). 확실한 칸만 채운다(2026-11-20 사용자 결정)
+    # 열은 추천) / skip: 빼라는 말로 읽고 비워 둔 이름(이름, "") / key: 키 질문에 열만 답했는데 값이 맞는
+    # 문서 항목의 이름이 그 열과 다름(문서 항목, 열). 확실한 칸만 채운다(2026-11-20 사용자 결정)
     unsure: tuple[tuple[str, str, str], ...] = ()
 
 
@@ -81,6 +82,9 @@ def describe_rule(rule: RuleSet, view: TargetView, unsure=()) -> str:
     """검증된 규칙에서 문장 틀로 만든 한 줄. AI가 쓴 문장이 아니다. 확신하지 못한 해석에는 '(확인 필요)'."""
     unsure = set(unsure)
     key = f"{rule.target.key_column}(으)로 행을 찾아"
+    by = [n for kind, n, c in unsure if kind == "key" and c == rule.target.key_column]
+    if by:  # 열만 보면 남의 번호(추천인사번)로 찾는 것을 알 수 없다(3차 M1)
+        key = f"{rule.target.key_column}(으)로 행을 찾아(문서의 ‘{by[0]}’ 값으로, 확인 필요)"
     parts = []
     for field in rule.fields:
         if not field.target_column:
@@ -201,8 +205,11 @@ def _apply_answers(result, answers: Pairs, view: TargetView):
     if column and result.key is None and column in view.columns:
         field = _key_field_for(result, view, column)
         if field is not None:
+            # 키를 모를 때 만든 짝 가운데 키 항목·키 열의 짝은 뺀다. 키 열은 이미 값이 있는 열이다(3차 H1)
+            kept = tuple(p for p in result.fields if p[0] != field and p[1] != column)
             result = replace(
                 result,
+                fields=kept,
                 key=(field, column),
                 record=replace(result.record, key_field=field),
                 questions=tuple(q for q in result.questions if q[0] != "key_column"),
@@ -293,7 +300,12 @@ def prepare(
         if not documents:
             raise ServiceError("INPUT_UNSUPPORTED", "읽을 수 있는 원본 문서가 없습니다.")
         result = interpret(request, documents, view, choose=_safe(choose), ask_many=ask_many)
+        unnamed_key = result.key is None
         result = _apply_answers(result, answers, view)
+        # 열만 답한 키의 문서 항목 이름이 열과 다르면(추천인사번 → 사번) 미리보기에도 보인다(3차 M1)
+        answered_key = (
+            [("key", *result.key)] if unnamed_key and result.key and not _same(*result.key) else []
+        )
         # 어느 열인지를 모델이 고른 짝은 쓰지 않고 비워 둔다. 추천으로만 보인다(2026-11-20 사용자 결정)
         guessed = tuple((f, c) for f, c, source in result.fields if source == "model")
         if guessed:
@@ -315,7 +327,16 @@ def prepare(
             ):  # 답으로 정해지는 열만 선택지로 준다(검수 M-a). 없으면 '자세히'로 안내
                 options = tuple(c for c in options if _key_field_for(result, view, c))
                 return _asking(request, answers, inputs, _key_question(result, view, options))
-            return _asking(request, answers, inputs, _rule_question(slot, options))
+            question = _rule_question(slot, options)
+            if (
+                slot == "target_column" and guessed
+            ):  # 남은 짝이 모두 추천이면 그 이름과 추천 열을 보인다(3차 M4)
+                hints = ", ".join(f"‘{f}’(추천: {c} 열)" for f, c in guessed)
+                question = replace(
+                    question,
+                    text=f"어느 열인지 확실한 항목이 없습니다. {hints}. '자세히'에서 직접 지정해 주세요.",
+                )
+            return _asking(request, answers, inputs, question)
         warnings += [f"‘{name}’은(는) 정하지 못해 비워 둡니다." for name in result.excluded]
         if result.unread:  # 모델이 열과 잇지 못한 말. 빠진 항목일 수 있다(2차 M-1)
             words = "·".join(f"‘{w}’" for w in result.unread)
@@ -327,6 +348,7 @@ def prepare(
             for f, c in guessed
         ]
         unsure = (
+            *answered_key,
             *(("pair", f, c) for f, c, source in result.fields if source != "match"),
             *(("blank", f, c) for f, c in guessed),
             *(("skip", name, "") for name in result.skipped),

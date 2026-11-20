@@ -1064,3 +1064,23 @@ def test_a_single_name_with_a_slot_word_is_still_filled(setup):
     """2차 L-4: 'X 칸'은 다른 항목 이름이 없으면 X를 채우라는 말이다."""
     result = run(setup, "이름 기준으로 이수시간 칸 채워줘")
     assert result.fields == (("이수시간", "이수시간", "match"),)
+
+
+def test_words_beyond_the_model_limit_are_warned_not_dropped(setup):
+    """3차 M3: 모델에 묻는 모르는 말은 8개까지다. 넘친 말은 unread로 남긴다."""
+    request = (
+        "이름 기준으로 이수시간 채워 주시면 정말 너무너무 감사하겠습니다 그리고 혹시 가능하시다면 "
+        "오늘 안으로 직책도 부탁드려요"
+    )
+    result = interpret_with(setup, request, {"이수시간": "채움"})
+    assert "직책" in result.unread
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    ["이름 기준으로 직급 비고 부분에 넣어 주세요", "이름 기준으로 직급 비고 자리에 넣어줘"],
+)
+def test_other_place_words_are_pointing_too(setup, request_text):
+    """3차 M2: '부분·자리'도 '칸'처럼 지목이다. 직급을 직급 열에 넣지 않고 묻는다."""
+    result = interpret_with(setup, request_text, {"직급": "채움", "비고": "채움"})
+    assert result.fields == ()

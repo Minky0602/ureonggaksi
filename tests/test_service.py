@@ -366,3 +366,57 @@ def test_words_the_model_could_not_place_are_warned(files):
         ask_many=reader({"이수시간": "채움"}),
     )
     assert any("‘직책’" in w and "잇지 못했습니다" in w for w in prepared.warnings)
+
+
+def test_answering_the_key_drops_the_key_column_from_the_pairs(tmp_path):
+    """3차 H1: 키 열을 채울 항목으로도 말한 요청은 키 질문에 답하면 그 짝을 빼고 계속한다(예외로 죽지 않음)."""
+    sources = []
+    for i, (name, hours) in enumerate([("가나다", "12"), ("라마바", "8"), ("사아자", "4")]):
+        rows = [("성명", name), ("이수시간", hours)]
+        body = table([[cell(k, r, 0), cell(v, r, 1)] for r, (k, v) in enumerate(rows)])
+        sources.append(
+            write_hwpx(tmp_path / f"d{i}.hwpx", ["<hp:p><hp:run>" + body + "</hp:run></hp:p>"])
+        )
+    sheet = [["성명", "이수시간"], ["가나다", None], ["라마바", None], ["사아자", None]]
+    target = write_xlsx(tmp_path / "명단.xlsx", sheet, sheet="명단")
+    out = tmp_path / "out.xlsx"
+    for request in ("성명이랑 이수시간 채워줘", "성명이랑 이수시간 채워 주세요 ㅎㅎ"):
+        asked = prepare(
+            request,
+            sources,
+            target,
+            output_path=out,
+            ask_many=reader({"성명": "채움", "이수시간": "채움"}),
+        )
+        assert asked.question is not None and asked.question.slot == "key_column"
+        answered = prepare(
+            request,
+            sources,
+            target,
+            answers=(("key_column", "성명"),),
+            output_path=out,
+            ask_many=reader({"성명": "채움", "이수시간": "채움"}),
+        )
+        fields = [f.target_column for f in answered.plan.rule.fields if f.target_column]
+        assert fields == ["이수시간"]
+
+
+def test_a_key_answered_ahead_still_shows_its_document_field(tmp_path):
+    """3차 M1: 질문을 보기 전에 답을 준 경로에서도 남의 번호(추천인사번 → 사번)로 찾는 키는 '확인 필요'다."""
+    sources, target, out = _referral_files(tmp_path)
+    by_number = prepare(
+        "이수시간 채워줘", sources, target, answers=(("key_column", "사번"),), output_path=out
+    )
+    assert ("key", "추천인사번", "사번") in by_number.unsure
+    assert "문서의 ‘추천인사번’ 값으로, 확인 필요" in by_number.interpretation
+
+
+def test_when_every_pair_is_only_a_suggestion_the_question_names_it(files):
+    """3차 M4: 짝이 모두 추천이면 막다른 질문 대신 이름과 추천 열을 보인다."""
+    sources, target, out, _ = files
+
+    def knows(prompt, options):
+        return "직위" if "직위" in options else "없음"
+
+    asked = prepare("이름 기준으로 직급 채워줘", sources, target, output_path=out, choose=knows)
+    assert asked.question is not None and "‘직위’(추천: 직급 열)" in asked.question.text

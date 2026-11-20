@@ -69,7 +69,7 @@ SIMPLE_TOKEN = re.compile(
 JOINED = re.compile(r"^(이랑|랑|하고|와|과|,|및|그리고)")  # 나열: 부정이 앞 이름까지 걸린다
 # 이름 바로 뒤의 자리 낱말은 지목이다("B 칸에", "B 빈칸에", "B의 빈칸", "B 칸", "B 표에", PR #18 4차 검수 H).
 # "A를 B …"로 짝이 맞으면 지목대로, 아니면 모두 묻는다
-SLOT = re.compile(r"^의?(빈칸|칸|열|란|셀|표|시트)")
+SLOT = re.compile(r"^의?(빈칸|칸|열|란|셀|표|시트|부분|자리|쪽)")  # '부분·자리·쪽'도 지목(3차 M2)
 # 지목을 확정하는 꼴: 칸 낱말(표·시트 아님) 바로 뒤에 채우기 동사. "칸 기준으로", "현황 시트에"는 지목으로 확정하지 않는다
 POINTED = re.compile(r"^의?(빈칸|칸|열|란|셀)(에|에다|에다가)?(채워|넣어|입력|기입|적어|옮겨|써)")
 OBJECT = re.compile(
@@ -379,7 +379,7 @@ def _unknown_words(request: str, names: list[str]) -> list[str]:
             continue
         if len(word) >= 2 and re.search(r"[가-힣A-Za-z]", word):
             words.append(word)
-    return list(dict.fromkeys(words))[:8]
+    return list(dict.fromkeys(words))
 
 
 def _read_request(ask_many: AskMany, request: str, names: list[str], words: list[str], columns):
@@ -555,7 +555,7 @@ def _pick_record(documents, view, mentions):
 
 def _ask_model(choose: Chooser | None, prompt_for, options: tuple[str, ...]) -> str | None:
     """선택지를 한 칸씩 돌려 두 번 묻는다. 같은 답이거나 두 번째가 '없음'으로 물러서면(선택지 둘 이상) 받고,
-    다른 열로 바뀌면 버린다. 받은 짝은 출처가 match가 아니라 미리보기에 '확인 필요'로 보인다.
+    다른 열로 바뀌면 버린다. 받은 짝은 추천(출처 model)이라 prepare가 쓰지 않고 비워 둔다.
 
     '없음'까지 돌리므로 모든 자리의 선택지가 바뀐다(뒤집기는 가운데 자리가 남는다, PR #18 3차 검수 L1).
     첫 답이 '없음'이거나 목록 밖이면 확정하지 않으므로 두 번째는 묻지 않는다.
@@ -726,7 +726,11 @@ def interpret(
         drop = set(mentioned)
     elif not simple:
         assumed = True
-        words = _unknown_words(request, columns + names)
+        every_word = _unknown_words(request, columns + names)
+        words, overflow = (
+            every_word[:8],
+            every_word[8:],
+        )  # 넘친 말은 묻지 않고 경고로 남긴다(3차 M3)
         targets = tuple(c for c in columns if c != key_column)
         coded_skip = [n for n in skip if n != hint]
         try:
@@ -737,6 +741,7 @@ def interpret(
             if not error.code.startswith("AI_"):
                 raise
             roles, meant, meant_skip, unread = {}, [], [], []
+        unread = [*unread, *overflow]
         # 코드가 빼기로 읽은 이름은 모델이 두 번 모두 '채움'이 아닌 같은 답(제외·무관)이면 뺀다. 실제 4B는
         # 뺄 항목을 '무관'으로 답한다(2차 M-2). 답이 어긋나거나 '채움'·'키'면, 또는 같은 열을 채우라고도
         # 빼라고도 읽었으면 짝을 정하지 않고 묻는다(DIF-050 H3·M2)
