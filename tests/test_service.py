@@ -73,7 +73,8 @@ def test_model_errors_leave_that_pair_out_and_continue(files):
     assert any("직급" in w for w in prepared.warnings)
 
 
-def test_a_model_answer_fills_a_differently_named_pair(files):
+def test_a_column_the_model_picked_is_left_blank_with_its_suggestion(files):
+    """확실한 칸만 채운다(2026-11-20 사용자 결정): 이름이 다른 짝(직위→직급)은 쓰지 않고 추천으로만 보인다."""
     sources, target, out, _ = files
 
     def knows(prompt, options):
@@ -83,7 +84,9 @@ def test_a_model_answer_fills_a_differently_named_pair(files):
         "이름 기준으로 직급이랑 이수시간 채워줘", sources, target, output_path=out, choose=knows
     )
     targets = {f.name: f.target_column for f in prepared.plan.rule.fields if f.target_column}
-    assert targets == {"직위": "직급", "이수시간": "이수시간"}
+    assert targets == {"이수시간": "이수시간"} and ("blank", "직위", "직급") in prepared.unsure
+    assert any("추천: 직급 열" in w for w in prepared.warnings)
+    assert all(i.target_ref[0] != "C" for i in prepared.plan.items if i.area == "done")
 
 
 def test_a_saved_rule_runs_without_interpreting(files):
@@ -212,3 +215,209 @@ def test_a_path_conflict_saves_no_rule(files):
     with pytest.raises(ServiceError):
         commit(prepared, store)
     assert store.list() == () and out.read_bytes() == b"someone else"
+
+
+# ---------- 모르는 말이 섞인 요청: 모델이 읽고 '확인 필요'로 표시(2026-11-18) ----------
+
+
+def reader(roles, meant=None):
+    """가짜 ask_many: 이름 역할과 모르는 말이 뜻하는 '열/역할'을 순서와 무관하게 같은 답으로 준다."""
+
+    def ask(prompt, fields):
+        out = {}
+        for key, options in fields.items():
+            name = key.split("] ", 1)[1]
+            answer = (
+                roles.get(name) if key.startswith("[이름]") else (meant or {}).get(name, "없음")
+            )
+            if answer in options:
+                out[key] = answer
+        return out
+
+    return ask
+
+
+def test_natural_wording_is_read_by_the_model_and_marked_unsure(files):
+    sources, target, out, _ = files
+    prepared = prepare(
+        "신청서 보고 이름 기준으로 이수시간 채워 주시면 돼요",
+        sources,
+        target,
+        output_path=out,
+        ask_many=reader({"이수시간": "채움"}),
+    )
+    assert prepared.plan is not None and ("pair", "이수시간", "이수시간") in prepared.unsure
+    assert "(확인 필요)" in prepared.interpretation
+
+
+def test_a_synonym_word_is_only_a_suggestion(files):
+    """'직책'이 직급을 가리킨다고 모델이 읽어도 그 열은 비워 두고 추천으로 보인다."""
+    sources, target, out, _ = files
+
+    def knows(prompt, options):
+        return "직위" if "직위" in options else "없음"
+
+    prepared = prepare(
+        "이름 기준으로 직책이랑 이수시간 채워 주시면 돼요",
+        sources,
+        target,
+        output_path=out,
+        choose=knows,
+        ask_many=reader({"이수시간": "채움"}, {"직책": "직급/채움"}),
+    )
+    targets = {f.name: f.target_column for f in prepared.plan.rule.fields if f.target_column}
+    assert targets == {"이수시간": "이수시간"}
+    assert ("pair", "이수시간", "이수시간") in prepared.unsure
+    assert ("blank", "직위", "직급") in prepared.unsure
+
+
+def test_model_exclusion_wins_and_model_errors_fall_back_to_asking(files):
+    sources, target, out, _ = files
+    request = "이름 기준으로 이수시간 채우고 직급은 현행 유지"
+    excluded = prepare(
+        request,
+        sources,
+        target,
+        output_path=out,
+        ask_many=reader({"이수시간": "채움", "직급": "제외"}),
+    )
+    assert [f.target_column for f in excluded.plan.rule.fields if f.target_column] == ["이수시간"]
+    assert ("skip", "직급", "") in excluded.unsure and "빼라는 말로 읽고" in excluded.interpretation
+    assert not any("직급" in w for w in excluded.warnings)
+
+    def broken(prompt, fields):
+        raise ServiceError("AI_TIMEOUT", "시간 초과")
+
+    fallback = prepare(request, sources, target, output_path=out, ask_many=broken)
+    assert fallback.plan is None and fallback.question is not None
+
+
+def test_unsure_pair_blank_and_exclusion_are_all_shown(files, capsys):
+    """채운 추정 짝·비워 둔 짝·빼기로 읽은 이름이 해석 문장과 CLI에 보인다."""
+    from ureonggaksi.cli import _print_preview
+
+    sources, target, out, _ = files
+
+    def knows(prompt, options):
+        return "직위" if "직위" in options else "없음"
+
+    skipped = prepare(
+        "이름 기준으로 이수시간 채우고 직급은 현행 유지",
+        sources,
+        target,
+        output_path=out,
+        ask_many=reader({"이수시간": "채움", "직급": "제외"}),
+    )
+    blank = prepare(
+        "이름 기준으로 직급이랑 이수시간 채워줘", sources, target, output_path=out, choose=knows
+    )
+    assert [k for k, _, _ in skipped.unsure] == ["pair", "skip"]
+    assert "(확인 필요)" in skipped.interpretation and "빼라는 말로" in skipped.interpretation
+    assert "확실하지 않아 비워 둠" in blank.interpretation
+    _print_preview(skipped)
+    _print_preview(blank)
+    shown = [x for x in capsys.readouterr().out.splitlines() if x.startswith("확인 필요:")]
+    assert len(shown) == 3 and "추천: 직급 열" in shown[-1]
+
+
+def _referral_files(tmp_path):
+    """성명 + 추천인사번(다른 사람의 사번). 사번 열과 성명 열이 값 일치 수로 동점이다(2차 H-1)."""
+    people = [("가나다", "S-1002", "12"), ("라마바", "S-1003", "8"), ("사아자", "S-1001", "4")]
+    sources = []
+    for i, (name, referrer, hours) in enumerate(people):
+        rows = [("성명", name), ("추천인사번", referrer), ("이수시간", hours)]
+        body = table([[cell(k, r, 0), cell(v, r, 1)] for r, (k, v) in enumerate(rows)])
+        sources.append(
+            write_hwpx(tmp_path / f"r{i}.hwpx", ["<hp:p><hp:run>" + body + "</hp:run></hp:p>"])
+        )
+    sheet = [
+        ["사번", "성명", "이수시간"],
+        ["S-1001", "가나다", None],
+        ["S-1002", "라마바", None],
+        ["S-1003", "사아자", None],
+    ]
+    return sources, write_xlsx(tmp_path / "명단.xlsx", sheet, sheet="명단"), tmp_path / "out.xlsx"
+
+
+def test_an_unnamed_key_is_asked_and_the_question_shows_the_matching_fields(tmp_path):
+    """키는 추정하지 않고 묻는다. 질문에 열마다 값이 맞는 문서 항목을 보여 남의 번호를 고르지 않게 한다(H-1)."""
+    sources, target, out = _referral_files(tmp_path)
+    asked = prepare("이수시간 채워줘", sources, target, output_path=out)
+    question = asked.question
+    assert question is not None and question.slot == "key_column"
+    assert (
+        "사번은(는) 문서의 ‘추천인사번’" in question.text
+        and "성명은(는) 문서의 ‘성명’" in question.text
+    )
+    by_name = prepare(
+        "이수시간 채워줘", sources, target, answers=(("key_column", "성명"),), output_path=out
+    )
+    assert by_name.plan is not None and by_name.unsure == ()
+
+
+def test_words_the_model_could_not_place_are_warned(files):
+    """2차 M-1: 모델이 열과 잇지 못한 모르는 말은 소리 없이 버리지 않고 경고로 보인다."""
+    sources, target, out, _ = files
+    prepared = prepare(
+        "이름 기준으로 직책이랑 이수시간 채워 주시면 돼요",
+        sources,
+        target,
+        output_path=out,
+        ask_many=reader({"이수시간": "채움"}),
+    )
+    assert any("‘직책’" in w and "정하지 못했습니다" in w for w in prepared.warnings)
+
+
+def test_answering_the_key_drops_the_key_column_from_the_pairs(tmp_path):
+    """3차 H1: 키 열을 채울 항목으로도 말한 요청은 키 질문에 답하면 그 짝을 빼고 계속한다(예외로 죽지 않음)."""
+    sources = []
+    for i, (name, hours) in enumerate([("가나다", "12"), ("라마바", "8"), ("사아자", "4")]):
+        rows = [("성명", name), ("이수시간", hours)]
+        body = table([[cell(k, r, 0), cell(v, r, 1)] for r, (k, v) in enumerate(rows)])
+        sources.append(
+            write_hwpx(tmp_path / f"d{i}.hwpx", ["<hp:p><hp:run>" + body + "</hp:run></hp:p>"])
+        )
+    sheet = [["성명", "이수시간"], ["가나다", None], ["라마바", None], ["사아자", None]]
+    target = write_xlsx(tmp_path / "명단.xlsx", sheet, sheet="명단")
+    out = tmp_path / "out.xlsx"
+    for request in ("성명이랑 이수시간 채워줘", "성명이랑 이수시간 채워 주세요 ㅎㅎ"):
+        asked = prepare(
+            request,
+            sources,
+            target,
+            output_path=out,
+            ask_many=reader({"성명": "채움", "이수시간": "채움"}),
+        )
+        assert asked.question is not None and asked.question.slot == "key_column"
+        answered = prepare(
+            request,
+            sources,
+            target,
+            answers=(("key_column", "성명"),),
+            output_path=out,
+            ask_many=reader({"성명": "채움", "이수시간": "채움"}),
+        )
+        fields = [f.target_column for f in answered.plan.rule.fields if f.target_column]
+        assert fields == ["이수시간"]
+        assert any("‘성명’ 열은 행을 찾는 데" in w for w in answered.warnings)
+
+
+def test_a_key_answered_ahead_still_shows_its_document_field(tmp_path):
+    """3차 M1: 질문을 보기 전에 답을 준 경로에서도 남의 번호(추천인사번 → 사번)로 찾는 키는 '확인 필요'다."""
+    sources, target, out = _referral_files(tmp_path)
+    by_number = prepare(
+        "이수시간 채워줘", sources, target, answers=(("key_column", "사번"),), output_path=out
+    )
+    assert ("key", "추천인사번", "사번") in by_number.unsure
+    assert "문서의 ‘추천인사번’ 값으로, 확인 필요" in by_number.interpretation
+
+
+def test_when_every_pair_is_only_a_suggestion_the_question_names_it(files):
+    """3차 M4: 짝이 모두 추천이면 막다른 질문 대신 이름과 추천 열을 보인다."""
+    sources, target, out, _ = files
+
+    def knows(prompt, options):
+        return "직위" if "직위" in options else "없음"
+
+    asked = prepare("이름 기준으로 직급 채워줘", sources, target, output_path=out, choose=knows)
+    assert asked.question is not None and "‘직위’(추천: 직급 열)" in asked.question.text

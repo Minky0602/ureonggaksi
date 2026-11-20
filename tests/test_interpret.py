@@ -899,3 +899,198 @@ def test_a_column_named_like_an_allowed_word_is_not_a_name(tmp_path):
 def test_topic_marked_name_followed_by_another_name_is_asked(setup):
     """'비고는 직급 채워줘'는 대응을 말한 것일 수 있다(6차 M02)."""
     assert run(setup, "발급번호로 찾아서 비고는 이수시간 채워줘").fields == ()
+
+
+# ---------- 모르는 말이 섞인 요청: 모델이 읽고 '확인 필요'로 표시(DIF-048), 1차 검수 회귀(DIF-050) ----------
+
+
+def reads(roles, meant=None):
+    """가짜 ask_many: 이름 역할과 모르는 말의 '열/역할'을 선택지 순서와 무관하게 같은 답으로 준다."""
+
+    def ask(prompt, fields):
+        out = {}
+        for key, options in fields.items():
+            name = key.split("] ", 1)[1]
+            answer = roles.get(name) if key.startswith("[이름]") else (meant or {}).get(name)
+            if answer in options:
+                out[key] = answer
+        return out
+
+    return ask
+
+
+def interpret_with(setup, request, roles, meant=None, choose=None):
+    _, docs, view = setup
+    return interpret(request, docs, view, choose=choose, ask_many=reads(roles, meant))
+
+
+def _referral(name, referrer_id, hours):
+    rows = [("성명", name), ("추천인사번", referrer_id), ("이수시간", hours)]
+    body = table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
+    return ["<hp:p><hp:run>" + body + "</hp:run></hp:p>"]
+
+
+def test_number_like_column_does_not_break_a_key_tie(tmp_path):
+    """H1: 남의 사번(추천인사번)이 사번 열과 맞아도 성명과 동점이면 묻는다. 값 모양으로 가르지 않는다."""
+    people = [("가나다", "S-1002", "12"), ("라마바", "S-1003", "8"), ("사아자", "S-1001", "4")]
+    sheet = [
+        ["사번", "성명", "이수시간"],
+        ["S-1001", "가나다", None],
+        ["S-1002", "라마바", None],
+        ["S-1003", "사아자", None],
+    ]
+    _, documents, view = build(tmp_path, [_referral(*p) for p in people], sheet, "명단")
+    for ask_many in (None, reads({"이수시간": "채움"})):
+        result = interpret("이수시간 채워 주시면 돼요", documents, view, ask_many=ask_many)
+        assert result.key is None and build_rule(result, view) is None
+
+
+def test_an_unnamed_key_is_asked_with_the_best_match_first(tmp_path):
+    """확실한 칸만 채운다: 말하지 않은 키는 값이 뚜렷이 맞아도 확정하지 않고 첫 선택지로 묻는다."""
+    people = [("가나다", "S-1", "12"), ("라마바", "S-2", "8"), ("사아자", "S-3", "4")]
+    sheet = [["이수시간", "성명"], [None, "가나다"], [None, "라마바"], [None, "사아자"]]
+    _, documents, view = build(tmp_path, [_referral(*p) for p in people], sheet, "명단")
+    assert interpret("성명 기준으로 이수시간 채워줘", documents, view).key == ("성명", "성명")
+    guessed = interpret("이수시간 채워줘", documents, view)
+    assert guessed.key is None and dict(guessed.questions)["key_column"][0] == "성명"
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    ["이름 기준으로 직급 비고 칸에 채워줘", "이름 기준으로 직급 비고칸에 넣어줘"],
+)
+def test_a_slot_after_another_name_is_pointing_and_is_asked(setup, request_text):
+    """H2: '직급 비고 칸에'는 직급을 비고에 넣으라는 말일 수 있다. 직급 열에 넣지 않고 묻는다."""
+    for ask_many in (None, reads({"직급": "채움", "비고": "채움"})):
+        _, docs, view = setup
+        result = interpret(request_text, docs, view, ask_many=ask_many)
+        assert result.fields == () and build_rule(result, view) is None
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "이름 기준으로 직급 말고도 이수시간도 채워줘",
+        "이름 기준으로 직급 비워진 칸이랑 이수시간 채워줘",
+    ],
+)
+def test_a_code_negation_the_model_does_not_share_is_asked(setup, request_text):
+    """H3: 코드가 빼기로 읽었는데 모델은 채우라고 읽으면 소리 없이 빼지 않고 묻는다."""
+    result = interpret_with(setup, request_text, {"직급": "채움", "이수시간": "채움"})
+    assert result.fields == () and result.skipped == ()
+
+
+def test_an_agreed_exclusion_is_reported_as_unsure_not_as_unresolved(setup):
+    """H3·M3: 코드와 모델이 모두 빼라고 읽으면 빼되, '확인 필요'로 보이게 skipped에 남긴다."""
+    result = interpret_with(
+        setup,
+        "이름 기준으로 직급 말고 이수시간 채워 주세요 ㅎㅎ",
+        {"직급": "제외", "이수시간": "채움"},
+    )
+    assert [(f, c) for f, c, _ in result.fields] == [("이수시간", "이수시간")]
+    assert result.skipped == ("직급",) and "직급" not in result.excluded
+    model_only = interpret_with(
+        setup,
+        "이름 기준으로 직급이랑 이수시간 채우고 직급은 현행 유지",
+        {"직급": "제외", "이수시간": "채움"},
+    )
+    assert model_only.skipped == ("직급",) and all(c != "직급" for _, c, _ in model_only.fields)
+
+
+def test_a_synonym_the_user_excludes_is_not_filled(setup):
+    """M2: 모르는 말 '직책'이 직급을 가리켜도 빼라는 말이면 채우지 않는다. 채우라는 말과 겹치면 묻는다."""
+    excluded = interpret_with(
+        setup,
+        "이름 기준으로 이수시간 채우고 직책은 이번엔 놔두세요",
+        {"이수시간": "채움"},
+        {"직책": "직급/제외"},
+        choose=picks({"직급": "직위"}),
+    )
+    assert all(c != "직급" for _, c, _ in excluded.fields) and "직급" in excluded.skipped
+    clash = interpret_with(
+        setup,
+        "이름 기준으로 직급이랑 이수시간 채우고 직책은 이번엔 놔두세요",
+        {"직급": "채움", "이수시간": "채움"},
+        {"직책": "직급/제외"},
+    )
+    assert clash.fields == ()
+
+
+def test_model_paths_are_marked_and_answers_outside_the_lists_are_ignored(setup):
+    """M6: 계약을 어긴 답(목록 밖 이름·열)은 버린다. 이 경로의 짝은 모두 assumed다."""
+
+    def rogue(prompt, fields):
+        return {
+            "[이름] 없는이름": "채움",
+            **dict.fromkeys(fields, "없는열"),
+            "[이름] 이수시간": "채움",
+        }
+
+    _, docs, view = setup
+    result = interpret("이름 기준으로 이수시간 채워 주시면 돼요", docs, view, ask_many=rogue)
+    assert [(f, c, s) for f, c, s in result.fields] == [("이수시간", "이수시간", "assumed")]
+
+
+def test_unknown_words_leave_out_verbs_the_code_already_knows(setup):
+    """M4: '채우고'·'놔두세'처럼 코드가 아는 동사는 열 이름의 다른 말로 묻지 않는다(키 낭비·답 잘림)."""
+    from ureonggaksi.interpret import _unknown_words
+
+    _, _, view = setup
+    words = _unknown_words(
+        "이름 기준으로 이수시간 채우고 직책은 이번엔 놔두세요", list(view.columns)
+    )
+    assert "직책" in words and not {"채우고", "놔두세", "놔두세요"} & set(words)
+
+
+@pytest.mark.parametrize(
+    "request_text", ["이름 기준으로 이수시간 입력했어?", "이름 기준으로 이수시간 채워졌어?"]
+)
+def test_question_mark_requests_ask_for_the_work_type(setup, request_text):
+    """M1: 묻는 말은 채우기로 읽지 않는다."""
+    assert interpret_with(setup, request_text, {"이수시간": "채움"}).work_type is None
+
+
+def test_a_code_negation_the_model_calls_unrelated_is_skipped_and_marked(setup):
+    """2차 M-2: 실제 4B는 뺄 항목을 '무관'으로 답한다. 코드 빼기 표지와 어긋나지 않으므로 빼고 표시한다."""
+    result = interpret_with(
+        setup,
+        "이름 기준으로 직급은 빼고 이수시간 채워 주시면 돼요",
+        {"직급": "무관", "이수시간": "채움"},
+    )
+    assert result.skipped == ("직급",) and [c for _, c, _ in result.fields] == ["이수시간"]
+
+
+def test_a_single_name_with_a_slot_word_is_still_filled(setup):
+    """2차 L-4: 'X 칸'은 다른 항목 이름이 없으면 X를 채우라는 말이다."""
+    result = run(setup, "이름 기준으로 이수시간 칸 채워줘")
+    assert result.fields == (("이수시간", "이수시간", "match"),)
+
+
+def test_words_beyond_the_model_limit_are_warned_not_dropped(setup):
+    """3차 M3: 모델에 묻는 모르는 말은 8개까지다. 넘친 말은 unread로 남긴다."""
+    request = (
+        "이름 기준으로 이수시간 채워 주시면 정말 너무너무 감사하겠습니다 그리고 혹시 가능하시다면 "
+        "오늘 안으로 직책도 부탁드려요"
+    )
+    result = interpret_with(setup, request, {"이수시간": "채움"})
+    assert "직책" in result.unread
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    ["이름 기준으로 직급 비고 부분에 넣어 주세요", "이름 기준으로 직급 비고 자리에 넣어줘"],
+)
+def test_other_place_words_are_pointing_too(setup, request_text):
+    """3차 M2: '부분·자리'도 '칸'처럼 지목이다. 직급을 직급 열에 넣지 않고 묻는다."""
+    result = interpret_with(setup, request_text, {"직급": "채움", "비고": "채움"})
+    assert result.fields == ()
+
+
+def test_a_place_word_inside_another_word_is_not_pointing(setup):
+    """4차 L1: '부분적으로'는 지목이 아니다."""
+    result = interpret_with(
+        setup,
+        "이름 기준으로 직급 이수시간 부분적으로 채워 주세요",
+        {"직급": "채움", "이수시간": "채움"},
+    )
+    assert result.fields == (("이수시간", "이수시간", "assumed"),)
