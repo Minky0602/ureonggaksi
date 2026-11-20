@@ -1,7 +1,5 @@
 """한 줄 요청 → 미리보기 → [저장] (P04 ③, FR-05·06·14). 합성 자료만 쓴다."""
 
-from dataclasses import replace
-
 import pytest
 from conftest import cell, para, table, write_hwpx, write_xlsx
 
@@ -75,7 +73,8 @@ def test_model_errors_leave_that_pair_out_and_continue(files):
     assert any("직급" in w for w in prepared.warnings)
 
 
-def test_a_model_answer_fills_a_differently_named_pair(files):
+def test_a_column_the_model_picked_is_left_blank_with_its_suggestion(files):
+    """확실한 칸만 채운다(2026-11-20 사용자 결정): 이름이 다른 짝(직위→직급)은 쓰지 않고 추천으로만 보인다."""
     sources, target, out, _ = files
 
     def knows(prompt, options):
@@ -85,7 +84,9 @@ def test_a_model_answer_fills_a_differently_named_pair(files):
         "이름 기준으로 직급이랑 이수시간 채워줘", sources, target, output_path=out, choose=knows
     )
     targets = {f.name: f.target_column for f in prepared.plan.rule.fields if f.target_column}
-    assert targets == {"직위": "직급", "이수시간": "이수시간"}
+    assert targets == {"이수시간": "이수시간"} and ("blank", "직위", "직급") in prepared.unsure
+    assert any("추천: 직급 열" in w for w in prepared.warnings)
+    assert all(i.target_ref[0] != "C" for i in prepared.plan.items if i.area == "done")
 
 
 def test_a_saved_rule_runs_without_interpreting(files):
@@ -249,7 +250,8 @@ def test_natural_wording_is_read_by_the_model_and_marked_unsure(files):
     assert "(확인 필요)" in prepared.interpretation
 
 
-def test_a_synonym_word_brings_in_its_column(files):
+def test_a_synonym_word_is_only_a_suggestion(files):
+    """'직책'이 직급을 가리킨다고 모델이 읽어도 그 열은 비워 두고 추천으로 보인다."""
     sources, target, out, _ = files
 
     def knows(prompt, options):
@@ -264,10 +266,9 @@ def test_a_synonym_word_brings_in_its_column(files):
         ask_many=reader({"이수시간": "채움"}, {"직책": "직급/채움"}),
     )
     targets = {f.name: f.target_column for f in prepared.plan.rule.fields if f.target_column}
-    assert (
-        targets == {"직위": "직급", "이수시간": "이수시간"}
-        and ("pair", "직위", "직급") in prepared.unsure
-    )
+    assert targets == {"이수시간": "이수시간"}
+    assert ("pair", "이수시간", "이수시간") in prepared.unsure
+    assert ("blank", "직위", "직급") in prepared.unsure
 
 
 def test_model_exclusion_wins_and_model_errors_fall_back_to_asking(files):
@@ -291,29 +292,32 @@ def test_model_exclusion_wins_and_model_errors_fall_back_to_asking(files):
     assert fallback.plan is None and fallback.question is not None
 
 
-def test_unsure_key_pair_and_exclusion_are_all_shown(files, capsys):
-    """DIF-050: 짝뿐 아니라 추정한 키와 빼기로 읽은 이름도 해석 문장과 CLI에 '확인 필요'로 보인다."""
+def test_unsure_pair_blank_and_exclusion_are_all_shown(files, capsys):
+    """채운 추정 짝·비워 둔 짝·빼기로 읽은 이름이 해석 문장과 CLI에 보인다."""
     from ureonggaksi.cli import _print_preview
-    from ureonggaksi.service import _full_view, describe_rule
 
     sources, target, out, _ = files
-    prepared = prepare(
+
+    def knows(prompt, options):
+        return "직위" if "직위" in options else "없음"
+
+    skipped = prepare(
         "이름 기준으로 이수시간 채우고 직급은 현행 유지",
         sources,
         target,
         output_path=out,
         ask_many=reader({"이수시간": "채움", "직급": "제외"}),
     )
-    rule = prepared.plan.rule
-    key = ("key", rule.record.key_field, rule.target.key_column)
-    line = describe_rule(rule, _full_view(prepared.inputs, rule), {key, *prepared.unsure})
-    assert (
-        f"(문서의 ‘{rule.record.key_field}’ 값으로, 확인 필요)" in line
-        and "‘직급’은(는) 빼라는" in line
+    blank = prepare(
+        "이름 기준으로 직급이랑 이수시간 채워줘", sources, target, output_path=out, choose=knows
     )
-    _print_preview(replace(prepared, unsure=(key, *prepared.unsure)))
+    assert [k for k, _, _ in skipped.unsure] == ["pair", "skip"]
+    assert "(확인 필요)" in skipped.interpretation and "빼라는 말로" in skipped.interpretation
+    assert "확실하지 않아 비워 둠" in blank.interpretation
+    _print_preview(skipped)
+    _print_preview(blank)
     shown = [x for x in capsys.readouterr().out.splitlines() if x.startswith("확인 필요:")]
-    assert len(shown) == 3 and "값으로 추정" in shown[0] and "빼라는 말로" in shown[-1]
+    assert len(shown) == 3 and "추천: 직급 열" in shown[-1]
 
 
 def _referral_files(tmp_path):
@@ -335,20 +339,20 @@ def _referral_files(tmp_path):
     return sources, write_xlsx(tmp_path / "명단.xlsx", sheet, sheet="명단"), tmp_path / "out.xlsx"
 
 
-def test_a_key_answered_by_column_shows_which_document_field_it_uses(tmp_path):
-    """2차 H-1: 열만 답했는데 코드가 고른 문서 항목 이름이 다르면(추천인사번 → 사번) '확인 필요'로 보인다."""
+def test_an_unnamed_key_is_asked_and_the_question_shows_the_matching_fields(tmp_path):
+    """키는 추정하지 않고 묻는다. 질문에 열마다 값이 맞는 문서 항목을 보여 남의 번호를 고르지 않게 한다(H-1)."""
     sources, target, out = _referral_files(tmp_path)
     asked = prepare("이수시간 채워줘", sources, target, output_path=out)
-    assert asked.question is not None and asked.question.slot == "key_column"
-    by_number = prepare(
-        "이수시간 채워줘", sources, target, answers=(("key_column", "사번"),), output_path=out
+    question = asked.question
+    assert question is not None and question.slot == "key_column"
+    assert (
+        "사번은(는) 문서의 ‘추천인사번’" in question.text
+        and "성명은(는) 문서의 ‘성명’" in question.text
     )
-    assert ("key", "추천인사번", "사번") in by_number.unsure
-    assert "문서의 ‘추천인사번’ 값으로, 확인 필요" in by_number.interpretation
     by_name = prepare(
         "이수시간 채워줘", sources, target, answers=(("key_column", "성명"),), output_path=out
     )
-    assert not any(kind == "key" for kind, _, _ in by_name.unsure)
+    assert by_name.plan is not None and by_name.unsure == ()
 
 
 def test_words_the_model_could_not_place_are_warned(files):

@@ -100,15 +100,15 @@ class Interpretation:
     work_type: str | None
     record: RecordRule
     key: tuple[str, str] | None  # (문서 항목, 대상 열)
-    # (문서 항목, 대상 열, 출처). match: 코드가 확신(같은 이름·정형 지목) / model: 모델이 고른 짝 /
-    # assumed: 모르는 말이 섞인 요청에서 모델이 읽은 짝. match가 아니면 미리보기에 '확인 필요'로 보인다
+    # (문서 항목, 대상 열, 출처). match: 코드가 확신(같은 이름·정형 지목) /
+    # assumed: 이름은 같은데 모르는 말이 섞여 '채우라는 뜻'을 모델이 읽은 짝 → 채우고 '확인 필요' /
+    # model: 어느 열인지를 모델이 고른 짝 → 쓰지 않고 비워 둔다(추천으로만 보인다, 2026-11-20 사용자 결정)
     fields: tuple[tuple[str, str, str], ...]
     questions: tuple[tuple[str, tuple[str, ...]], ...]  # (슬롯, 후보) — 6.2 질문 재료
     excluded: tuple[str, ...] = ()  # 요청했지만 대응 열이 없는 항목·열
     candidates: tuple[
         FieldCandidate, ...
     ] = ()  # 문서에서 찾은 항목들(build_rule이 추출 규칙을 가져간다)
-    key_assumed: bool = False  # 요청에서 말하지 않은 키를 데이터 일치로 추정했다 → '확인 필요'
     skipped: tuple[str, ...] = ()  # 모르는 말이 섞인 요청에서 빼라는 말로 읽은 이름 → '확인 필요'
     unread: tuple[str, ...] = ()  # 모델이 어느 열과도 잇지 못한 모르는 말 → 경고
 
@@ -607,6 +607,7 @@ def interpret(
     # 키: 'X로 찾아·X 기준'으로 말한 이름 → 없으면 엄격한 데이터 일치에서 1위가 뚜렷할 때만.
     # "이름으로 찾아서 이름 말고"처럼 말한 키를 스스로 지웠으면 다른 열을 추정하지 않고 묻는다(2차 R03)
     key = None
+    guess = None  # 말하지 않은 키의 1순위 후보(질문의 첫 선택지)
     hint = next((n for n, after in mentions if KEY_AFTER.match(after)), None)
     named_keys = {n for n, a in found if KEY_AFTER.match(a)}
     # 키를 둘 말했거나("이름 기준 말고 발급번호 기준으로"), 말한 키에 모르는 말이 닿았으면 묻는다(PR #18 H2)
@@ -623,10 +624,11 @@ def interpret(
         if len(picked) == 1:
             key = (picked[0][1], picked[0][2])
     else:  # 키를 말하지 않았다
-        # 1위가 뚜렷할 때만. 값 모양(번호처럼 생긴 열)으로 동점을 가르지 않는다: 남의 사번이 이긴다(DIF-050 H1)
+        # 키는 추정해 확정하지 않고 묻는다(확실한 칸만 채운다, 2026-11-20 사용자 결정). 값 일치 1위가
+        # 뚜렷하면 질문의 첫 선택지로 둔다. 값 모양(번호처럼 생긴 열)으로 동점을 가르지 않는다(DIF-050 H1)
         candidates = _key_candidates(fields, view)
         if candidates and (len(candidates) == 1 or candidates[0][0] > 2 * candidates[1][0]):
-            key = (candidates[0][1], candidates[0][2])
+            guess = candidates[0][2]
     if key is not None:
         # 행 전체를 봤고, 그 열에 값이 맞는 다른 문서 항목이 없을 때만(3차 H1 성명·추천인, 4차 H3 이름·이름)
         rivals = [
@@ -638,7 +640,12 @@ def interpret(
             key = None
     if key is None:
         options = tuple(
-            dict.fromkeys(c[2] for c in _key_candidates(fields, view, named=True, any_hit=True))
+            dict.fromkeys(
+                [
+                    *([guess] if guess else []),
+                    *(c[2] for c in _key_candidates(fields, view, named=True, any_hit=True)),
+                ]
+            )
         )
         questions.append(("key_column", options[:3]))
     key_field, key_column = key if key else (None, None)
@@ -770,7 +777,7 @@ def interpret(
             choose, lambda o, f=field: _column_prompt(request, by_name[f], o, view), options
         )
         if answer:
-            pairs.append((field, answer, "assumed" if assumed else "model"))
+            pairs.append((field, answer, "model"))
     # 문서에 같은 이름 라벨이 있지만 겹쳐서 뺀 열: 답은 그 라벨뿐이라 다른 항목을 고르게 하지 않는다(6차 A01)
     ambiguous = _ambiguous_labels(documents)
     held += [c for c in only_columns if _norm(c) in ambiguous]
@@ -785,7 +792,7 @@ def interpret(
             choose, lambda o, c=column: _field_prompt(request, c, o, by_name, view), options
         )
         if answer:
-            pairs.append((answer, column, "assumed" if assumed else "model"))
+            pairs.append((answer, column, "model"))
 
     # 값 형태가 어긋나는 짝(코드형 값을 숫자 열에)은 확정하지 않는다
     fits = [p for p in pairs if _shape_fits(by_name[p[0]].samples, _column_values(view, p[1]))]
@@ -818,7 +825,6 @@ def interpret(
         tuple(questions),
         excluded,
         tuple(fields),
-        key_assumed=key is not None and hint is None,
         skipped=tuple(skipped),
         unread=tuple(unread),
     )

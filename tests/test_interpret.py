@@ -945,13 +945,14 @@ def test_number_like_column_does_not_break_a_key_tie(tmp_path):
         assert result.key is None and build_rule(result, view) is None
 
 
-def test_only_a_key_the_user_did_not_name_is_marked_assumed(tmp_path):
+def test_an_unnamed_key_is_asked_with_the_best_match_first(tmp_path):
+    """확실한 칸만 채운다: 말하지 않은 키는 값이 뚜렷이 맞아도 확정하지 않고 첫 선택지로 묻는다."""
     people = [("가나다", "S-1", "12"), ("라마바", "S-2", "8"), ("사아자", "S-3", "4")]
-    sheet = [["성명", "이수시간"], ["가나다", None], ["라마바", None], ["사아자", None]]
+    sheet = [["이수시간", "성명"], [None, "가나다"], [None, "라마바"], [None, "사아자"]]
     _, documents, view = build(tmp_path, [_referral(*p) for p in people], sheet, "명단")
-    assert interpret("성명 기준으로 이수시간 채워줘", documents, view).key_assumed is False
+    assert interpret("성명 기준으로 이수시간 채워줘", documents, view).key == ("성명", "성명")
     guessed = interpret("이수시간 채워줘", documents, view)
-    assert guessed.key == ("성명", "성명") and guessed.key_assumed is True
+    assert guessed.key is None and dict(guessed.questions)["key_column"][0] == "성명"
 
 
 @pytest.mark.parametrize(

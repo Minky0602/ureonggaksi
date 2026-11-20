@@ -83,8 +83,8 @@ def _print_preview(prepared: Prepared) -> None:
     for item in prepared.samples:
         print(f"  예: {item.target_ref} ← {item.proposed.value} ({item.field})")
     notes = {
-        "key": "‘{}’로 {} 열의 행을 찾음 (요청에 없어 값으로 추정)",
-        "pair": "‘{}’ → {} 열 (모델이 추정)",
+        "pair": "‘{}’ → {} 열 (채우라는 뜻을 모델이 읽음)",
+        "blank": "‘{}’은(는) 어느 열인지 확실하지 않아 비워 둠 (추천: {} 열)",
         "skip": "‘{}’은(는) 빼라는 말로 읽고 비워 둠{}",
     }
     for kind, name, column in prepared.unsure:
