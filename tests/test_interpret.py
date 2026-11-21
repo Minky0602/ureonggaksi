@@ -1137,6 +1137,26 @@ def test_a_listed_synonym_pairs_without_the_model(birth_setup):
     assert asked == []
 
 
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 생일은 나중에 하고 신청인이랑 이수시간 넣어줘",
+        "발급번호 기준으로 생일은 다음에 하고 신청인이랑 이수시간 넣어줘",
+        "발급번호 기준으로 생일은 미루고 신청인이랑 이수시간 넣어줘",
+        "발급번호 기준으로 생일은 아직 하지 말고 신청인이랑 이수시간 넣어줘",
+    ],
+)
+def test_a_column_put_off_for_later_is_never_filled(birth_setup, request_text):
+    """실제 4B는 '생일은 나중에 하고'의 생일을 '채움'으로 읽었다(DIF-060). 코드가 미루기로 읽은 열은
+    모델이 채우라고 해도 채우지 않는다: 모델이 빼기로 읽으면 빼고, 아니면 묻는다."""
+    _, docs, view = birth_setup
+    for role in ("채움", "무관"):
+        reader = reads({"생일": role, "신청인": "채움", "이수시간": "채움"})
+        result = interpret(request_text, docs, view, ask_many=reader)
+        assert "생일" not in {c for _, c, _ in result.fields}
+    assert "생일" in result.skipped  # '무관'이면 빼라는 말로 정리된다
+
+
 def test_two_candidates_in_one_synonym_group_go_to_the_model(tmp_path):
     """문서에 성명과 신청인명이 함께 있으면 '이름' 열에 어느 것인지 표로 정하지 않고 모델에 묻는다."""
     rows = [("발급번호", "A-01"), ("성명", "가나다"), ("신청인명", "라마바"), ("이수시간", "12")]
