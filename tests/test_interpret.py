@@ -1383,3 +1383,25 @@ def test_fill_everything_needs_the_word_alone_and_no_named_items(setup, request_
 def test_fill_everything_with_unknown_words_and_no_model_fills_nothing(setup):
     result = run(setup, "발급번호 기준으로 문서에 있는 거 전부 넣지 말고 확인만")
     assert result.fields == ()
+
+
+def test_fill_everything_counts_a_name_the_model_reads_as_put_off(setup):
+    """'직위는 나중에 따로 정할게'를 코드가 빼기로 못 읽어도 모델이 빼라고 읽으면 나머지 전부를 채운다."""
+    _, docs, view = setup
+    reader = reads({"직급": "제외"}, {"평가점수": "점수"})
+    result = interpret(
+        "발급번호 기준으로 보고서에 있는 거 다 채워줘. 직급은 나중에 따로 정할게",
+        docs,
+        view,
+        ask_many=reader,
+    )
+    assert "직급" not in {c for _, c, _ in result.fields}
+    assert ("이수시간", "이수시간", "assumed") in {tuple(p) for p in result.fields}
+    # 모델이 채우라고 읽었으면 그 이름만 채우는 요청이다: 다른 항목을 후보로 삼지 않는다
+    filled = interpret(
+        "발급번호 기준으로 보고서에 있는 거 다 채워줘. 직급은 나중에 따로 정할게",
+        docs,
+        view,
+        ask_many=reads({"직급": "채움"}),
+    )
+    assert "이수시간" not in {c for _, c, _ in filled.fields}

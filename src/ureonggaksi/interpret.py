@@ -943,7 +943,8 @@ def interpret(
         EVERYTHING.search(request)
         and (simple or ask_many is not None)
         and not pointing_unclear
-        and not [n for n, _ in mentions if n != hint]
+        # 말한 이름이 모두 빠졌어야 한다(키, 또는 모델이 빼라고 읽은 "직무는 나중에 따로 정할게")
+        and all(n == hint or n in off_limits for n, _ in mentions)
     ):
         everything = _match_all(
             request,
