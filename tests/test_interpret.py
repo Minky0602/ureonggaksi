@@ -1137,6 +1137,64 @@ def test_a_listed_synonym_pairs_without_the_model(birth_setup):
     assert asked == []
 
 
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 생일은 나중에 하고 신청인이랑 이수시간 넣어줘",
+        "발급번호 기준으로 생일은 다음에 하고 신청인이랑 이수시간 넣어줘",
+        "발급번호 기준으로 생일은 미루고 신청인이랑 이수시간 넣어줘",
+        "발급번호 기준으로 생일은 아직 하지 말고 신청인이랑 이수시간 넣어줘",
+        "발급번호 기준으로 생일은 나중에 넣을게 신청인이랑 이수시간 넣어줘",
+        "발급번호 기준으로 생일은 다음에 처리하고 신청인이랑 이수시간 넣어줘",
+        "발급번호 기준으로 생일은 이따가 하고 신청인이랑 이수시간 넣어줘",
+        "발급번호 기준으로 생일은 나중으로 하고 신청인이랑 이수시간 넣어줘",
+        "발급번호 기준으로 신청인이랑 이수시간 넣어줘, 생일은 아직이야",
+    ],
+)
+def test_a_column_put_off_for_later_is_never_filled(birth_setup, request_text):
+    """실제 4B는 '생일은 나중에 하고'의 생일을 '채움'으로 읽었다(DIF-060). 코드가 미루기로 읽은 열은
+    모델이 채우라고 해도 채우지 않는다: 모델이 빼기로 읽으면 빼고, 아니면 묻는다."""
+    _, docs, view = birth_setup
+    for role in ("채움", "무관"):
+        reader = reads({"생일": role, "신청인": "채움", "이수시간": "채움"})
+        result = interpret(request_text, docs, view, ask_many=reader)
+        assert "생일" not in {c for _, c, _ in result.fields}
+    assert "생일" in result.skipped  # '무관'이면 빼라는 말로 정리된다
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 신청인 다음에 생일 넣어줘",
+        "발급번호 기준으로 이수시간 다음에도 신청인이랑 생일 채워",
+        "발급번호 기준으로 생일 아직 안 채운 칸만 신청인이랑 생일 넣어줘",
+        "발급번호 기준으로 생일은 나중에 확인할 수 있게 신청인이랑 생일 넣어줘",
+        "발급번호 기준으로 신청인이랑 생일 다음 주까지 채워 주세요",
+        "발급번호 기준으로 신청인이랑 생일 다음에 해당하는 칸 채워",
+    ],
+)
+def test_order_and_blank_words_are_not_put_offs(birth_setup, request_text):
+    """'다음에'(순서)·'아직 안 채운'(빈칸)·'나중에 확인할'은 미루기가 아니다. 모델이 채우라면 채운다(PR #27 검수)."""
+    _, docs, view = birth_setup
+    reader = reads({"생일": "채움", "신청인": "채움", "이수시간": "채움"})
+    result = interpret(request_text, docs, view, ask_many=reader)
+    assert {"신청인", "생일"} <= {c for _, c, _ in result.fields}
+
+
+def test_a_put_off_reaches_names_joined_before_it(birth_setup):
+    """'빼고'처럼 미루기도 '랑'으로 이어진 앞 이름까지 걸린다."""
+    _, docs, view = birth_setup
+    reader = reads({"생일": "무관", "신청인": "무관", "이수시간": "채움"})
+    result = interpret(
+        "발급번호 기준으로 신청인이랑 생일은 나중에 하고 이수시간 넣어줘",
+        docs,
+        view,
+        ask_many=reader,
+    )
+    assert [c for _, c, _ in result.fields] == ["이수시간"]
+    assert {"신청인", "생일"} <= set(result.skipped)
+
+
 def test_two_candidates_in_one_synonym_group_go_to_the_model(tmp_path):
     """문서에 성명과 신청인명이 함께 있으면 '이름' 열에 어느 것인지 표로 정하지 않고 모델에 묻는다."""
     rows = [("발급번호", "A-01"), ("성명", "가나다"), ("신청인명", "라마바"), ("이수시간", "12")]
