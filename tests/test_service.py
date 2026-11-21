@@ -318,18 +318,30 @@ def test_model_exclusion_wins_and_model_errors_fall_back_to_asking(files):
     assert fallback.plan is None and fallback.question is not None
 
 
-def test_a_disputed_skip_is_named_in_the_question(files):
-    """코드는 '나중에'로 빼라고 읽었는데 모델이 채우라고 읽으면 묻는다. 질문은 그 열을 짚는다(DIF-060)."""
+def test_a_disputed_skip_is_left_blank_and_the_rest_is_filled(files):
+    """코드는 '나중에'로 빼라고 읽었는데 모델이 채우라고 읽으면 그 열만 비우고 알린다(DIF-062).
+    갈린 열 말고 채울 것이 없으면 그 열을 짚어 묻는다(DIF-060)."""
     sources, target, out, _ = files
+    both = reader({"이수시간": "채움", "직급": "채움"})
     prepared = prepare(
         "이름 기준으로 직급은 나중에 하고 이수시간 채워줘",
         sources,
         target,
         output_path=out,
-        ask_many=reader({"이수시간": "채움", "직급": "채움"}),
+        ask_many=both,
     )
-    assert prepared.plan is None and prepared.question.slot == "target_column"
-    assert prepared.question.text.startswith("‘직급’을(를) 뺄지 채울지 확실하지 않아")
+    targets = [f.target_column for f in prepared.plan.rule.fields if f.target_column]
+    assert targets == ["이수시간"]
+    assert "‘직급’은(는) 뺄지 채울지 확실하지 않아 비워 둡니다." in prepared.warnings
+    alone = prepare(
+        "이름 기준으로 직급은 나중에 하고 나머지 채워 주세요",
+        sources,
+        target,
+        output_path=out,
+        ask_many=reader({"직급": "채움"}),
+    )
+    assert alone.plan is None and alone.question.slot == "target_column"
+    assert alone.question.text.startswith("‘직급’을(를) 뺄지 채울지 확실하지 않아")
 
 
 def test_a_skip_without_a_model_answer_keeps_the_plain_question(files):
@@ -340,10 +352,13 @@ def test_a_skip_without_a_model_answer_keeps_the_plain_question(files):
     def broken(prompt, fields):
         raise ServiceError("AI_TIMEOUT", "시간 초과")
 
-    for ask in (broken, reader({"이수시간": "채움"})):
-        prepared = prepare(request, sources, target, output_path=out, ask_many=ask)
-        assert prepared.question is not None
-        assert "뺄지 채울지" not in prepared.question.text
+    failed = prepare(request, sources, target, output_path=out, ask_many=broken)
+    assert failed.question is not None and "뺄지 채울지" not in failed.question.text
+    # 모델이 직급에 답하지 않으면 직급만 비우고 이수시간은 채운다. 갈렸다고 하지 않는다
+    silent = prepare(
+        request, sources, target, output_path=out, ask_many=reader({"이수시간": "채움"})
+    )
+    assert silent.question is None and not any("뺄지 채울지" in w for w in silent.warnings)
 
 
 def test_the_conflict_text_names_every_column_and_reads_for_any_ending():

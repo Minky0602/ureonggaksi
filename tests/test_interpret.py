@@ -983,10 +983,12 @@ def test_a_slot_after_another_name_is_pointing_and_is_asked(setup, request_text)
         "이름 기준으로 직급 비워진 칸이랑 이수시간 채워줘",
     ],
 )
-def test_a_code_negation_the_model_does_not_share_is_asked(setup, request_text):
-    """H3: 코드가 빼기로 읽었는데 모델은 채우라고 읽으면 소리 없이 빼지 않고 묻는다."""
+def test_a_code_negation_the_model_does_not_share_is_left_blank(setup, request_text):
+    """H3: 코드가 빼기로 읽었는데 모델은 채우라고 읽으면 그 이름은 채우지도 '뺐다'고도 하지 않고 비워
+    두며 갈렸다고 알린다. 나머지 확실한 짝은 채운다(DIF-062, 전에는 요청 전체를 물었다)."""
     result = interpret_with(setup, request_text, {"직급": "채움", "이수시간": "채움"})
-    assert result.fields == () and result.skipped == ()
+    assert [(f, c) for f, c, _ in result.fields] == [("이수시간", "이수시간")]
+    assert result.skipped == () and result.conflicted == ("직급",) and "직급" in result.excluded
 
 
 def test_an_agreed_exclusion_is_reported_as_unsure_not_as_unresolved(setup):
@@ -1022,7 +1024,7 @@ def test_a_synonym_the_user_excludes_is_not_filled(setup):
         {"직급": "채움", "이수시간": "채움"},
         {"직책": "직급/제외"},
     )
-    assert clash.fields == ()
+    assert all(c != "직급" for _, c, _ in clash.fields) and "직급" in clash.conflicted
 
 
 def test_model_paths_are_marked_and_answers_outside_the_lists_are_ignored(setup):
@@ -1161,8 +1163,8 @@ def test_a_column_put_off_for_later_is_never_filled(birth_setup, request_text):
         reader = reads({"생일": role, "신청인": "채움", "이수시간": "채움"})
         result = interpret(request_text, docs, view, ask_many=reader)
         assert "생일" not in {c for _, c, _ in result.fields}
-        if role == "채움":  # 갈린 이름을 짚어 질문이 무엇을 고칠지 알려 준다
-            assert result.conflicted == ("생일",) and not result.fields
+        if role == "채움":  # 갈린 생일만 비우고 확실한 짝은 채운다(DIF-062)
+            assert result.conflicted == ("생일",) and "이수시간" in {c for _, c, _ in result.fields}
     assert "생일" in result.skipped and result.conflicted == ()  # '무관'이면 빼라는 말로 정리된다
 
 

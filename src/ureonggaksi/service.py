@@ -395,7 +395,12 @@ def prepare(
             return _asking(request, answers, inputs, question)
         if failures:
             warnings.append(f"로컬 AI를 쓰지 못해 일부를 AI 없이 해석했습니다({failures[0]}).")
-        warnings += [f"‘{name}’은(는) 정하지 못해 비워 둡니다." for name in result.excluded]
+        warnings += [
+            f"‘{name}’은(는) 뺄지 채울지 확실하지 않아 비워 둡니다."
+            if name in result.conflicted
+            else f"‘{name}’은(는) 정하지 못해 비워 둡니다."
+            for name in result.excluded
+        ]
         warnings += [  # 키로 쓴 항목·열의 짝은 채우지 않는다(4차 M1)
             f"‘{c}’ 열은 행을 찾는 데 쓴 ‘{f}’과(와) 겹쳐 채우지 않고 비워 둡니다."
             for f, c, _ in used_for_key

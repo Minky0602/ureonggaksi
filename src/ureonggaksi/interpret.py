@@ -849,16 +849,22 @@ def interpret(
         filled = {n for n, r in roles.items() if r == FILL_ROLE and n not in alias_skip} | set(
             meant
         )
-        settled = all(roles.get(n) in (SKIP_ROLE, "무관") for n in coded_skip)
-        if not settled or set(skipped) & filled:
-            conflicted = [
-                # 모델이 실제로 채움·키라고 답한 이름만. 답이 없거나(오류·두 답 어긋남) 갈린 것이 아니다
-                *(n for n in coded_skip if roles.get(n) in (FILL_ROLE, "키")),
-                *(n for n in skipped if n in filled),
-            ]
-            drop, skipped, meant, unread = set(mentioned), [], [], []
-        else:
-            drop = {n for n in mentioned if roles.get(n) != FILL_ROLE}
+        # 빼라는 말인지 갈린 이름(코드는 빼기, 모델은 아님 / 채우라고도 빼라고도 읽음)만 비워 두고 나머지는
+        # 채운다. 전에는 하나만 갈려도 요청 전체를 물어 확실한 짝까지 버렸다(DIF-062, "애매한 칸은 비워 두고 소명")
+        uncertain = list(
+            dict.fromkeys(
+                [
+                    *(n for n in coded_skip if roles.get(n) not in (SKIP_ROLE, "무관")),
+                    *(n for n in skipped if n in filled),
+                ]
+            )
+        )
+        conflicted = [  # 모델이 실제로 채움·키라고 답한 이름만. 답이 없으면(오류·두 답 어긋남) 갈린 것이 아니다
+            n for n in uncertain if roles.get(n) in (FILL_ROLE, "키") or n in filled
+        ]
+        skipped = [n for n in skipped if n not in uncertain]
+        meant = [c for c in meant if c not in uncertain]
+        drop = {n for n in mentioned if roles.get(n) != FILL_ROLE} | set(uncertain)
         for column in meant:  # "이름" → 봉사자명: 채우라는 말이 가리킨 열을 요청한 열로 더한다
             if column not in mentioned and column not in only_columns:
                 only_columns.append(column)
@@ -930,6 +936,7 @@ def interpret(
         *only_columns,
         *unclear,
         *held,
+        *conflicted,  # 빼기로 읽혀 짝 후보에서 빠졌어도 비워 둔 까닭을 알려야 한다
         *(p[0] for p in pairs),
         *(p[1] for p in pairs),
     ]
