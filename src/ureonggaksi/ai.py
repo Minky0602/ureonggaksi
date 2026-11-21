@@ -37,17 +37,27 @@ ARGS = (
 )
 _RUNNING: set[subprocess.Popen] = set()  # 지금 도는 모델 프로세스. 창을 닫으면 stop_all이 끝낸다
 _RUNNING_LOCK = threading.Lock()
+# stop_all 뒤에 막 띄워진 프로세스도 등록하는 순간 끝낸다. 동시에 묻는 두 물음 가운데 하나가 아직
+# Popen 중일 때 취소가 오면 목록에 없어 끝까지 돌았다(PR #29 검수). 새 작업을 시작할 때 resume으로 푼다
+_STOPPED = threading.Event()
 
 
 def stop_all() -> None:
     """도는 모델 프로세스를 모두 끝낸다(창 닫기·취소). 그 호출은 AI_UNAVAILABLE로 끝난다."""
     with _RUNNING_LOCK:
+        _STOPPED.set()
         running = list(_RUNNING)
     for process in running:
         try:
             process.kill()
         except OSError:
             pass
+
+
+def resume() -> None:
+    """새 작업을 시작한다: stop_all이 막아 둔 실행을 다시 허용한다."""
+    with _RUNNING_LOCK:
+        _STOPPED.clear()
 
 
 CHOICE_TOKENS = 64  # 답이 선택지 하나
@@ -154,7 +164,13 @@ class LocalModel:
             except OSError as exc:  # 권한·잠금 등 실행 파일을 띄울 수 없는 경우
                 raise ServiceError("AI_UNAVAILABLE", "로컬 AI를 실행하지 못했습니다.") from exc
             with _RUNNING_LOCK:
-                _RUNNING.add(process)
+                stopped = _STOPPED.is_set()
+                if not stopped:
+                    _RUNNING.add(process)
+            if stopped:
+                process.kill()
+                process.communicate()
+                raise ServiceError("AI_UNAVAILABLE", "로컬 AI를 멈췄습니다.")
             try:
                 stdout, _ = process.communicate(timeout=self.timeout_s)
             except subprocess.TimeoutExpired as exc:

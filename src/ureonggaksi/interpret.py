@@ -16,6 +16,7 @@ left out and reported.
 
 import re
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 
 from .errors import ServiceError
@@ -475,8 +476,12 @@ def _read_request(ask_many: AskMany, request: str, names: list[str], words: list
         return {k: v for k, v in answer.items() if k in fields and v in fields[k]}
 
     keys = list(fields)
-    first = asked(fields)
-    second = asked({k: tuple(reversed(fields[k])) for k in reversed(keys)})
+    flipped = {k: tuple(reversed(fields[k])) for k in reversed(keys)}
+    # 두 번 묻기는 서로 독립이라 동시에 띄운다. 모델 적재·프롬프트 읽기가 겹쳐 실제 4B에서 약 25% 빨랐다
+    # (DIF-061). 한쪽이 예외면 그대로 올린다(답을 반쪽만 쓰지 않는다)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_job, second_job = pool.submit(asked, fields), pool.submit(asked, flipped)
+        first, second = first_job.result(), second_job.result()
     agreed = {k: v for k, v in first.items() if second.get(k) == v}
     roles = {k.removeprefix("[이름] "): v for k, v in agreed.items() if k.startswith("[이름] ")}
     meant = [v.rsplit("/", 1) for k, v in agreed.items() if k.startswith("[말] ") and v != NONE]
@@ -621,17 +626,19 @@ def _ask_model(choose: Chooser | None, prompt_for, options: tuple[str, ...]) -> 
     다른 열로 바뀌면 버린다. 받은 짝(출처 model)은 채우고 '확인 필요'로 보인다.
 
     '없음'까지 돌리므로 모든 자리의 선택지가 바뀐다(뒤집기는 가운데 자리가 남는다, PR #18 3차 검수 L1).
-    첫 답이 '없음'이거나 목록 밖이면 확정하지 않으므로 두 번째는 묻지 않는다.
+    두 물음은 동시에 띄운다(DIF-061). 첫 답이 '없음'이거나 목록 밖이면 두 번째 답은 버린다.
     """
     options = tuple(o for o in options if o != NONE)  # '없음'이라는 열은 답과 구분할 수 없다
     if choose is None or not options:
         return None
     first = (*options, NONE)
-    answer = choose(prompt_for(options), first)
+    second = first[1:] + first[:1]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_job = pool.submit(choose, prompt_for(options), first)
+        second_job = pool.submit(choose, prompt_for(tuple(o for o in second if o != NONE)), second)
+        answer, again = first_job.result(), second_job.result()
     if answer not in options:
         return None
-    second = first[1:] + first[:1]
-    again = choose(prompt_for(tuple(o for o in second if o != NONE)), second)
     # 두 번째가 같은 답이거나 '없음'으로 물러서면 받는다(모델 짝은 '확인 필요'로 표시된다). 다른 열로 바뀌면 버린다
     # 선택지가 하나면 '없음' 물러섬은 받지 않는다(첫 자리만 고르는 편향을 거를 수 없다)
     return answer if again == answer or (again == NONE and len(options) > 1) else None

@@ -91,6 +91,16 @@ def target(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _ai_allowed():
+    """stop_all(창 닫기 시험)이 막은 로컬 AI 실행이 다음 시험으로 새지 않게 한다."""
+    from ureonggaksi import ai
+
+    ai.resume()
+    yield
+    ai.resume()
+
+
+@pytest.fixture(autouse=True)
 def _inline_isolation(request, monkeypatch):
     """작업자 프로세스 격리는 test_isolation.py가 검증한다. 다른 시험은 같은 함수를 바로 불러 시간을 줄인다.
 
