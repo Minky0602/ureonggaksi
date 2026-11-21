@@ -362,6 +362,18 @@ def test_a_skip_without_a_model_answer_keeps_the_plain_question(files):
     assert silent.question is None and not any("뺄지 채울지" in w for w in silent.warnings)
     assert ("skip", "직급", "") in silent.unsure
     assert "직급" not in {f.target_column for f in silent.plan.rule.fields}
+    # 두 번 물은 답이 어긋나도(채움 ↔ 제외) 답이 없을 때와 같다(2차 검수 L-b)
+    turns = iter(
+        [reader({"직급": "채움", "이수시간": "채움"}), reader({"직급": "제외", "이수시간": "채움"})]
+    )
+
+    def disagree(prompt, fields):
+        return next(turns)(prompt, fields)
+
+    split = prepare(request, sources, target, output_path=out, ask_many=disagree)
+    assert split.question is None and not any("뺄지 채울지" in w for w in split.warnings)
+    assert ("skip", "직급", "") in split.unsure
+    assert "직급" not in {f.target_column for f in split.plan.rule.fields}
 
 
 def test_a_question_left_by_a_dropped_pair_does_not_blame_the_conflict(files):
