@@ -1144,6 +1144,11 @@ def test_a_listed_synonym_pairs_without_the_model(birth_setup):
         "발급번호 기준으로 생일은 다음에 하고 신청인이랑 이수시간 넣어줘",
         "발급번호 기준으로 생일은 미루고 신청인이랑 이수시간 넣어줘",
         "발급번호 기준으로 생일은 아직 하지 말고 신청인이랑 이수시간 넣어줘",
+        "발급번호 기준으로 생일은 나중에 넣을게 신청인이랑 이수시간 넣어줘",
+        "발급번호 기준으로 생일은 다음에 처리하고 신청인이랑 이수시간 넣어줘",
+        "발급번호 기준으로 생일은 이따가 하고 신청인이랑 이수시간 넣어줘",
+        "발급번호 기준으로 생일은 나중으로 하고 신청인이랑 이수시간 넣어줘",
+        "발급번호 기준으로 신청인이랑 이수시간 넣어줘, 생일은 아직이야",
     ],
 )
 def test_a_column_put_off_for_later_is_never_filled(birth_setup, request_text):
@@ -1165,6 +1170,7 @@ def test_a_column_put_off_for_later_is_never_filled(birth_setup, request_text):
         "발급번호 기준으로 생일 아직 안 채운 칸만 신청인이랑 생일 넣어줘",
         "발급번호 기준으로 생일은 나중에 확인할 수 있게 신청인이랑 생일 넣어줘",
         "발급번호 기준으로 신청인이랑 생일 다음 주까지 채워 주세요",
+        "발급번호 기준으로 신청인이랑 생일 다음에 해당하는 칸 채워",
     ],
 )
 def test_order_and_blank_words_are_not_put_offs(birth_setup, request_text):
