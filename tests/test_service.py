@@ -3,6 +3,7 @@
 import pytest
 from conftest import cell, para, table, write_hwpx, write_xlsx
 
+from ureonggaksi import service as service_module
 from ureonggaksi.errors import ServiceError
 from ureonggaksi.rules import RuleStore
 from ureonggaksi.service import commit, prepare
@@ -329,6 +330,26 @@ def test_a_disputed_skip_is_named_in_the_question(files):
     )
     assert prepared.plan is None and prepared.question.slot == "target_column"
     assert prepared.question.text.startswith("‘직급’을(를) 뺄지 채울지 확실하지 않아")
+
+
+def test_a_skip_without_a_model_answer_keeps_the_plain_question(files):
+    """모델 오류나 답이 없으면 갈린 것이 아니다. 이미 '빼고'라고 쓴 사람에게 '빼고'라고 쓰라 하지 않는다(PR #28 검수)."""
+    sources, target, out, _ = files
+    request = "이름 기준으로 직급은 빼고 이수시간 채워줘"
+
+    def broken(prompt, fields):
+        raise ServiceError("AI_TIMEOUT", "시간 초과")
+
+    for ask in (broken, reader({"이수시간": "채움"})):
+        prepared = prepare(request, sources, target, output_path=out, ask_many=ask)
+        assert prepared.question is not None
+        assert "뺄지 채울지" not in prepared.question.text
+
+
+def test_the_conflict_text_names_every_column_and_reads_for_any_ending():
+    text = service_module._conflict_text(("비고", "직급"))
+    assert text.startswith("‘비고’·‘직급’을(를) 뺄지 채울지")
+    assert "‘비고은(는) 빼고’" in text
 
 
 def test_unsure_pairs_and_exclusions_are_shown_with_examples(files, capsys):

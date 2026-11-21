@@ -206,7 +206,7 @@ def _conflict_text(names: tuple[str, ...]) -> str:
     first = names[0]
     return (
         f"{quoted}을(를) 뺄지 채울지 확실하지 않아 아무 칸도 정하지 않았습니다. "
-        f"‘{first}은 빼고’ 또는 ‘{first}도 채워’처럼 분명히 적어 다시 해 주세요."
+        f"‘{first}은(는) 빼고’ 또는 ‘{first}도 채워’처럼 분명히 적어 다시 해 주세요."
     )
 
 
@@ -386,7 +386,7 @@ def prepare(
                 options = tuple(c for c in options if _key_field_for(result, view, c))
                 return _asking(request, answers, inputs, _key_question(result, view, options))
             question = _rule_question(slot, options)
-            if slot == "target_column" and result.conflicted:
+            if slot == "target_column" and result.conflicted and not failures:
                 question = replace(question, text=_conflict_text(result.conflicted))
             if failures:  # 모델이 돌지 않아 질문이 생겼을 수 있다(DIF-053)
                 question = replace(

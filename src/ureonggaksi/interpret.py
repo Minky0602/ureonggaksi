@@ -845,7 +845,8 @@ def interpret(
         settled = all(roles.get(n) in (SKIP_ROLE, "무관") for n in coded_skip)
         if not settled or set(skipped) & filled:
             conflicted = [
-                *(n for n in coded_skip if roles.get(n) not in (SKIP_ROLE, "무관")),
+                # 모델이 실제로 채움·키라고 답한 이름만. 답이 없거나(오류·두 답 어긋남) 갈린 것이 아니다
+                *(n for n in coded_skip if roles.get(n) in (FILL_ROLE, "키")),
                 *(n for n in skipped if n in filled),
             ]
             drop, skipped, meant, unread = set(mentioned), [], [], []
