@@ -317,6 +317,20 @@ def test_model_exclusion_wins_and_model_errors_fall_back_to_asking(files):
     assert fallback.plan is None and fallback.question is not None
 
 
+def test_a_disputed_skip_is_named_in_the_question(files):
+    """코드는 '나중에'로 빼라고 읽었는데 모델이 채우라고 읽으면 묻는다. 질문은 그 열을 짚는다(DIF-060)."""
+    sources, target, out, _ = files
+    prepared = prepare(
+        "이름 기준으로 직급은 나중에 하고 이수시간 채워줘",
+        sources,
+        target,
+        output_path=out,
+        ask_many=reader({"이수시간": "채움", "직급": "채움"}),
+    )
+    assert prepared.plan is None and prepared.question.slot == "target_column"
+    assert prepared.question.text.startswith("‘직급’을(를) 뺄지 채울지 확실하지 않아")
+
+
 def test_unsure_pairs_and_exclusions_are_shown_with_examples(files, capsys):
     """CLI는 추정 짝마다 값 예시와 빼는 방법을, 빼기로 읽은 이름은 그대로 보인다."""
     from ureonggaksi.cli import _print_preview
