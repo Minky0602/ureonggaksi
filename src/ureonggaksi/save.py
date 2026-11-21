@@ -206,8 +206,14 @@ def manual_text(plan: Plan, result_name: str | None) -> str:
     """확인필요 파일(api 3절 형식). 종류 순서로 묶고 묶음마다 왜·할 일·항목."""
     items = manual_items(plan)
     counts = plan.counts
+    names = {s.file_id: s.path.name for s in plan.inputs.sources}
+
+    def place(e) -> str:  # 같은 서식의 문서가 여럿이면 구역·표만으로는 어느 파일인지 모른다
+        name = names.get(e.file_id, "")
+        return f"{name} {e.location}".strip()
+
     locations = {
-        i.change_id: ", ".join(dict.fromkeys(e.location for e in i.evidence if e.location))
+        i.change_id: ", ".join(dict.fromkeys(place(e) for e in i.evidence if e.location))
         for i in plan.items
     }
     lines = [f"[안내] {NOTICE}", ""]
@@ -243,7 +249,8 @@ def manual_text(plan: Plan, result_name: str | None) -> str:
         for item in group:
             places = locations.get(item.change_id or "", "")
             lines.append(
-                f"  - {item.where}: {item.reason}" + (f" [근거 {places}]" if places else "")
+                f"  - {item.where}: {item.reason}"
+                + (f" [근거 {places}]" if places and places != item.where else "")
             )
     return "\n".join(lines) + "\n"
 

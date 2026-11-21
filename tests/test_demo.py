@@ -34,3 +34,6 @@ def test_the_demo_fills_what_the_readme_says(tmp_path):
     assert hashlib.sha256(target.read_bytes()).hexdigest() == before
     sheet = load_workbook(package.output_path)["교육이수현황"]
     assert [c.value for c in sheet[4]] == ["A-003", "박민수", "1993-07-21", None, "10시간"]
+    # 같은 서식의 이수확인서가 셋이라 근거에 파일 이름이 있어야 어느 문서를 볼지 안다
+    text = package.manual_path.read_text(encoding="utf-8")
+    assert "[근거 이수확인서_박민수.hwpx " in text

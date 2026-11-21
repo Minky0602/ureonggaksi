@@ -335,7 +335,7 @@ def test_summary_reports_formulas_and_files_follow_the_contract(tmp_path):
     assert package.summary.has_formulas is True
     text = package.manual_path.read_text(encoding="utf-8")
     assert "\n왜: 칸에 이미 다른 값이 있어 덮어쓰지 않았습니다." in text
-    assert "할 일: 맞는 값을 확인해 직접 고치기" in text and "[근거 " in text
+    assert "할 일: 맞는 값을 확인해 직접 고치기" in text and "[근거 b.hwpx " in text
     evidence = json.loads(package.evidence_path.read_text(encoding="utf-8"))
     assert {"interpretation", "summary"} <= evidence.keys()
     assert evidence["summary"]["has_formulas"] is True
