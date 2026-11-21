@@ -1,0 +1,13 @@
+# 허용 목록: 빌드와 시험에 필요한 추적 파일만 넣는다. 로컬 캐시·비밀(.env 등)·생성물은 들어가지 않는다.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!src
+!tests
+!scripts
+!examples
+**/__pycache__
+**/*.egg-info
+examples/generated

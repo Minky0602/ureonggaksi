@@ -29,8 +29,9 @@ VS Code에서는 저장소 루트 폴더를 열고 `.vscode/launch.json`의 "우
 |---|---|
 | Windows | `./scripts/test.ps1` |
 | Linux | `./scripts/test.sh` |
+| Docker | `docker build -t ureonggaksi . && docker run --rm --network none ureonggaksi` |
 
-두 스크립트는 pytest, `ruff check`, `ruff format --check`를 차례로 돌리고 하나라도 실패하면 멈춘다. GitHub Actions가 `main`에 push할 때와 PR마다 같은 스크립트를 Windows와 Ubuntu에서 실행한다([ci.yml](.github/workflows/ci.yml)).
+두 스크립트는 pytest, `ruff check`, `ruff format --check`를 차례로 돌리고 하나라도 실패하면 멈춘다. GitHub Actions가 `main`에 push할 때와 PR마다 같은 스크립트를 Windows와 Ubuntu에서 실행하고, 네트워크를 끊은 컨테이너에서도 한 번 더 실행한다([ci.yml](.github/workflows/ci.yml)).
 
 Linux에서 화면 시험은 창 없이(offscreen) 돌지만 Qt가 쓰는 시스템 라이브러리가 필요하다.
 
@@ -49,7 +50,7 @@ sudo apt-get install -y --no-install-recommends libgl1 libegl1 libxkbcommon0 lib
 2. 커밋 하나는 한 가지 이유로만 바꾼다. 제목은 `종류: 무엇을 했는지`다. 종류는 `feat`, `fix`, `docs`, `test`, `ci`, `chore`, `refactor`를 쓴다.
 3. 설계가 바뀌면 `docs/architecture.md`나 `docs/api.md`를 먼저 고친다.
 4. PR을 올리면 [PR 템플릿](.github/pull_request_template.md)이 채울 항목을 보여 준다. 실행한 시험과 결과, 알려진 한계를 적는다.
-5. CI의 두 잡이 모두 통과해야 병합한다. 커밋이 하나면 **Squash and merge**, 여러 커밋을 유지하려면 **Rebase and merge**로 병합한다. `main`은 선형 이력만 받으므로 Merge commit은 쓸 수 없다.
+5. CI의 세 잡(Windows·Ubuntu·Docker)이 모두 통과해야 병합한다. 커밋이 하나면 **Squash and merge**, 여러 커밋을 유지하려면 **Rebase and merge**로 병합한다. `main`은 선형 이력만 받으므로 Merge commit은 쓸 수 없다.
 
 ## 넣지 않는 것
 

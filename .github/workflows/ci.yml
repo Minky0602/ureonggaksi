@@ -56,3 +56,22 @@ jobs:
       - name: Test and lint (Linux)
         if: runner.os == 'Linux'
         run: ./scripts/test.sh
+
+  # 새 Linux 환경(컨테이너)에서 네트워크 없이 같은 시험과 명령행 시연이 도는지 본다.
+  docker:
+    name: docker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        run: docker build -t ureonggaksi .
+
+      - name: Test and lint in container (no network)
+        run: docker run --rm --network none ureonggaksi
+
+      - name: Demo in container (no network)
+        run: docker run --rm --network none ureonggaksi scripts/demo.sh
