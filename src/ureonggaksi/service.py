@@ -200,6 +200,16 @@ def _rule_question(slot: str, options: tuple[str, ...]) -> Question:
     )
 
 
+def _conflict_text(names: tuple[str, ...]) -> str:
+    """빼라는 말인지 갈린 이름을 짚는다. 일반 문구로는 무엇을 고쳐야 할지 알 수 없었다(DIF-060)."""
+    quoted = "·".join(f"‘{n}’" for n in names)
+    first = names[0]
+    return (
+        f"{quoted}을(를) 뺄지 채울지 확실하지 않아 아무 칸도 정하지 않았습니다. "
+        f"‘{first}은(는) 빼고’ 또는 ‘{first}도 채워’처럼 분명히 적어 다시 해 주세요."
+    )
+
+
 def _key_question(result, view: TargetView, options: tuple[str, ...]) -> Question:
     """키 질문. 열마다 값이 맞는 문서 항목을 함께 보여 남의 번호(추천인사번 → 사번)를 고르지 않게 한다(DIF-050 H-1)."""
     question = _rule_question("key_column", options)
@@ -376,6 +386,8 @@ def prepare(
                 options = tuple(c for c in options if _key_field_for(result, view, c))
                 return _asking(request, answers, inputs, _key_question(result, view, options))
             question = _rule_question(slot, options)
+            if slot == "target_column" and result.conflicted and not failures:
+                question = replace(question, text=_conflict_text(result.conflicted))
             if failures:  # 모델이 돌지 않아 질문이 생겼을 수 있다(DIF-053)
                 question = replace(
                     question, text=f"{question.text} (로컬 AI를 쓰지 못했습니다: {failures[0]})"

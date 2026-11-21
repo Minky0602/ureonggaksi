@@ -1159,7 +1159,9 @@ def test_a_column_put_off_for_later_is_never_filled(birth_setup, request_text):
         reader = reads({"생일": role, "신청인": "채움", "이수시간": "채움"})
         result = interpret(request_text, docs, view, ask_many=reader)
         assert "생일" not in {c for _, c, _ in result.fields}
-    assert "생일" in result.skipped  # '무관'이면 빼라는 말로 정리된다
+        if role == "채움":  # 갈린 이름을 짚어 질문이 무엇을 고칠지 알려 준다
+            assert result.conflicted == ("생일",) and not result.fields
+    assert "생일" in result.skipped and result.conflicted == ()  # '무관'이면 빼라는 말로 정리된다
 
 
 @pytest.mark.parametrize(

@@ -290,6 +290,7 @@ class Interpretation:            # 요청 해석 결과. 규칙 초안의 재료
     candidates: tuple[FieldCandidate, ...]
     skipped: tuple[str, ...]                     # 모르는 말이 섞인 요청에서 빼라는 말로 읽은 이름
     unread: tuple[str, ...]                      # 모델이 어느 열과도 잇지 못한 모르는 말. prepare가 경고로 보인다
+    conflicted: tuple[str, ...]                  # 빼라는 말인지 갈려 짝을 정하지 않게 한 이름. target_column 질문이 짚는다
 
 Chooser = Callable[[str, tuple[str, ...]], str | None]   # (질문 글, 선택지) → 선택지 하나 또는 None
 AskMany = Callable[[str, dict[str, tuple[str, ...]]], dict[str, str]]
@@ -329,8 +330,10 @@ def interpret(request: str, documents: tuple[Document, ...], view: TargetView,
     #   '채움'인 이름만 남긴다. 같은 이름 짝은 출처 assumed(채움), 채우라는 말이 가리킨 열의 짝은 model.
     #   빼기: 모델 '제외'면 빼고 skipped에 남긴다. 코드 빼기 표지가 붙은 이름은 모델이 두 번 모두 같은
     #   '제외'·'무관'이면 빼고 skipped에 남긴다. '채움'·'키'이거나 답이 어긋나면(또는 같은 열을 채우라고도
-    #   빼라고도 읽으면) 짝을 정하지 않고 묻는다. 열과 잇지 못한 모르는 말은 unread로 남긴다.
-    #   모델 오류(AI_*, 임시 파일 오류 포함)면 모두 소명한다.
+    #   빼라고도 읽으면) 짝을 정하지 않고 묻는다. 모델이 실제로 '채움'·'키'라고 답한 이름(또는 채우라고도
+    #   빼라고도 읽은 이름)은 conflicted에 남겨 질문 문구가 짚는다("‘생일’을(를) 뺄지 채울지 확실하지 않아…").
+    #   열과 잇지 못한 모르는 말은 unread로 남긴다. 모델 오류(AI_*, 임시 파일 오류 포함)면 모두 소명하고,
+    #   질문은 일반 문구에 AI 오류를 덧붙인다(갈림 문구를 쓰지 않는다).
     # 지목: 이름 바로 뒤의 자리 낱말(칸·빈칸·열·란·셀·표, 앞에 '의' 허용)은 지목이다. "A를 B 칸에"처럼 '를' 바로
     #   뒤에 B가 오면 지목대로 확정한다. "X 칸"은 요청에 다른 항목 이름이 없을 때만 X를 채우라는 말로 읽고,
     #   앞뒤에 다른 항목이 있으면("직급 비고 칸에") 묻는다. 그 밖의 꼴·나열 뒤 지목·방향 조사도 묻는다.

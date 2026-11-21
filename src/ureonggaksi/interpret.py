@@ -117,6 +117,9 @@ class Interpretation:
     ] = ()  # 문서에서 찾은 항목들(build_rule이 추출 규칙을 가져간다)
     skipped: tuple[str, ...] = ()  # 모르는 말이 섞인 요청에서 빼라는 말로 읽은 이름 → '확인 필요'
     unread: tuple[str, ...] = ()  # 모델이 어느 열과도 잇지 못한 모르는 말 → 경고
+    # 빼라는 말로 읽었지만 모델이 채우라고 읽었거나 채우라고도 빼라고도 읽은 이름. 이것 때문에 아무 짝도
+    # 정하지 않았다 → 질문이 이 이름을 짚는다(DIF-060)
+    conflicted: tuple[str, ...] = ()
 
 
 def _norm(text: str) -> str:
@@ -782,6 +785,7 @@ def interpret(
     assumed = False
     skipped: list[str] = []
     unread: list[str] = []  # 모델이 열과 잇지 못한 모르는 말(2차 M-1)
+    conflicted: list[str] = []
     if pointing_unclear or (not simple and ask_many is None):
         drop = set(mentioned)
     elif not simple:
@@ -840,6 +844,11 @@ def interpret(
         )
         settled = all(roles.get(n) in (SKIP_ROLE, "무관") for n in coded_skip)
         if not settled or set(skipped) & filled:
+            conflicted = [
+                # 모델이 실제로 채움·키라고 답한 이름만. 답이 없거나(오류·두 답 어긋남) 갈린 것이 아니다
+                *(n for n in coded_skip if roles.get(n) in (FILL_ROLE, "키")),
+                *(n for n in skipped if n in filled),
+            ]
             drop, skipped, meant, unread = set(mentioned), [], [], []
         else:
             drop = {n for n in mentioned if roles.get(n) != FILL_ROLE}
@@ -931,6 +940,7 @@ def interpret(
         tuple(fields),
         skipped=tuple(skipped),
         unread=tuple(unread),
+        conflicted=tuple(dict.fromkeys(conflicted)),
     )
 
 
