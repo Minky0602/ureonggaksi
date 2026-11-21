@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from .analyze import Cancel, ChangeItem, Plan, PlanCounts, manual_items
+from .analyze import Cancel, ChangeItem, Plan, PlanCounts, evidence_place, manual_items
 from .errors import Pairs, ServiceError
 from .manual import KIND_WHY, KINDS, ManualItem
 from .models import CellValue
@@ -206,14 +206,12 @@ def manual_text(plan: Plan, result_name: str | None) -> str:
     """확인필요 파일(api 3절 형식). 종류 순서로 묶고 묶음마다 왜·할 일·항목."""
     items = manual_items(plan)
     counts = plan.counts
+    # 같은 서식의 문서가 여럿이면 구역·표만으로는 어느 파일인지 모른다. 파일 이름을 붙인다.
     names = {s.file_id: s.path.name for s in plan.inputs.sources}
-
-    def place(e) -> str:  # 같은 서식의 문서가 여럿이면 구역·표만으로는 어느 파일인지 모른다
-        name = names.get(e.file_id, "")
-        return f"{name} {e.location}".strip()
-
     locations = {
-        i.change_id: ", ".join(dict.fromkeys(place(e) for e in i.evidence if e.location))
+        i.change_id: ", ".join(
+            dict.fromkeys(evidence_place(e, names) for e in i.evidence if e.location)
+        )
         for i in plan.items
     }
     lines = [f"[안내] {NOTICE}", ""]

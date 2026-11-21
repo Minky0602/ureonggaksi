@@ -342,6 +342,23 @@ def test_summary_reports_formulas_and_files_follow_the_contract(tmp_path):
     assert [c["scope"] for c in evidence["checks"]][-1] == "inputs"
 
 
+def test_manual_file_names_the_source_once_when_no_row_matches(tmp_path):
+    """행이 없는 항목은 위치가 곧 근거(파일 이름 · 표)라 [근거]를 다시 쓰지 않는다. 행이 있으면 근거에 파일 이름."""
+    docs = [
+        ("채움", plan_doc("0012", "350만원")),
+        ("있음", plan_doc("0013", "350만원")),
+        ("없음", plan_doc("9999", "350만원")),
+    ]
+    plan, _, _ = make_plan(tmp_path, docs)
+    package = save_result(plan, approve(plan, output(tmp_path)))
+    lines = package.manual_path.read_text(encoding="utf-8").splitlines()
+    no_row = [line for line in lines if "키 9999" in line]
+    assert len(no_row) == 1 and no_row[0].startswith("  - 없음.hwpx ")
+    assert "[근거" not in no_row[0]
+    differs = [line for line in lines if "기존 1" in line]
+    assert len(differs) == 1 and "[근거 있음.hwpx " in differs[0]
+
+
 def test_output_name_must_be_xlsx(tmp_path):
     plan, _, _ = make_plan(tmp_path, [("a", plan_doc("0012", "350만원"))])
     with pytest.raises(ServiceError) as info:
