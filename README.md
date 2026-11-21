@@ -108,6 +108,18 @@ uv run ureonggaksi prepare --request "발급번호 기준으로 신청인이랑 
 
 로컬 모델을 쓰려면 prepare에 `--runtime`(llama-completion 실행 파일)과 `--model`(GGUF)을 준다. 없으면 모델 없이 해석한다.
 
+## Docker로 재현(Linux)
+
+Linux 컨테이너에서 같은 시험과 명령행 시연을 네트워크 없이 돌릴 수 있다. 이미지에 로컬 AI 모델은 넣지 않으므로 모델 없이 해석하는 경로다. 화면(PySide6)은 offscreen으로만 시험한다.
+
+```sh
+docker build -t ureonggaksi .
+docker run --rm --network none ureonggaksi                  # 시험·린트(scripts/test.sh)
+docker run --rm --network none ureonggaksi scripts/demo.sh  # 합성 시연: prepare → commit, 원본 해시 확인
+```
+
+CI는 매 PR마다 이 두 명령을 실행한다.
+
 ## 지원 범위와 알려진 한계
 
 **지원:** HWPX 텍스트, 표, 병합 셀, 중첩 표, 여러 구역. 문서 한 장이 한 행인 서식과, 명단 표의 각 행이 한 행인 서식. 이미 있는 XLSX 취합표의 빈칸만 채우고, 다른 값이 이미 있는 칸은 덮어쓰지 않는다. 원문과 원본 취합표는 읽기만 한다.

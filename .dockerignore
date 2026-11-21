@@ -1,0 +1,17 @@
+# 빌드 맥락에는 Git이 추적하는 파일만 들어가야 한다. 로컬 캐시·가상환경·생성물을 막는다.
+.git
+.cache
+.omx
+.venv
+.pytest-tmp
+.pytest_cache
+.ruff_cache
+**/__pycache__
+**/*.egg-info
+*.spec
+artifacts
+build
+dist
+examples/generated
+wheelhouse
+*.gguf

@@ -33,7 +33,8 @@ addopts = "--basetemp=.pytest-tmp"
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-extend-exclude = ["docs"]
+# .pytest-tmp: 시험이 만드는 스크립트. Git 밖(컨테이너)에서는 .gitignore가 적용되지 않는다.
+extend-exclude = ["docs", ".pytest-tmp"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

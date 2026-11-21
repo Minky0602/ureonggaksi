@@ -7,7 +7,7 @@
 - 핵심: `src/ureonggaksi/hwpx.py`(제한된 ZIP/XML 파싱), `workflow.py`(JSON 규칙), `extract.py`(추출/검증), `export.py`(엑셀), `ui/`(화면).
 - 설치: `uv sync --locked --extra dev`. 잠금 파일과 다르면 실패하게 해서 모두 같은 버전을 쓴다.
 - 실행: `.venv/Scripts/python -m ureonggaksi` (Windows: `scripts/run.ps1`).
-- 테스트와 정적 검사: Windows `scripts/test.ps1`, Linux `scripts/test.sh`. CI(`.github/workflows/ci.yml`)가 같은 스크립트를 돌린다.
+- 테스트와 정적 검사: Windows `scripts/test.ps1`, Linux `scripts/test.sh`. CI(`.github/workflows/ci.yml`)가 같은 스크립트를 돌리고, `Dockerfile` 컨테이너(네트워크 없음)에서도 시험과 `scripts/demo.sh`를 돌린다.
 - 실제 화면은 Windows에서 실행 확인. 자동 UI 테스트는 Qt offscreen으로 원문 선택→규칙→추출→검증을 확인한다.
 - 완료 조건: 다중 HWPX 추출, workflow JSON 재사용, 엑셀 값/출처 연결, 원본 변경 감지, 악성 ZIP/XML·수식 방어 테스트 통과.
 - 런타임은 오프라인. 초기 개발 패키지 설치와 wheel 준비만 명시적으로 인터넷을 사용한다.
