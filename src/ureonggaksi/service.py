@@ -386,7 +386,8 @@ def prepare(
                 options = tuple(c for c in options if _key_field_for(result, view, c))
                 return _asking(request, answers, inputs, _key_question(result, view, options))
             question = _rule_question(slot, options)
-            if slot == "target_column" and result.conflicted and not failures:
+            # 갈린 이름 때문에 남은 짝이 없을 때만 그 이름을 짚는다. [빼기]로 비었으면 일반 문구(검수 L1)
+            if slot == "target_column" and result.conflicted and not failures and not removed:
                 question = replace(question, text=_conflict_text(result.conflicted))
             if failures:  # 모델이 돌지 않아 질문이 생겼을 수 있다(DIF-053)
                 question = replace(

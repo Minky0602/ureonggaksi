@@ -118,8 +118,8 @@ class Interpretation:
     ] = ()  # 문서에서 찾은 항목들(build_rule이 추출 규칙을 가져간다)
     skipped: tuple[str, ...] = ()  # 모르는 말이 섞인 요청에서 빼라는 말로 읽은 이름 → '확인 필요'
     unread: tuple[str, ...] = ()  # 모델이 어느 열과도 잇지 못한 모르는 말 → 경고
-    # 빼라는 말로 읽었지만 모델이 채우라고 읽었거나 채우라고도 빼라고도 읽은 이름. 이것 때문에 아무 짝도
-    # 정하지 않았다 → 질문이 이 이름을 짚는다(DIF-060)
+    # 빼라는 말로 읽었지만 모델이 채우라고 읽었거나 채우라고도 빼라고도 읽은 이름. 이 이름만 비우고
+    # 경고로 알린다. 남은 짝이 없어 묻게 되면 질문이 이 이름을 짚는다(DIF-060·062)
     conflicted: tuple[str, ...] = ()
 
 
@@ -835,7 +835,7 @@ def interpret(
                 unread.append(word)  # 모델이 채우라고 읽지 않았다: 빠진 항목일 수 있어 알린다
         # 코드가 빼기로 읽은 이름은 모델이 두 번 모두 '채움'이 아닌 같은 답(제외·무관)이면 뺀다. 실제 4B는
         # 뺄 항목을 '무관'으로 답한다(2차 M-2). 답이 어긋나거나 '채움'·'키'면, 또는 같은 열을 채우라고도
-        # 빼라고도 읽었으면 짝을 정하지 않고 묻는다(DIF-050 H3·M2)
+        # 빼라고도 읽었으면 그 이름만 채우지 않는다(DIF-050 H3·M2, DIF-062)
         skipped = list(
             dict.fromkeys(
                 [
@@ -862,8 +862,9 @@ def interpret(
         conflicted = [  # 모델이 실제로 채움·키라고 답한 이름만. 답이 없으면(오류·두 답 어긋남) 갈린 것이 아니다
             n for n in uncertain if roles.get(n) in (FILL_ROLE, "키") or n in filled
         ]
-        skipped = [n for n in skipped if n not in uncertain]
-        meant = [c for c in meant if c not in uncertain]
+        # 모델이 반박하지 않은 빼기(답 없음·어긋남)는 빼라는 말로 남겨 '확인 필요'로 보인다. 틀려도 덜 채울 뿐이다
+        skipped = [n for n in skipped if n not in conflicted]
+        # 갈린 이름은 짝 후보에서도, 모델 선택지(off_limits)에서도 뺀다. meant도 여기서 걸러진다
         drop = {n for n in mentioned if roles.get(n) != FILL_ROLE} | set(uncertain)
         for column in meant:  # "이름" → 봉사자명: 채우라는 말이 가리킨 열을 요청한 열로 더한다
             if column not in mentioned and column not in only_columns:

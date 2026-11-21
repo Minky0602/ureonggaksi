@@ -354,11 +354,32 @@ def test_a_skip_without_a_model_answer_keeps_the_plain_question(files):
 
     failed = prepare(request, sources, target, output_path=out, ask_many=broken)
     assert failed.question is not None and "뺄지 채울지" not in failed.question.text
-    # 모델이 직급에 답하지 않으면 직급만 비우고 이수시간은 채운다. 갈렸다고 하지 않는다
+    # 모델이 직급에 답하지 않으면 직급만 비우고 이수시간은 채운다. 갈렸다고 하지 않고, 빼라는 말로
+    # 읽은 이름으로 '확인 필요'에 남긴다(검수 M2: 소명 없이 사라지면 안 된다)
     silent = prepare(
         request, sources, target, output_path=out, ask_many=reader({"이수시간": "채움"})
     )
     assert silent.question is None and not any("뺄지 채울지" in w for w in silent.warnings)
+    assert ("skip", "직급", "") in silent.unsure
+    assert "직급" not in {f.target_column for f in silent.plan.rule.fields}
+
+
+def test_a_question_left_by_a_dropped_pair_does_not_blame_the_conflict(files):
+    """검수 L1: 갈린 직급 말고 남은 짝을 사용자가 [빼기]해 비었으면, 갈림 탓으로 묻지 않는다."""
+    sources, target, out, _ = files
+    request = "이름 기준으로 직급은 나중에 하고 이수시간 채워줘"
+    model = reader({"직급": "채움", "이수시간": "채움"})
+    first = prepare(request, sources, target, output_path=out, ask_many=model)
+    assert first.question is None and any("뺄지 채울지" in w for w in first.warnings)
+    emptied = prepare(
+        request,
+        sources,
+        target,
+        output_path=out,
+        ask_many=model,
+        answers=(("drop_field", "이수시간"),),
+    )
+    assert emptied.question is not None and "뺄지 채울지" not in emptied.question.text
 
 
 def test_the_conflict_text_names_every_column_and_reads_for_any_ending():

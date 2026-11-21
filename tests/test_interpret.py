@@ -1023,6 +1023,7 @@ def test_a_synonym_the_user_excludes_is_not_filled(setup):
         "이름 기준으로 직급이랑 이수시간 채우고 직책은 이번엔 놔두세요",
         {"직급": "채움", "이수시간": "채움"},
         {"직책": "직급/제외"},
+        choose=picks({"직급": "직위"}),
     )
     assert all(c != "직급" for _, c, _ in clash.fields) and "직급" in clash.conflicted
 
@@ -1163,8 +1164,9 @@ def test_a_column_put_off_for_later_is_never_filled(birth_setup, request_text):
         reader = reads({"생일": role, "신청인": "채움", "이수시간": "채움"})
         result = interpret(request_text, docs, view, ask_many=reader)
         assert "생일" not in {c for _, c, _ in result.fields}
-        if role == "채움":  # 갈린 생일만 비우고 확실한 짝은 채운다(DIF-062)
-            assert result.conflicted == ("생일",) and "이수시간" in {c for _, c, _ in result.fields}
+        if role == "채움":  # 갈린 생일만 비우고 확실한 짝은 모두 채운다(DIF-062)
+            assert result.conflicted == ("생일",)
+            assert {c for _, c, _ in result.fields} == {"신청인", "이수시간"}
     assert "생일" in result.skipped and result.conflicted == ()  # '무관'이면 빼라는 말로 정리된다
 
 
