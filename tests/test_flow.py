@@ -191,9 +191,8 @@ def test_closing_stops_further_model_calls(window, app):
     window.request.setText("이름 기준으로 이수시간 채워 주세요 ㅎㅎ")
     window.preview_button.click()
     deadline = time.monotonic() + 5
-    while not calls and time.monotonic() < deadline:
+    while len(calls) < 2 and time.monotonic() < deadline:  # 동시에 띄운 두 물음
         time.sleep(0.01)
-    time.sleep(0.1)  # 동시에 띄운 두 번째 물음이 나갈 시간
     window.cancel()
     idle(window, app)
     assert len(calls) == 2

@@ -671,7 +671,9 @@ def test_model_choice_that_changes_with_option_order_is_not_trusted(setup):
     asked = []
     result = run(setup, "이름 기준으로 점수 채워줘", first_option(asked))
     assert result.fields == () and len(asked) == 2
-    assert asked[1][1] == asked[0][1][1:] + asked[0][1][:1]  # '없음'까지 한 칸씩 돌린다
+    # '없음'까지 한 칸씩 돌린다. 두 물음은 동시에 나가므로 순서와 무관하게 본다
+    one, two = (options for _, options in asked)
+    assert two == one[1:] + one[:1] or one == two[1:] + two[:1]
 
 
 # ---------- PR #18 1차 검수: 별도 절의 부정·되가리킴, 키 바꾸기, 선택지 하나 ----------

@@ -161,3 +161,19 @@ def test_stop_all_ends_a_running_model_call_quickly(tmp_path):
     worker.join(10)
     assert not worker.is_alive() and outcome == ["AI_UNAVAILABLE"]
     assert time.monotonic() - started < 10
+
+
+def test_a_call_started_after_stop_all_is_ended_at_once(tmp_path):
+    """취소 순간 아직 띄우는 중이던 물음도 등록하면서 끝낸다(PR #29 검수). resume 뒤에는 다시 돈다."""
+    import time
+
+    from ureonggaksi.ai import resume, stop_all
+
+    slow = fake_model(tmp_path, "sleep", 60)
+    stop_all()
+    started = time.monotonic()
+    with pytest.raises(ServiceError) as caught:
+        slow.choose("q", ("a", "없음"))
+    assert caught.value.code == "AI_UNAVAILABLE" and time.monotonic() - started < 10
+    resume()
+    assert fake_model(tmp_path, "first").choose("q", ("a", "없음")) == "a"

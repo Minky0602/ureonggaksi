@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..ai import LocalModel, ai_status, stop_all
+from ..ai import LocalModel, ai_status, resume, stop_all
 from ..errors import ServiceError
 from ..manual import KINDS
 from ..rules import SKIP, RuleStore
@@ -492,6 +492,7 @@ class FlowWindow(QMainWindow):
     # ---------- 작업 ----------
 
     def _run(self, work, done) -> None:
+        resume()  # 앞서 취소로 막아 둔 로컬 AI 실행을 다시 허용한다
         job = Job(work)
         self.job = job
         self._busy(True)
