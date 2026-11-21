@@ -523,10 +523,14 @@ def manual_items(plan: Plan) -> tuple[ManualItem, ...]:
     return tuple(sorted(items, key=sort_key))
 
 
+def evidence_place(evidence: Evidence, names: dict[str, str]) -> str:
+    """근거 한 건의 위치: '파일 이름 구역 · 표 · 행 열'. 화면 위치와 확인필요 파일이 같은 형식을 쓴다."""
+    name = names.get(evidence.file_id, evidence.file_id)
+    return f"{name} {evidence.location}" if evidence.location else name
+
+
 def _evidence_where(item: ChangeItem, names: dict[str, str]) -> str:
-    """대상 칸이 없을 때의 위치: '파일 이름 · 구역 · 표 · 행 열'. 내부 식별자는 쓰지 않는다."""
-    first = item.evidence[0] if item.evidence else None
-    if first is None:
+    """대상 칸이 없을 때의 위치는 첫 근거의 위치다. 내부 식별자는 쓰지 않는다."""
+    if not item.evidence:
         return item.record_key
-    name = names.get(first.file_id, first.file_id)
-    return f"{name} {first.location}" if first.location else name
+    return evidence_place(item.evidence[0], names)
