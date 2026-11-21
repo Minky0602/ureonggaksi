@@ -1,17 +1,13 @@
-# 빌드 맥락에는 Git이 추적하는 파일만 들어가야 한다. 로컬 캐시·가상환경·생성물을 막는다.
-.git
-.cache
-.omx
-.venv
-.pytest-tmp
-.pytest_cache
-.ruff_cache
+# 허용 목록: 빌드와 시험에 필요한 추적 파일만 넣는다. 로컬 캐시·비밀(.env 등)·생성물은 들어가지 않는다.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!src
+!tests
+!scripts
+!examples
 **/__pycache__
 **/*.egg-info
-*.spec
-artifacts
-build
-dist
 examples/generated
-wheelhouse
-*.gguf
