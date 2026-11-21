@@ -88,6 +88,9 @@ DIRECTION = re.compile(
     r"^(에서|에|으로|로)"
 )  # "전화번호에", "휴대전화로": 지목인데 "A를 B 칸에" 꼴이 아님
 NONE = "없음"
+# "보고서에 있는 거 다 채워줘", "신청서 내용 전부": 이름 없이 모든 항목을 말한다(낱말 하나로 떨어져 있을 때만,
+# '다른·다음'은 아니다)
+EVERYTHING = re.compile(r"(?:^|\s)(?:전부|모두|다|전체)(?=\s|$|[.,!?])")
 
 # 모델 호출: (질문 글, 선택지) → 선택지 하나 또는 None
 Chooser = Callable[[str, tuple[str, ...]], str | None]
@@ -933,6 +936,32 @@ def interpret(
         if answer:
             pairs.append((answer, column, "model"))
 
+    # "전부/다 채워": 이름을 하나도 말하지 않았으면 문서 항목 전부가 후보다. 키·뺀 이름은 빼고, 같은 이름 →
+    # 동의어표 → 모델(한 번에 묻기) 차례로 짝짓는다. 짝이 없는 항목은 비우고 소명한다(DIF-063).
+    # 모르는 말이 섞였는데 모델이 없으면 다른 요청처럼 채우지 않는다("전부 넣지 말고…"를 읽을 수 없다)
+    if (
+        EVERYTHING.search(request)
+        and (simple or ask_many is not None)
+        and not pointing_unclear
+        and not [n for n, _ in mentions if n != hint]
+    ):
+        everything = _match_all(
+            request,
+            [f for f in fields if f.name != key_field and f.name not in off_limits],
+            tuple(c for c in columns if c != key_column and c not in off_limits),
+            pairs,
+            view,
+            ask_many,
+            "assumed" if assumed else "match",
+        )
+        pairs += everything
+        placed_names = {p[0] for p in pairs}
+        held += [
+            f.name
+            for f in fields
+            if f.name != key_field and f.name not in off_limits and f.name not in placed_names
+        ]
+
     # 값 형태가 어긋나는 짝(코드형 값을 숫자 열에)은 확정하지 않는다
     fits = [p for p in pairs if _shape_fits(by_name[p[0]].samples, _column_values(view, p[1]))]
     held += [name for p in pairs if p not in fits for name in p[:2]]
@@ -1054,6 +1083,64 @@ def _column_prompt(request, field: FieldCandidate, options, view) -> str:
     lines += _hint(field.name, options)
     lines += [f"- {_clean(o, 40)}{_examples(_column_values(view, o)[:3])}" for o in options]
     return "\n".join(lines)
+
+
+def _match_all(request, fields, columns, pairs, view, ask_many, same_source):
+    """문서 항목마다 열을 정한다: 같은 이름 → 동의어표(양쪽 후보가 하나뿐) → 모델. 모델은 항목 전부를 한 번에
+    묻고(JSON 객체 스키마), 항목·선택지 순서를 뒤집어 두 번 물어 같은 답만 받는다. 항목을 하나씩 물으면
+    항목 수만큼 모델을 띄워 너무 느리다(10개면 3분 넘게)."""
+    taken_fields = {p[0] for p in pairs}
+    taken_columns = {p[1] for p in pairs}
+    found: list[tuple[str, str, str]] = []
+    left = []
+    names = tuple(f.name for f in fields)
+    for field in fields:
+        if field.name in taken_fields:
+            continue
+        free = tuple(c for c in columns if c not in taken_columns)
+        same = _resolve(field.name, free)
+        listed = _synonym(field.name, free)
+        if same is not None:
+            found.append((field.name, same, same_source))
+        elif listed is not None and _synonym(listed, names) == field.name:
+            found.append((field.name, listed, "synonym"))
+        else:
+            left.append(field)
+            continue
+        taken_columns.add(found[-1][1])
+    free = tuple(c for c in columns if c not in taken_columns)
+    if ask_many is None or not left or not free:
+        return found
+    options = (*free, NONE)
+    asked = {f"[항목] {f.name}": options for f in left}
+
+    def prompt(order) -> str:
+        lines = [
+            f"요청: {request}",
+            "[항목]마다 그 문서 항목의 값을 넣을 취합표 열을 고르세요. 같은 뜻의 열이 없으면 "
+            f"'{NONE}'. 한 열에 두 항목을 고르지 마세요.",
+            "취합표 열:",
+            *(f"- {_clean(c, 40)}{_examples(_column_values(view, c)[:3])}" for c in free),
+            "문서 항목:",
+            *(f"- {_clean(f.name, 40)}{_examples(f.samples[:2])}" for f in order),
+        ]
+        return "\n".join(lines)
+
+    def ask(order, choices):
+        fields_asked = {f"[항목] {f.name}": choices for f in order}
+        answer = ask_many(prompt(order), fields_asked)
+        return {k: v for k, v in answer.items() if k in asked and v in options}
+
+    flipped = tuple(reversed(options[:-1])) + (NONE,)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_job = pool.submit(ask, left, options)
+        second_job = pool.submit(ask, list(reversed(left)), flipped)
+        first, second = first_job.result(), second_job.result()
+    for field in left:
+        answer = first.get(f"[항목] {field.name}")
+        if answer and answer != NONE and second.get(f"[항목] {field.name}") == answer:
+            found.append((field.name, answer, "model"))
+    return found
 
 
 def build_rule(result: Interpretation, view: TargetView) -> RuleSet | None:

@@ -1299,3 +1299,87 @@ def test_a_synonym_needs_a_single_candidate_in_both_directions(tmp_path):
     _, documents, view = build(tmp_path, docs, sheet, "명단")
     result = interpret("발급번호 기준으로 신청인 채워줘", documents, view)
     assert all(src != "synonym" for _, _, src in result.fields)
+
+
+# ---------- "전부/다 채워": 이름 없이 모든 항목 (DIF-063) ----------
+
+
+def test_fill_everything_pairs_same_names_and_synonyms_without_a_model(setup):
+    """'다 채워'는 문서 항목 전부가 후보다. 모델 없이는 같은 이름·동의어표 짝만, 나머지는 비우고 소명한다."""
+    result = run(setup, "발급번호 기준으로 다 채워줘")
+    assert set(result.fields) == {("성명", "이름", "synonym"), ("이수시간", "이수시간", "match")}
+    assert result.questions == ()
+    assert {"직위", "평가점수", "연락처", "직원번호"} <= set(result.excluded)
+
+
+def test_fill_everything_asks_the_model_once_for_the_rest(setup):
+    _, docs, view = setup
+    calls = []
+
+    def many(prompt, fields):
+        calls.append(dict(fields))
+        return reads({}, {"직위": "직급", "평가점수": "점수"})(prompt, fields)
+
+    result = interpret("발급번호 기준으로 다 채워줘", docs, view, ask_many=many)
+    assert ("직위", "직급", "model") in result.fields and (
+        "평가점수",
+        "점수",
+        "model",
+    ) in result.fields
+    # 두 번(순서를 뒤집어) 묻고, 한 번에 남은 항목을 모두 묻는다. 이미 정한 열·항목은 묻지 않는다
+    assert len(calls) == 2 and all("[항목] 성명" not in c for c in calls)
+    assert all("이름" not in options for c in calls for options in c.values())
+
+
+def test_fill_everything_keeps_only_answers_both_orders_agree_on(setup):
+    _, docs, view = setup
+    turns = iter([reads({}, {"직위": "직급"}), reads({}, {"직위": "비고"})])
+
+    def disagree(prompt, fields):
+        return next(turns)(prompt, fields)
+
+    result = interpret("발급번호 기준으로 다 채워줘", docs, view, ask_many=disagree)
+    assert "직위" not in {f for f, _, _ in result.fields} and "직위" in result.excluded
+
+
+def test_fill_everything_never_puts_two_items_in_one_column(setup):
+    _, docs, view = setup
+    reader = reads({}, {"직위": "직급", "평가점수": "직급"})
+    result = interpret("발급번호 기준으로 다 채워줘", docs, view, ask_many=reader)
+    assert "직급" not in {c for _, c, _ in result.fields}
+
+
+def test_fill_everything_leaves_out_what_the_request_skips(setup):
+    """'연락처는 빼고': 뺀 항목은 채우지 않고 모델 선택지·물음에도 없다."""
+    _, docs, view = setup
+    calls = []
+
+    def many(prompt, fields):
+        calls.append(dict(fields))
+        return reads({"연락처": "제외"}, {"연락처": "비고"})(prompt, fields)
+
+    result = interpret(
+        "발급번호 기준으로 문서에 있는 거 전부 넣어줘. 연락처는 빼고", docs, view, ask_many=many
+    )
+    assert "연락처" not in {f for f, _, _ in result.fields} and "연락처" in result.skipped
+    assert all("[항목] 연락처" not in c for c in calls)
+    # 모르는 말이 섞인 요청의 같은 이름 짝은 '확인 필요'로 보인다
+    assert ("이수시간", "이수시간", "assumed") in result.fields
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 다른 거 채워줘",  # '다른'은 '다'가 아니다
+        "발급번호 기준으로 이수시간 다 채워줘",  # 이름을 말했으면 그 이름만
+    ],
+)
+def test_fill_everything_needs_the_word_alone_and_no_named_items(setup, request_text):
+    result = run(setup, request_text)
+    assert {f for f, _, _ in result.fields} <= {"이수시간"}
+    assert "성명" not in {f for f, _, _ in result.fields}
+
+
+def test_fill_everything_with_unknown_words_and_no_model_fills_nothing(setup):
+    result = run(setup, "발급번호 기준으로 문서에 있는 거 전부 넣지 말고 확인만")
+    assert result.fields == ()
