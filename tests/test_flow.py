@@ -178,7 +178,8 @@ def test_a_question_without_buttons_explains_how_to_continue(window, app):
 
 
 def test_closing_stops_further_model_calls(window, app):
-    """화면 검수 M2: 취소(창 닫기) 뒤에는 모델을 더 부르지 않는다(말투 해석은 순서를 바꿔 두 번 묻는다)."""
+    """화면 검수 M2: 취소(창 닫기) 뒤에는 모델을 더 부르지 않는다. 말투 해석의 두 번 묻기는 동시에
+    띄우므로(DIF-061) 취소 전에 이미 나간 두 번까지만 있다."""
     calls = []
 
     def slow(prompt, fields):
@@ -192,9 +193,10 @@ def test_closing_stops_further_model_calls(window, app):
     deadline = time.monotonic() + 5
     while not calls and time.monotonic() < deadline:
         time.sleep(0.01)
+    time.sleep(0.1)  # 동시에 띄운 두 번째 물음이 나갈 시간
     window.cancel()
     idle(window, app)
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_a_check_run_reports_a_review_not_a_fill(window, app):
