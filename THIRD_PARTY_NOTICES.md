@@ -9,11 +9,11 @@ Runtime dependencies (exact versions: uv.lock):
 - et-xmlfile: MIT; https://pypi.org/project/et-xmlfile/
 - defusedxml: PSF; https://pypi.org/project/defusedxml/
 - regex: Apache-2.0 AND CNRI-Python; https://pypi.org/project/regex/
-- kiwipiepy 0.24.1 / Kiwi (Korean morphological analyzer, used to read particles and negation in requests): Apache-2.0; the `_kiwipiepy` extension statically links Eigen (MPL-2.0, built with EIGEN_MPL2_ONLY), cpp-btree and streamvbyte (Apache-2.0), cpuinfo (BSD-2-Clause), mimalloc and nlohmann/json (MIT). Its NOTICE must be retained and is copied into `licenses/kiwipiepy/`. https://github.com/bab2min/kiwipiepy
-- kiwipiepy_model 0.24.0 (Kiwi model files: morpheme dictionaries and n-gram statistics trained on corpora of the National Institute of Korean Language; no corpus text is distributed): Apache-2.0; https://pypi.org/project/kiwipiepy-model/
+- kiwipiepy 0.24.1 / Kiwi (Korean morphological analyzer, used to read particles and negation in requests): Apache-2.0; the `_kiwipiepy` extension statically links Eigen (MPL-2.0, built with EIGEN_MPL2_ONLY), cpp-btree and streamvbyte (Apache-2.0), cpuinfo (BSD-2-Clause), mimalloc and nlohmann/json (MIT). Its NOTICE must be retained and is copied with the license texts under `licenses/kiwipiepy/kiwipiepy-0.24.1.dist-info/licenses/`. https://github.com/bab2min/kiwipiepy
+- kiwipiepy_model 0.24.0 (Kiwi model files: morpheme dictionaries and n-gram statistics trained on corpora of the National Institute of Korean Language; no corpus text is distributed; its NOTICE with the corpus attribution is copied under `licenses/kiwipiepy_model/`): Apache-2.0; https://pypi.org/project/kiwipiepy-model/
 - tqdm (imported by kiwipiepy): MPL-2.0 AND MIT; https://github.com/tqdm/tqdm
 
-numpy is installed with kiwipiepy for its training utilities but is not imported at runtime and is excluded from the bundle.
+kiwipiepy declares numpy for its training utilities only; the project overrides that requirement (`[tool.uv] override-dependencies`), so numpy is neither installed nor bundled.
 
 The build (`scripts/collect_licenses.py`) copies the license files that each installed runtime distribution ships into `licenses/` of the bundle and fails if a distribution ships none. The copied set has not yet been reviewed for completeness, in particular for Qt. PyInstaller uses its GPL license with a bootloader distribution exception. The app is distributed as an onedir bundle using dynamically loaded Qt libraries; retain the directory structure and notices. Review upstream obligations before public distribution; this file does not replace the license texts.
 

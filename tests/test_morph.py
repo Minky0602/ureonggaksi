@@ -16,6 +16,13 @@ from ureonggaksi.interpret import _unknown_words, _work_type
         ("계좌는", "계좌"),
         ("그대로", "그대로"),  # '로'로 끝나도 부사다
         ("신청서", "신청서"),
+        ("생일요", "생일"),  # 낱말 하나만 보면 '요'를 명사에 붙인다(Kiwi PR 검수 M3)
+        ("성함은요", "성함"),
+        ("생일만요", "생일"),
+        ("필요", "필요"),
+        ("같은", ""),  # 용언·어미뿐인 말은 이름이 아니다(검수 L2)
+        ("않아도", ""),
+        ("에서", ""),
     ],
 )
 def test_strip_particles_keeps_the_last_syllable_of_the_word(word, stem):
@@ -31,13 +38,48 @@ def test_strip_particles_keeps_the_last_syllable_of_the_word(word, stem):
         "입력하지 않아도 돼",
         "전부 넣지 마",
         "못 넣어",
+        # Kiwi PR 검수 H1: 보조 용언이 끼거나 '안 되다'·명사형 '하다'로 하는 부정
+        "채워 놓지 마",
+        "넣어 두지 마",
+        "넣어도 안 돼",
+        "채워선 안 돼",
+        "채워주면 안 돼",
+        "채우는 건 안 돼",
+        "입력하시면 안 됩니다",
+        "입력은 하지 마",
+        "채우는 거 하지 마",
+        "채우려 하지 마",
+        "입력 안 해도 돼",
+        "입력 금지",
+        "채우지 못하게 해",
+        "채우시진 마세요",
+        "적지 마",
+        "옮기지 마",
     ],
 )
 def test_negated_fill_is_read_from_the_auxiliary_verb(text):
     assert morph.negated_fill_spans(text)
 
 
-@pytest.mark.parametrize("text", ["다 채워줘", "채우고 확인해줘", "넣어 주세요", "말고 채워줘"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "다 채워줘",
+        "채우고 확인해줘",
+        "넣어 주세요",
+        "말고 채워줘",
+        "못 채운 칸 채워줘",  # 관형형은 칸을 꾸민다(검수 M1)
+        "채우지 않은 칸 채워줘",
+        "지난번에 못 채운 거 채워줘",
+        "입력되지 않은 칸 채워줘",  # 피동(검수 M2)
+        "이름은 키로 쓰지 말고 채워줘",  # '쓰다'는 사용하다일 수 있다
+        "채우고 말 거야",  # '-고 말다'(검수 L3)
+        "결국 다 채우고 말았어",
+        "넣고 확인은 안 해도 돼",  # 부정은 확인에 걸린다
+        "입력되지 않게 확인해줘",  # 피동 '입력되다'는 채우기가 아니다
+        "채워줘, 확인은 하지 마",  # 채우기 뒤 다른 말을 넘어 먼 부정에 걸리지 않는다
+    ],
+)
 def test_plain_fill_is_not_negated(text):
     assert morph.negated_fill_spans(text) == []
 
@@ -58,7 +100,40 @@ def test_unknown_words_keep_whole_nouns():
         ),  # 채우기와 하지 않는 채우기가 함께 있으면 묻는다
         ("발급번호 기준으로 이수시간 채워줘", "fill"),
         ("발급번호 기준으로 채우진 말고 확인해줘", "check"),
+        ("안 채운 칸 채워줘", "fill"),  # 정규식의 관형형 오탐도 고쳤다(검수 M1)
+        ("채우지 않은 칸만 채워줘", "fill"),
+        ("못 채운 칸 채워줘", "fill"),
+        ("입력되지 않은 칸 채워줘", "fill"),
+        ("발급번호 기준으로 이수시간 채워 놓지 마", None),
     ],
 )
 def test_work_type_reads_negation_from_morphemes(request_text, expected):
     assert _work_type(request_text) == expected
+
+
+def test_unknown_words_drop_the_polite_ending_and_function_words():
+    words = _unknown_words("발급번호 기준으로 생일요 같은 거 채워줘", ["발급번호"])
+    assert "생일" in words and "같은" not in words and "생일요" not in words
+
+
+def test_kiwi_is_built_once_even_when_first_called_from_many_threads(monkeypatch):
+    """검수 L1: 처음 부를 때 여러 작업자가 동시에 와도 한 번만 적재한다."""
+    import threading
+    import time
+
+    built = []
+    real = morph.Kiwi
+
+    def slow(*args, **kwargs):
+        time.sleep(0.2)
+        built.append(1)
+        return real(*args, **kwargs)
+
+    morph._kiwi_once.cache_clear()
+    monkeypatch.setattr(morph, "Kiwi", slow)
+    threads = [threading.Thread(target=morph._kiwi) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(built) == 1
