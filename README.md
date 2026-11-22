@@ -154,6 +154,7 @@ SHA-256은 변경 감지용이며 전자서명이 아니다.
 | [docs/architecture.md](docs/architecture.md) | 구조, 데이터 모델, 처리 흐름. 현재와 목표를 구분한다 |
 | [docs/api.md](docs/api.md) | 서비스 함수 계약 |
 | [SECURITY.md](SECURITY.md) | 보안 범위와 한계 |
+| [docs/development-notes.md](docs/development-notes.md) | 실제로 실행한 것, 난점, 측정 수치, 발표 준비 |
 
 ## 라이선스
 
