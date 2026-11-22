@@ -164,3 +164,51 @@ def test_kiwi_is_built_once_even_when_first_called_from_many_threads(monkeypatch
     for t in threads:
         t.join()
     assert len(built) == 1
+
+
+@pytest.mark.parametrize(
+    "request_text, expected",
+    [
+        # 3차 검수 H-1: '안 될 것 같아'·'안 되는 거야'는 금지다
+        ("직급은 채워선 안 될 것 같아", None),
+        ("직급은 넣어도 안 될 것 같아요", None),
+        ("채우시면 안 될 거예요", None),
+        ("직급 채우는 건 안 되는 걸로 해", None),
+        ("직급은 입력해서는 안 될 듯", None),
+        ("직급은 채워선 안 되는 거야", None),
+        # 3차 검수 H-2: 부사가 끼어도 금지다
+        ("이수시간은 채우면 절대 안 돼", None),
+        ("넣어서는 절대 안 됩니다", None),
+        ("직급은 채우면 진짜 안 돼", None),
+        # 3차 검수 M-1: 과거형 관형형 + 것(축약)은 칸을 꾸민다
+        ("못 채운 걸 채워줘", "fill"),
+        ("못 넣은 건 넣어줘", "fill"),
+        ("안 채운 게 있으면 채워줘", "fill"),
+        ("채우지 않은 걸 채워줘", "fill"),
+        # 3차 검수 M-2: 띄어쓰기를 생략해도 꾸밈이다
+        ("채우지 않은칸 채워줘", "fill"),
+        ("안채운칸 채워줘", "fill"),
+        ("채우지않은칸채워줘", "fill"),
+        # 3차 검수 M-3: '-면 안 될까요?'는 부탁이다
+        ("이수시간 채워 주시면 안 될까요?", "fill"),
+        ("넣어 주시면 안 되나요?", "fill"),
+        ("채워주면 안 돼?", "fill"),
+        ("이수시간 채우면 안 될까요?", None),  # 묻는 말: 금지로 확정해 점검으로 넘기지 않고 묻는다
+        # 3차 검수 L
+        ("입력 금지 칸 빼고 채워줘", "fill"),
+        ("입력 금지인 칸 빼고 채워줘", "fill"),
+        ("이수시간 채우고 쓰지 마", "fill"),
+        ("채워도 안 되면 비워 둬", "fill"),
+        ("채워서 안 되면 비워 둬", "fill"),
+        ("채우고 안 돼서 물어봐", "fill"),
+    ],
+)
+def test_work_type_third_review_cases(request_text, expected):
+    assert _work_type(request_text) == expected
+
+
+@pytest.mark.parametrize(
+    "word, stem", [("주소지요", "주소지"), ("비고요", "비고"), ("불필요", "불필요")]
+)
+def test_strip_particles_polite_ending_on_names(word, stem):
+    assert morph.strip_particles(word) == stem
