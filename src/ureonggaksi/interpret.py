@@ -91,6 +91,7 @@ NONE = "없음"
 # "보고서에 있는 거 다 채워줘", "신청서 내용 전부": 이름 없이 모든 항목을 말한다(낱말 하나로 떨어져 있을 때만,
 # '다른·다음'은 아니다)
 EVERYTHING = re.compile(r"(?:^|\s)(?:전부|모두|다|전체)(?=\s|$|[.,!?])")
+EVERYTHING_KEY, EVERYTHING_OPTIONS = "[요청] 전부", ("예", "아니오")
 
 # 모델 호출: (질문 글, 선택지) → 선택지 하나 또는 None
 Chooser = Callable[[str, tuple[str, ...]], str | None]
@@ -460,10 +461,14 @@ def _unknown_words(request: str, names: list[str]) -> list[str]:
     return list(dict.fromkeys(words))
 
 
-def _read_request(ask_many: AskMany, request: str, names: list[str], words: list[str], columns):
+def _read_request(
+    ask_many: AskMany, request: str, names: list[str], words: list[str], columns, ask_all=False
+):
     """이름마다 역할, 모르는 말마다 뜻하는 열과 그 역할을 한 번에 묻는다. 순서를 뒤집어 두 번 묻고 같은 답만 받는다.
+    ask_all이면 '문서 항목 전부를 하라는 요청인가'도 같은 물음에 칸 하나로 묻는다(DIF-063 3차).
 
-    돌려주는 것: (이름 → 역할, 채우라는 말이 가리킨 열, 빼라는 말이 가리킨 열, 열과 잇지 못한 말).
+    돌려주는 것: (이름 → 역할, 채우라는 말이 가리킨 열, 빼라는 말이 가리킨 열, 열과 잇지 못한 말,
+    두 번 모두 '예'라고 답한 '전부' 여부).
     """
     word_options = (
         *(f"{c}/{FILL_ROLE}" for c in columns),
@@ -472,6 +477,8 @@ def _read_request(ask_many: AskMany, request: str, names: list[str], words: list
     )
     fields: dict[str, tuple[str, ...]] = {f"[이름] {n}": ROLES for n in names}
     fields |= {f"[말] {w}": word_options for w in words}
+    if ask_all:
+        fields[EVERYTHING_KEY] = EVERYTHING_OPTIONS
 
     def prompt(order) -> str:
         lines = [
@@ -481,6 +488,14 @@ def _read_request(ask_many: AskMany, request: str, names: list[str], words: list
             "무관=그 밖. 확신이 없으면 무관.",
             "[말]마다 그 말이 가리키는 취합표 열과, 요청이 그 열을 채우라는지(채움) 빼라는지(제외)를 "
             f"'열/역할'로 고르세요. 열 이름의 다른 말이 아니면 '{NONE}'.",
+            *(
+                [
+                    f"{EVERYTHING_KEY}: 항목을 따로 말하지 않고 문서의 항목 전부를 채우거나 대조하라는 요청이면 "
+                    "예. 어느 항목만(예: 'X만') 하라거나, 하지 말라거나, 확실하지 않으면 아니오."
+                ]
+                if ask_all
+                else []
+            ),
         ]
         return "\n".join([*lines, *(f"- {_clean(k, 40)}" for k in order)])
 
@@ -505,6 +520,7 @@ def _read_request(ask_many: AskMany, request: str, names: list[str], words: list
         list(dict.fromkeys(c for c, r in meant if r == FILL_ROLE)),
         list(dict.fromkeys(c for c, r in meant if r == SKIP_ROLE)),
         unread,
+        agreed.get(EVERYTHING_KEY) == EVERYTHING_OPTIONS[0],
     )
 
 
@@ -804,9 +820,10 @@ def interpret(
     # 모두 assumed로 표시해 미리보기에서 '확인 필요'로 보인다(P04 성능 개선, 2026-11-18 사용자 결정)
     mentioned = [*(p[0] for p in pairs), *(p[1] for p in pairs), *only_fields, *only_columns]
     assumed = False
-    meant: list[str] = []  # 모델이 채우라는 말로 읽은 열
     aliased: dict[str, str] = {}  # 동의어표로 이은 모르는 말 → 열
     alias_skip: list[str] = []
+    # '전부'를 말했다: 모르는 말이 없으면 코드가, 섞였으면 모델이 두 번 모두 '예'라고 읽어야 한다(DIF-063 3차)
+    everything_said = simple and bool(EVERYTHING.search(request))
     skipped: list[str] = []
     unread: list[str] = []  # 모델이 열과 잇지 못한 모르는 말(2차 M-1)
     conflicted: list[str] = []
@@ -823,7 +840,6 @@ def interpret(
         # 동의어표: 요청의 모르는 말이 열 하나만 가리키면("생일"→생년월일) 그 열을 요청한 이름처럼 다룬다.
         # 채우라는 뜻인지는 다른 이름과 같이 모델의 역할 판단으로 정하고, 같은 마디에 빼기·미루기 표현이
         # 있으면 빼기로 본다(DIF-055, 검수 M1)
-        aliased: dict[str, str] = {}
         for word in every_word:
             column = _synonym(word, targets)
             if column and column not in mentioned and column not in aliased.values():
@@ -835,13 +851,13 @@ def interpret(
         # 동의어로 추정한 열의 빼기는 그 열만 빼고 표시한다. 다른 칸까지 질문으로 돌리지 않는다(검수 L-1)
         asked_names = list(dict.fromkeys([*mentioned, *aliased.values(), *coded_skip]))
         try:
-            roles, meant, meant_skip, unread = _read_request(
-                ask_many, request, asked_names, words, targets
+            roles, meant, meant_skip, unread, everything_said = _read_request(
+                ask_many, request, asked_names, words, targets, bool(EVERYTHING.search(request))
             )
         except ServiceError as error:
             if not error.code.startswith("AI_"):
                 raise
-            roles, meant, meant_skip, unread = {}, [], [], []
+            roles, meant, meant_skip, unread, everything_said = {}, [], [], [], False
         unread = [*unread, *overflow]
         for word, column in aliased.items():
             if column in alias_skip:
@@ -916,6 +932,7 @@ def interpret(
         if answer:
             pairs.append((field, answer, "model"))
     # 문서에 같은 이름 라벨이 있지만 겹쳐서 뺀 열: 답은 그 라벨뿐이라 다른 항목을 고르게 하지 않는다(6차 A01)
+    asked_columns = list(only_columns)  # 겹친 라벨로 빠지기 전, 채우라고 말한(읽은) 열(검수 r2 L-4)
     ambiguous = _ambiguous_labels(documents)
     held += [c for c in only_columns if _norm(c) in ambiguous]
     only_columns = [c for c in only_columns if _norm(c) not in ambiguous]
@@ -942,20 +959,37 @@ def interpret(
     # "전부/다 채워": 채울 대상을 하나도 말하지 않았으면 문서 항목 전부가 후보다. 키·뺀 이름은 빼고, 같은 이름 →
     # 동의어표 → 모델(한 번에 묻기) 차례로 짝짓는다. 사용자가 그 열을 말한 것이 아니므로 모두 '확인 필요'로
     # 보인다. 짝이 없는 항목은 비우고 소명한다(DIF-063). 켜는 조건은 좁게 둔다(검수 H-1~H-4, M-3)
-    if _everything_requested(request, work_type, simple, ask_many) and (
-        not pointing_unclear
+    if (
+        everything_said
+        and _everything_requested(request, work_type)
+        and not pointing_unclear
         # 문서 한 장이면 항목명과 값을 가르지 못한다(값이 항목으로 잡힌다)
         and (len(documents) > 1 or record.kind == "table_rows")
-        # 말한 이름은 키이거나 빼라고 읽은 것뿐이어야 한다. 해석하지 못했거나 갈린 이름이 있으면 끈다
-        and all(n == hint or n in skip or n in skipped for n, _ in mentions)
-        # 동의어·모델로 채우라고 읽은 대상이 있으면 그 대상만 채우는 요청이다("교육시간만 다 채워").
-        # 모델이 채우라고 읽은 열은 only_columns에 들어 있다. 모델이 답하지 않은 동의어도 말한 것이다
+        # 말한 이름은 키뿐이어야 한다(코드가 빼기로 읽은 이름은 mentions에 없다). 모델만 빼라고 읽은 이름은
+        # "직급만"이 "직급 빼고"로 뒤집힐 수 있어 끈다(검수 r2 M-1). 갈린 이름이 있어도 끈다(r2 M-2)
+        and all(n == hint for n, _ in mentions)
+        and not conflicted
+        # 동의어·모델로 채우라고 읽은 열이 있으면 그것만 채우는 요청이다("교육시간만 다 채워")
         and not [c for c in aliased.values() if c not in alias_skip]
-        and not only_columns
+        and not asked_columns
     ):
+        # 값이 문서마다 우연히 같으면 그 값 칸이 항목명으로 잡히고("12시간", "팀장") 아래 칸 값을 가져간다.
+        # 그러면 다른 항목과 값이 똑같아져 어느 쪽이 진짜인지 가를 수 없다. 값처럼 생긴 이름과, 값이 다른
+        # 항목과 똑같은 후보는 모두 빼고 소명한다(덜 채울 뿐이다, 검수 r2 H-3)
+        twins = {
+            f.name for f in fields for g in fields if g.name != f.name and g.samples == f.samples
+        }
+        candidates = [
+            f
+            for f in fields
+            if f.name != key_field
+            and f.name not in off_limits
+            and _kind(f.name) == "text"
+            and f.name not in twins
+        ]
         everything = _match_all(
             request,
-            [f for f in fields if f.name != key_field and f.name not in off_limits],
+            candidates,
             tuple(c for c in columns if c != key_column and c not in off_limits),
             pairs,
             view,
@@ -963,10 +997,9 @@ def interpret(
         )
         pairs += everything
         placed_names = {p[0] for p in pairs}
-        held += [
-            f.name
-            for f in fields
-            if f.name != key_field and f.name not in off_limits and f.name not in placed_names
+        held += [f.name for f in candidates if f.name not in placed_names]
+        held += [  # 값이 똑같아 뺀 항목도 비워 둔 까닭을 알린다(진짜 항목이 말없이 사라지지 않게)
+            n for n in twins if n != key_field and n not in off_limits and _kind(n) == "text"
         ]
 
     # 값 형태가 어긋나는 짝(코드형 값을 숫자 열에)은 확정하지 않는다
@@ -1092,22 +1125,19 @@ def _column_prompt(request, field: FieldCandidate, options, view) -> str:
     return "\n".join(lines)
 
 
-def _everything_requested(request: str, work_type, simple: bool, ask_many) -> bool:
-    """'전부·모두·다·전체'를 낱말로 말했고, 작업 종류가 요청에서 정해졌고, 하지 말라는 말이 없다.
+def _everything_requested(request: str, work_type) -> bool:
+    """작업 종류가 요청에서 정해졌고, 채우지 말라는 말이 없고, '전부' 바로 뒤 같은 마디에 빼기 낱말이 없다.
 
-    "전부 넣지 마"·"다 빼줘"·"전부 비워 둬"는 전부가 아니다(검수 H-4). 모르는 말이 섞였는데 모델이 없으면
-    뜻을 읽을 수 없어 켜지 않는다.
+    "전부 넣지 마"·"다 빼줘"·"전부 비워 둬"는 전부가 아니다(검수 H-4). 이 검사는 모델 판단과 함께(AND) 쓴다.
     """
-    if work_type is None or FILL_NEGATED.search(request) or not (simple or ask_many is not None):
+    if work_type is None or FILL_NEGATED.search(request):
         return False
-    found = False
     for word in EVERYTHING.finditer(request):
         rest = request[word.end() :]
         hit, end = SKIP_WORDS.search(rest), CLAUSE_END.search(rest)
         if hit and (end is None or hit.start() < end.start()):
             return False  # 같은 마디에 빼기 낱말: "전부 빼고", "다 놔두고"
-        found = True
-    return found
+    return True
 
 
 def _match_all(request, fields, columns, pairs, view, ask_many):

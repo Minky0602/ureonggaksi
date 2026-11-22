@@ -1357,7 +1357,7 @@ def test_fill_everything_leaves_out_what_the_request_skips(setup):
 
     def many(prompt, fields):
         calls.append(dict(fields))
-        return reads({"연락처": "제외"}, {"연락처": "비고"})(prompt, fields)
+        return reads({"연락처": "제외"}, {"연락처": "비고", "전부": "예"})(prompt, fields)
 
     result = interpret(
         "발급번호 기준으로 문서에 있는 거 전부 넣어줘. 연락처는 빼고", docs, view, ask_many=many
@@ -1386,26 +1386,15 @@ def test_fill_everything_with_unknown_words_and_no_model_fills_nothing(setup):
     assert result.fields == ()
 
 
-def test_fill_everything_counts_a_name_the_model_reads_as_put_off(setup):
-    """'직위는 나중에 따로 정할게'를 코드가 빼기로 못 읽어도 모델이 빼라고 읽으면 나머지 전부를 채운다."""
+def test_fill_everything_is_off_when_only_the_model_reads_a_name_as_skipped(setup):
+    """검수 r2 M-1: 코드가 빼기로 읽지 않은 이름을 모델만 '제외'로 읽으면 끈다. 모델 오판 하나로 "직급만"이
+    "직급 빼고 전부"로 뒤집힐 수 있다. 모델이 채우라고 읽어도 그 이름만 채우는 요청이다."""
     _, docs, view = setup
-    reader = reads({"직급": "제외"}, {"평가점수": "점수"})
-    result = interpret(
-        "발급번호 기준으로 보고서에 있는 거 다 채워줘. 직급은 나중에 따로 정할게",
-        docs,
-        view,
-        ask_many=reader,
-    )
-    assert "직급" not in {c for _, c, _ in result.fields}
-    assert ("이수시간", "이수시간", "assumed") in {tuple(p) for p in result.fields}
-    # 모델이 채우라고 읽었으면 그 이름만 채우는 요청이다: 다른 항목을 후보로 삼지 않는다
-    filled = interpret(
-        "발급번호 기준으로 보고서에 있는 거 다 채워줘. 직급은 나중에 따로 정할게",
-        docs,
-        view,
-        ask_many=reads({"직급": "채움"}),
-    )
-    assert "이수시간" not in {c for _, c, _ in filled.fields}
+    request = "발급번호 기준으로 보고서에 있는 거 다 채워줘. 직급은 나중에 따로 정할게"
+    for role in ("제외", "채움"):
+        reader = reads({"직급": role}, {"평가점수": "점수", "전부": "예"})
+        result = interpret(request, docs, view, ask_many=reader)
+        assert not {"이름", "이수시간", "점수"} & {c for _, c, _ in result.fields}
 
 
 def everyone_fills(prompt, fields):
@@ -1599,3 +1588,198 @@ def test_fill_everything_is_off_when_the_model_reads_a_word_as_a_column(setup):
         ask_many=reads({}, {"수료시간": "이수시간/채움", "직위": "직급", "평가점수": "점수"}),
     )
     assert not {"직급", "점수", "이름"} & {c for _, c, _ in result.fields}
+
+
+# ---------- '전부' 3차: 모르는 말이 섞이면 모델이 두 번 모두 '전부'라고 읽어야 켠다 (검수 r2) ----------
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 수료시간만 다 채워주실래요",
+        "발급번호 기준으로 시수만 전부 넣어주실래요",
+        "발급번호 기준으로 다 됐으면 채워줘",
+        "발급번호 기준으로 모두 수고 많으셨어요 채워줘",
+    ],
+)
+def test_fill_everything_with_unknown_words_needs_the_model_to_say_so(setup, request_text):
+    """검수 r2 H-1·M-3: 모르는 말을 모델이 열과 잇지 못해도, 모델이 '전부'라고 읽지 않으면 켜지 않는다."""
+    _, docs, view = setup
+    result = interpret(
+        request_text, docs, view, ask_many=reads({}, {"직위": "직급", "평가점수": "점수"})
+    )
+    assert not {"이름", "직급", "점수"} & {c for _, c, _ in result.fields}
+
+
+def test_fill_everything_is_off_when_reading_the_request_fails(setup):
+    """검수 r2 H-2: 요청 읽기에서 AI 오류가 나면 뜻을 모르니 켜지 않는다."""
+    from ureonggaksi.errors import ServiceError
+
+    _, docs, view = setup
+
+    def boom(prompt, fields):
+        raise ServiceError("AI_TIMEOUT", "시간 초과")
+
+    result = interpret("발급번호 기준으로 수료시간만 다 채워주실래요", docs, view, ask_many=boom)
+    assert result.fields == ()
+
+
+def test_fill_everything_is_on_when_the_model_agrees_twice(setup):
+    _, docs, view = setup
+    result = interpret(
+        "발급번호 기준으로 문서 내용 다 채워주실래요",
+        docs,
+        view,
+        ask_many=reads({}, {"직위": "직급", "전부": "예"}),
+    )
+    assert ("직위", "직급", "model") in result.fields
+
+
+def test_fill_everything_skips_a_value_that_looks_like_an_item_name(tmp_path):
+    """검수 r2 H-3: 두 문서의 값이 우연히 같으면("12시간") 값 칸이 항목명으로 잡힌다. 후보에서 뺀다."""
+    people = [
+        ("A-01", "가나다", "주무관", "12시간", "90", "내선 101", "E-1"),
+        ("A-02", "라마바", "팀장", "12시간", "85", "내선 102", "E-2"),
+    ]
+    _, docs, view = build(tmp_path, [certificate(*p) for p in people], SHEET)
+    asked = []
+
+    def many(prompt, fields):
+        asked.extend(k for k in fields if k.startswith("[항목]"))
+        return {
+            k: "이수시간" for k, o in fields.items() if k == "[항목] 12시간" and "이수시간" in o
+        }
+
+    result = interpret("발급번호 기준으로 다 채워줘", docs, view, ask_many=many)
+    assert "[항목] 12시간" not in asked and "12시간" not in {f for f, _, _ in result.fields}
+
+
+def test_fill_everything_is_off_when_a_skipped_name_is_contested(setup):
+    """검수 r2 M-2: 코드는 빼기로, 모델은 채움으로 읽어 갈린 이름이 있으면 켜지 않는다."""
+    _, docs, view = setup
+    result = interpret(
+        "발급번호 기준으로 직급은 빼지 말고 다 채워주실래요",
+        docs,
+        view,
+        ask_many=reads({"직급": "채움"}, {"평가점수": "점수", "전부": "예"}),
+    )
+    assert not {"이름", "이수시간", "점수"} & {c for _, c, _ in result.fields}
+
+
+def test_fill_everything_leaves_out_a_synonym_the_request_skips(setup):
+    """'교육시간은 빼고 다 채워': 동의어로 뺀 열만 빼고 나머지를 채운다."""
+    _, docs, view = setup
+    result = interpret(
+        "발급번호 기준으로 교육시간은 빼고 다 채워주실래요",
+        docs,
+        view,
+        ask_many=reads({}, {"직위": "직급", "전부": "예"}),
+    )
+    columns = {c for _, c, _ in result.fields}
+    assert "이수시간" not in columns and "직급" in columns
+
+
+def test_fill_everything_is_off_when_the_key_is_also_pointed_at(setup):
+    """키로 말한 이름을 칸으로도 지목하면(애매한 지목) 켜지 않는다."""
+    result = run(setup, "발급번호 기준으로 발급번호 칸에 다 채워줘")
+    assert not {"이름", "이수시간"} & {c for _, c, _ in result.fields}
+
+
+def test_fill_everything_reads_jeonche_like_the_other_words(setup):
+    """L-2: '전체 채워줘'도 아는 말뿐인 요청이다."""
+    result = run(setup, "발급번호 기준으로 전체 채워줘")
+    assert ("이수시간", "이수시간", "assumed") in result.fields
+
+
+def test_fill_everything_never_asks_about_the_key_item(setup):
+    _, docs, view = setup
+    asked = []
+
+    def many(prompt, fields):
+        asked.extend(k for k in fields if k.startswith("[항목]"))
+        return {}
+
+    interpret("발급번호 기준으로 다 채워줘", docs, view, ask_many=many)
+    assert asked and "[항목] 발급번호" not in asked
+
+
+def test_fill_everything_works_on_a_single_roster_document(tmp_path):
+    """명단 표는 문서 한 장이어도 항목명(머리글)과 값을 가른다."""
+    head = [cell(h, 0, i) for i, h in enumerate(("성명", "부서", "참석일"))]
+    rows = [head] + [
+        [cell(a, n, 0), cell(b, n, 1), cell(c, n, 2)]
+        for n, (a, b, c) in enumerate(
+            [("가나다", "총무팀", "12-04"), ("라마바", "기획팀", "12-05")], 1
+        )
+    ]
+    doc = ["<hp:p><hp:run>" + table(rows) + "</hp:run></hp:p>"]
+    sheet = [["성명", "부서", "참석일자"], ["가나다", None, None], ["라마바", None, None]]
+    _, docs, view = build(tmp_path, [doc], sheet, "명단")
+    result = interpret("성명 기준으로 다 채워줘", docs, view)
+    assert result.record.kind == "table_rows"
+    assert ("부서", "부서", "assumed") in result.fields
+
+
+def fooled(prompt, fields):
+    """가짜 모델: 늘 '전부'라고 답하고(속은 모델) 이름은 채움, 항목은 아는 짝으로 답한다."""
+    out = everyone_fills(prompt, fields)
+    if "[요청] 전부" in fields:
+        out["[요청] 전부"] = "예"
+    return out
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 전부 넣지 마",
+        "발급번호 기준으로 다 안 채워도 돼, 확인해줘",
+        "발급번호 기준으로 전부 해줘",  # 작업 종류를 요청에서 정하지 못함
+        "발급번호 기준으로 교육시간만 다 채워주실래요",  # 동의어로 한 열을 말함
+    ],
+)
+def test_fill_everything_code_guards_hold_even_if_the_model_is_fooled(setup, request_text):
+    """모델이 '전부'라고 잘못 읽어도 코드 방어선(작업 종류·채우지 말라는 말·말한 열)이 막는다."""
+    _, docs, view = setup
+
+    def silent_alias(prompt, fields):  # 동의어 열(이수시간)의 역할에는 답하지 않는다
+        out = fooled(prompt, fields)
+        out.pop("[이름] 이수시간", None)
+        return out
+
+    result = interpret(request_text, docs, view, ask_many=silent_alias)
+    assert not {"이름", "직급", "점수", "비고"} & {c for _, c, _ in result.fields}
+
+
+def test_fill_everything_is_off_when_a_fooled_model_also_reads_a_word_as_a_column(setup):
+    _, docs, view = setup
+    result = interpret(
+        "발급번호 기준으로 수료시간만 다 채워주실래요",
+        docs,
+        view,
+        ask_many=reads({}, {"수료시간": "이수시간/채움", "직위": "직급", "전부": "예"}),
+    )
+    assert not {"직급", "이름"} & {c for _, c, _ in result.fields}
+
+
+def test_fill_everything_with_unknown_words_and_no_model_stays_off(setup):
+    result = run(setup, "발급번호 기준으로 문서 내용 다 채워주실래요")
+    assert result.fields == ()
+
+
+def test_fill_everything_skips_a_text_value_shared_by_all_documents(tmp_path):
+    """두 문서의 직위가 모두 '팀장'이면 그 값 칸이 항목명처럼 잡힌다. 다른 항목의 값과 같은 이름은 뺀다."""
+    people = [
+        ("A-01", "가나다", "팀장", "12시간", "90", "내선 101", "E-1"),
+        ("A-02", "라마바", "팀장", "8시간", "85", "내선 102", "E-2"),
+    ]
+    _, docs, view = build(tmp_path, [certificate(*p) for p in people], SHEET)
+    asked = []
+
+    def many(prompt, fields):
+        asked.extend(k for k in fields if k.startswith("[항목]"))
+        return {}
+
+    result = interpret("발급번호 기준으로 다 채워줘", docs, view, ask_many=many)
+    assert "[항목] 팀장" not in asked
+    # 가짜 '팀장'과 값이 똑같아진 이수시간도 어느 쪽이 진짜인지 몰라 비워 둔다(덜 채울 뿐)
+    assert "이수시간" not in {c for _, c, _ in result.fields} and "이수시간" in result.excluded
