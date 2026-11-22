@@ -80,10 +80,21 @@ def _fill_end(tokens, i):
     if j < len(tokens) and tokens[j].form == "하" and tokens[j].tag in ("XSV", "VV"):
         return j + 1, adverb
     if j < len(tokens) and tokens[j].form == "금지":  # 입력 금지
-        # '입력 금지된 칸'·'입력 금지 칸'·'입력 금지인 칸'은 칸을 꾸민다(3차 검수 L-1)
+        # '입력 금지된 칸'·'입력 금지인 칸'(되·이 + 관형형)과 '입력 금지 칸'(명사)은 칸을 꾸민다(3차 검수 L-1).
+        # '금지야'·'금지돼 있어'·'금지 처리해줘'·'금지 부탁드려요'는 금지를 서술한다(4차 검수 H-A)
         nxt = tokens[j + 1] if j + 1 < len(tokens) else None
-        if nxt is not None and (nxt.form == "되" or nxt.tag.startswith("N") or nxt.tag == "VCP"):
+        after = tokens[j + 2] if j + 2 < len(tokens) else None
+        if (
+            nxt is not None
+            and nxt.form in ("되", "이")
+            and after is not None
+            and after.tag == "ETM"
+        ):
             return None
+        if nxt is not None and nxt.tag.startswith("N"):
+            predicate = after is not None and after.tag in ("XSV", "VV") and after.start == nxt.end
+            if not predicate:
+                return None
         return j + 1, True
     return None
 
@@ -99,6 +110,19 @@ def _attributive(tokens, k) -> bool:
     noun = tokens[k + 1]
     if noun.form == "채":  # 안 채운 채로
         return False
+    if noun.form in ("것", "거", "걸"):
+        nxt = tokens[k + 2] if k + 2 < len(tokens) else None
+        # '않은 걸로 하고'(부사격)·'않은 게 좋겠어'(이 + 형용사)는 시제와 상관없이 하지 않겠다는 말이다.
+        # '못 채운 걸 채워줘'(목적격)·'안 채운 게 있으면'(이 + 있다)은 칸을 꾸민다(4차 검수 H-B)
+        if nxt is not None and nxt.tag == "JKB":
+            return False
+        if (
+            nxt is not None
+            and nxt.tag == "JKS"
+            and k + 3 < len(tokens)
+            and tokens[k + 3].tag == "VA"
+        ):
+            return False
     # '않는 게'·'않는 걸로'(현재형 + 것의 축약)는 하지 않겠다는 말이다. 과거형 '못 채운 걸 채워줘'·'안 채운 게
     # 있으면'은 칸을 꾸민다(3차 검수 M-1)
     contracted = k + 2 < len(tokens) and tokens[k + 2].start == noun.start  # 게(것+이)·걸(것+을)
@@ -130,7 +154,9 @@ def _forbids(tokens, k) -> bool:
         and tokens[k + 3].form != "걸"  # '안 되는 걸로'의 '걸'은 것+을이다
     )
     conditional = after is not None and after.tag == "EC" and after.form in ("면", "으면")
-    asking = any(t.tag == "SF" and t.form == "?" for t in tokens[k + 2 :]) or (
+    # 묻는 말인지는 '되'가 든 마디 안에서만 본다('넣어도 안 돼, 알겠지?'는 금지다, 4차 검수 L-1)
+    clause_end = next((t for t in tokens[k + 2 :] if t.tag in ("SF", "SP")), None)
+    asking = (clause_end is not None and clause_end.form == "?") or (
         after is not None
         and after.tag == "EF"
         and after.form.endswith(("까", "까요", "나", "나요", "니"))

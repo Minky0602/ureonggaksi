@@ -212,3 +212,31 @@ def test_work_type_third_review_cases(request_text, expected):
 )
 def test_strip_particles_polite_ending_on_names(word, stem):
     assert morph.strip_particles(word) == stem
+
+
+@pytest.mark.parametrize(
+    "request_text, expected",
+    [
+        # 4차 검수 H-A: '입력 금지'를 서술하면 금지다. 칸을 꾸밀 때만 채우기로 둔다
+        ("직급은 입력 금지야. 나머지 채워줘", None),
+        ("직급 칸은 입력 금지입니다", None),
+        ("직급은 입력 금지예요", None),
+        ("직급은 입력 금지돼 있어. 나머지 채워줘", None),
+        ("직급 칸 입력 금지 부탁드려요", None),
+        ("직급 칸은 입력 금지 처리해줘", None),
+        ("입력 금지된 칸 빼고 채워줘", "fill"),
+        # 4차 검수 H-B: '-ㄴ 걸로'·'-ㄴ 게 좋겠어'는 시제와 상관없이 하지 않겠다는 말이다
+        ("직급은 채우지 않은 걸로 하고 나머지 채워줘", None),
+        ("직급은 안 넣은 걸로 하고 나머지는 채워줘", None),
+        ("직급은 채우지 않은 게 좋겠고 나머지는 채워줘", None),
+        ("직급은 안 채운 게 낫겠어", None),
+        # 4차 검수 L-1: 뒷마디의 물음표는 앞마디의 금지를 지우지 않는다
+        ("직급은 넣어도 안 돼, 알겠지? 나머지 채워", None),
+    ],
+)
+def test_work_type_fourth_review_cases(request_text, expected):
+    assert _work_type(request_text) == expected
+
+
+def test_question_in_a_later_clause_keeps_the_prohibition():
+    assert morph.negated_fill_spans("직급은 넣어도 안 돼, 알겠지? 나머지 채워")
