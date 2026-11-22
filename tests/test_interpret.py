@@ -2067,3 +2067,74 @@ def test_fill_everything_keeps_header_row_fields(tmp_path):
     _, docs, view = build(tmp_path, [doc("A-01", "가나다"), doc("A-02", "라마바")], sheet)
     result = interpret("발급번호 기준으로 다 채워줘", docs, view, ask_many=fooled_with({}))
     assert "성명" not in result.excluded
+
+
+def test_a_name_differing_only_by_geumaek_pairs_without_the_model(tmp_path):
+    """'-금액'과 '-액'은 같은 이름이다(집행금액 = 집행액, DIF-065)."""
+    rows = [("발급번호", "A-01"), ("집행액", "120000"), ("이수시간", "12")]
+    body = table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
+    docs = [["<hp:p><hp:run>" + body + "</hp:run></hp:p>"]]
+    sheet = [["발급번호", "집행금액", "이수시간"], ["A-01", None, None]]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("발급번호 기준으로 집행금액 채워줘", documents, view)
+    assert ("집행액", "집행금액", "synonym") in result.fields
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 비고하고 연락처 대조해줘",
+        "발급번호 기준으로 비고랑 연락처가 다른 사람 있는지 확인해줘",
+    ],
+)
+def test_a_check_request_pairs_the_field_and_column_said_together(setup, request_text):
+    """대조 요청에서 문서 항목 하나와 열 하나를 "A랑 B"로 이어 말했으면 그 둘이 짝이다(확인 필요)."""
+    _, docs, view = setup
+    result = interpret(request_text, docs, view, ask_many=everyone_fills)
+    assert result.fields == (("연락처", "비고", "assumed"),)
+    assert not result.questions
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 비고랑 연락처 채워줘",  # 채우기의 "A랑 B"는 나열이다
+        "발급번호 기준으로 비고 칸 연락처 맞는지 봐줘",  # 이어 말하지 않았다
+        "발급번호 기준으로 비고랑 연락처랑 직위 대조해줘",  # 이름이 셋이다
+    ],
+)
+def test_a_field_and_column_are_not_paired_otherwise(setup, request_text):
+    _, docs, view = setup
+    result = interpret(request_text, docs, view, ask_many=everyone_fills)
+    assert ("연락처", "비고", "assumed") not in result.fields
+
+
+def test_a_pair_said_together_does_not_override_a_synonym(tmp_path):
+    """검수 r1 M-1: 동의어표로 짝이 서는 이름은 "A랑 B"로 이어 말해도 동의어 짝이 먼저다."""
+    sheet = [["발급번호", "사번", "비고"], ["A-01", None, None], ["A-02", None, None]]
+    _, docs, view = build(tmp_path, [certificate(*p) for p in PEOPLE], sheet)
+    result = interpret(
+        "발급번호 기준으로 직원번호랑 비고 대조해줘", docs, view, ask_many=everyone_fills
+    )
+    assert ("직원번호", "비고", "assumed") not in result.fields
+    assert ("직원번호", "사번", "synonym") in result.fields
+
+
+def test_a_joining_particle_toward_the_key_is_not_a_pair(setup):
+    """검수 r1 L-3: '비고랑 발급번호 기준으로'의 '랑'은 키와 잇는 말이다."""
+    _, docs, view = setup
+    result = interpret(
+        "비고랑 발급번호 기준으로 연락처 대조해줘", docs, view, ask_many=everyone_fills
+    )
+    assert ("연락처", "비고", "assumed") not in result.fields
+
+
+def test_a_name_variant_with_a_different_unit_is_not_a_synonym(tmp_path):
+    """검수 r1 M-2: 집행금액(천원)과 집행액은 단위가 달라 같은 이름이 아니다."""
+    rows = [("발급번호", "A-01"), ("집행액", "120000"), ("이수시간", "12")]
+    body = table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
+    docs = [["<hp:p><hp:run>" + body + "</hp:run></hp:p>"]]
+    sheet = [["발급번호", "집행금액(천원)", "이수시간"], ["A-01", None, None]]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("발급번호 기준으로 집행금액 채워줘", documents, view)
+    assert all(src != "synonym" for _, _, src in result.fields)

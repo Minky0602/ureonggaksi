@@ -137,19 +137,37 @@ _GROUP_OF = {normalized_label(word): i for i, group in enumerate(GROUPS) for wor
 
 
 def _stem(name: str) -> str:
-    """끝의 '명'·'일자'만 다른 이름을 같게 본다(사업장명=사업장, 참석일자=참석일). 두 글자 이름(성명)은 그대로."""
+    """끝의 '명'·'일자'·'금액'만 다른 이름을 같게 본다(사업장명=사업장, 참석일자=참석일, 집행금액=집행액).
+    두 글자 이름(성명, 금액)은 그대로."""
     text = re.sub(r"일자$", "일", _norm(name))
+    text = re.sub(r"(?<=.)금액$", "액", text)
     return re.sub(r"(?<=..)명$", "", text)
 
 
+COMPARE_AFTER = re.compile(r"^\s*(이랑|랑|하고|와|과)\s*(다른|다르|같|일치|대조|비교|맞)")
+
+
+def _said_together(mentions, hint) -> bool:
+    """키 말고 이름이 둘이고, 둘을 바로 잇거나("A랑 B") 뒤 이름 뒤에 대조 표현이 온다("A … B랑 다른").
+    '랑'이 키와 잇는 말("비고랑 발급번호 기준으로")은 아니다(검수 r1 L-3)."""
+    others = [(i, a) for i, (n, a) in enumerate(mentions) if n != hint]
+    if len(others) != 2:
+        return False
+    (i, first), (j, second) = others
+    adjacent = j == i + 1 and re.match(rf"^\s*(이랑|랑|하고|와|과)\s*{NAME_MARK}", first)
+    return bool(adjacent or COMPARE_AFTER.match(second))
+
+
 def _synonym(name: str, pool: tuple[str, ...]) -> str | None:
-    """name과 같은 동의어 묶음에 들었거나 끝의 '명'·'일자'만 다른 후보가 pool에 하나뿐이면 그것.
+    """name과 같은 동의어 묶음에 들었거나 끝의 '명'·'일자'·'금액'만 다른 후보가 pool에 하나뿐이면 그것.
     없거나 둘 이상이면 None(모델에 넘긴다)."""
     group, stem = _GROUP_OF.get(_norm(name)), _stem(name)
     found = [
         p
         for p in pool
         if _norm(p) != _norm(name)
+        and _unit(p)
+        == _unit(name)  # 단위가 다르면 다른 이름이다(집행금액(천원) ≠ 집행액, 검수 r1 M-2)
         and ((group is not None and _GROUP_OF.get(_norm(p)) == group) or _stem(p) == stem)
     ]
     return found[0] if len(found) == 1 else None
@@ -842,6 +860,20 @@ def interpret(
     pairs = [p for p in dict.fromkeys(pairs) if p[0] not in unclear and p[1] not in unclear]
     only_fields = [n for n in only_fields if n not in unclear]
     only_columns = [n for n in only_columns if n not in unclear]
+    # 대조 요청에서 문서 항목 하나와 열 하나만 "A랑 B"로 이어 말했으면 사용자가 짝을 짚었을 수 있다
+    # ("집계표 근무일수랑 보고서 출근일수 다른 사람"). 둘 다 같은 이름·동의어·모델로 짝을 못 찾았을 때만 서로
+    # 짝짓는다(마지막 대안, 검수 r1 M-1). 채우기의 "A랑 B 채워"는 나열이라 짝으로 보지 않는다. 사용자가 같은
+    # 이름을 말한 것이 아니므로 '확인 필요'(assumed)로 보인다(DIF-065)
+    joined = (
+        (only_fields[0], only_columns[0])
+        if work_type == "check"
+        and not pairs
+        and not pointing_unclear
+        and len(only_fields) == 1
+        and len(only_columns) == 1
+        and _said_together(mentions, hint)
+        else None
+    )
     # 애매한 지목이면 모두 묻는다. 모르는 말이 섞였으면 모델이 읽게 하고(있을 때만), 두 번 물어 모두 '채움'인
     # 이름만 남긴다. 빼기는 코드 표지(이미 뺐다)나 모델 '제외' 가운데 하나만 말해도 뺀다. 이 경로의 짝은
     # 모두 assumed로 표시해 미리보기에서 '확인 필요'로 보인다(P04 성능 개선, 2026-11-18 사용자 결정)
@@ -1003,6 +1035,13 @@ def interpret(
         )
         if answer:
             pairs.append((answer, column, "model"))
+    if (
+        joined
+        and joined[0] in only_fields
+        and joined[1] in only_columns
+        and not any(p[0] == joined[0] or p[1] == joined[1] for p in pairs)
+    ):
+        pairs.append((*joined, "assumed"))
 
     # "전부/다 채워": 채울 대상을 하나도 말하지 않았으면 문서 항목 전부가 후보다. 키·뺀 이름은 빼고, 같은 이름 →
     # 동의어표 → 모델(한 번에 묻기) 차례로 짝짓는다. 사용자가 그 열을 말한 것이 아니므로 모두 '확인 필요'로
