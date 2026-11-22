@@ -137,13 +137,15 @@ _GROUP_OF = {normalized_label(word): i for i, group in enumerate(GROUPS) for wor
 
 
 def _stem(name: str) -> str:
-    """끝의 '명'·'일자'만 다른 이름을 같게 본다(사업장명=사업장, 참석일자=참석일). 두 글자 이름(성명)은 그대로."""
+    """끝의 '명'·'일자'·'금액'만 다른 이름을 같게 본다(사업장명=사업장, 참석일자=참석일, 집행금액=집행액).
+    두 글자 이름(성명, 금액)은 그대로."""
     text = re.sub(r"일자$", "일", _norm(name))
+    text = re.sub(r"(?<=.)금액$", "액", text)
     return re.sub(r"(?<=..)명$", "", text)
 
 
 def _synonym(name: str, pool: tuple[str, ...]) -> str | None:
-    """name과 같은 동의어 묶음에 들었거나 끝의 '명'·'일자'만 다른 후보가 pool에 하나뿐이면 그것.
+    """name과 같은 동의어 묶음에 들었거나 끝의 '명'·'일자'·'금액'만 다른 후보가 pool에 하나뿐이면 그것.
     없거나 둘 이상이면 None(모델에 넘긴다)."""
     group, stem = _GROUP_OF.get(_norm(name)), _stem(name)
     found = [
@@ -842,6 +844,19 @@ def interpret(
     pairs = [p for p in dict.fromkeys(pairs) if p[0] not in unclear and p[1] not in unclear]
     only_fields = [n for n in only_fields if n not in unclear]
     only_columns = [n for n in only_columns if n not in unclear]
+    # 대조 요청에서 문서 항목 하나와 열 하나만 "A랑 B"로 이어 말했으면 사용자가 짝을 짚은 것이다
+    # ("집계표 근무일수랑 보고서 출근일수 다른 사람"). 채우기의 "A랑 B 채워"는 나열이라 짝으로 보지 않는다.
+    # 사용자가 같은 이름을 말한 것이 아니므로 '확인 필요'(assumed)로 보인다(DIF-065)
+    if (
+        work_type == "check"
+        and not pairs
+        and not pointing_unclear
+        and len(only_fields) == 1
+        and len(only_columns) == 1
+        and len([n for n, _ in mentions if n != hint]) == 2
+        and any(JOINED.match(after) for n, after in mentions if n != hint)
+    ):
+        pairs.append((only_fields.pop(), only_columns.pop(), "assumed"))
     # 애매한 지목이면 모두 묻는다. 모르는 말이 섞였으면 모델이 읽게 하고(있을 때만), 두 번 물어 모두 '채움'인
     # 이름만 남긴다. 빼기는 코드 표지(이미 뺐다)나 모델 '제외' 가운데 하나만 말해도 뺀다. 이 경로의 짝은
     # 모두 assumed로 표시해 미리보기에서 '확인 필요'로 보인다(P04 성능 개선, 2026-11-18 사용자 결정)
