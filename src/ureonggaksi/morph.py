@@ -16,7 +16,9 @@ FILL_NOUNS = {"입력", "기입"}
 NEGATING_AUX = {"말", "않", "못하"}  # 채우지 말다·않다, 채우지 못하게
 NEGATING_ADVERBS = {"안", "못"}  # 안 채워도, 못 넣어
 # 채우기와 부정 사이에 올 수 있는 보조 용언: 채워 주지·채워 놓지·넣어 두지·채우려 하지
-PASSING_AUX = {"주", "두", "놓", "버리", "드리", "하"}
+PASSING_AUX = {"주", "두", "놓", "버리", "드리", "하", "쓰"}  # 옮겨 쓰지 마
+# '안 되'가 금지인 자리: '-어도·-면·-어서' 뒤("넣어도 안 돼", "채우면 안 돼"). '-고 안 되면'은 조건이다(2차 검수 H-1)
+PERMIT_ENDINGS = {"어도", "아도", "면", "으면", "어서", "아서"}
 _lock = threading.Lock()
 
 
@@ -53,9 +55,11 @@ def strip_particles(word: str) -> str:
             break
         end = token.start
     stem = word[:end]
-    # 낱말 하나만 분석하면 '생일요'의 '요'를 명사에 붙인다. 떼고 한 번 더 본다(검수 M3)
-    if stem.endswith("요") and len(stem) > 2:
-        return strip_particles(stem[:-1]) or stem
+    # 낱말 하나만 분석하면 '생일요'의 '요'를 따로 떨어진 명사로 읽는다. 그 '요'만 뗀다(검수 M3).
+    # '조치필요'·'사업개요'는 '필요'·'개요'가 한 토큰이라 그대로 둔다(2차 검수 M-4)
+    last = [t for t in tokens if t.start < end]
+    if len(last) > 1 and last[-1].form == "요" and last[-1].start == end - 1:
+        return strip_particles(word[: end - 1])  # '성함은요'→'성함은'→'성함'(매번 짧아져 끝난다)
     return stem
 
 
@@ -75,14 +79,44 @@ def _fill_end(tokens, i):
         j += 1
     if j < len(tokens) and tokens[j].form == "하" and tokens[j].tag in ("XSV", "VV"):
         return j + 1, adverb
-    if j < len(tokens) and tokens[j].form == "금지":  # 입력 금지
+    if j < len(tokens) and tokens[j].form == "금지":  # 입력 금지('입력 금지된 칸'은 칸을 꾸민다)
+        if j + 1 < len(tokens) and tokens[j + 1].form == "되":
+            return None
         return j + 1, True
     return None
 
 
 def _attributive(tokens, k) -> bool:
-    """k 자리가 관형형 어미('못 채운 칸', '않은 칸')면 하지 않는 채우기가 아니라 칸을 꾸미는 말이다(검수 M1)."""
-    return k < len(tokens) and tokens[k].tag == "ETM"
+    """k 자리가 칸을 꾸미는 관형형('못 채운 칸', '않은 칸', '못 채운 거 채워줘')이면 하지 않는 채우기가 아니다(검수 M1).
+
+    관형형 뒤가 명사일 때만 꾸밈이다. '-ㄴ 채로', '않는 게'(것+이), '않는 걸로', '말 것'(할 것, 명령)은 부정을
+    남긴다(2차 검수 M-1·M-2).
+    """
+    if k + 1 >= len(tokens) or tokens[k].tag != "ETM" or not tokens[k + 1].tag.startswith("N"):
+        return False
+    noun = tokens[k + 1]
+    if noun.form in ("채", "걸"):
+        return False
+    contracted = k + 2 < len(tokens) and tokens[k + 2].start == noun.start  # 게(것+이)·걸(것+을)
+    command = tokens[k].form in ("ᆯ", "을") and noun.form in ("것", "거")  # 채우지 말 것
+    return not (contracted or command)
+
+
+def _forbids(tokens, k) -> bool:
+    """k의 '안 되'가 금지인가. 앞이 '-어도·-면·-어서'(조사 'ㄴ·는·도' 허용)이거나 '-는 건'이어야 하고,
+    '되' 뒤가 조건('-면')이나 관형형('안 되는 칸')이면 아니다."""
+    before = tokens[k - 1]
+    if before.tag == "JX" and k >= 2:
+        before = tokens[k - 2]
+    permitted = (before.tag == "EC" and before.form in PERMIT_ENDINGS) or before.form in (
+        "거",
+        "것",
+    )
+    after = tokens[k + 2] if k + 2 < len(tokens) else None
+    conditional = after is not None and (
+        after.tag == "ETM" or (after.tag == "EC" and after.form in ("면", "으면"))
+    )
+    return permitted and not conditional
 
 
 def negated_fill_spans(text: str) -> list[tuple[int, int]]:
@@ -102,13 +136,14 @@ def negated_fill_spans(text: str) -> list[tuple[int, int]]:
         while k < len(tokens):
             token = tokens[k]
             if token.tag == "VX" and token.form in NEGATING_AUX:
-                # '-고 말다'는 끝내 하고 만다는 뜻이다("채우고 말 거야", 검수 L3)
-                done = tokens[k - 1].tag == "EC" and tokens[k - 1].form == "고"
+                # '-고 말다'는 끝내 하고 만다는 뜻이다("채우고 말 거야", 검수 L3). '채울지 말지'는 고르는 말이다
+                done = tokens[k - 1].tag == "EC" and tokens[k - 1].form in ("고", "ᆯ지", "을지")
                 if not done and not _attributive(tokens, k + 1):
                     spans.append((start, token.end))
                 break
             if token.form == "안" and k + 1 < len(tokens) and tokens[k + 1].form == "되":
-                spans.append((start, tokens[k + 1].end))  # 넣어도 안 돼, 채우면 안 돼
+                if _forbids(tokens, k):
+                    spans.append((start, tokens[k + 1].end))  # 넣어도 안 돼, 채우면 안 돼
                 break
             if (
                 token.tag in ("EC", "JX", "EP")
