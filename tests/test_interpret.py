@@ -2021,3 +2021,49 @@ def test_fill_everything_drops_a_value_cell_that_overflowed_into_a_label(tmp_pat
     result = interpret("발급번호 기준으로 다 채워줘", docs, view, ask_many=model)
     assert "주소" not in {c for _, c, _ in result.fields}
     assert "서울시 중구" in result.excluded
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 그건 건너뛰고 다 채워줘",  # 재확인 M-4: 가리키는 말
+        "발급번호 기준으로 세 번째 칸은 건너뛰고 다 채워줘",
+        "발급번호 기준으로 3열은 놔둬 다 채워줘",
+        "발급번호 기준으로 표는 놔두고 다 채워줘",  # 자리 낱말만 빼는 마디
+        "발급번호 기준으로 다 채워줘. 아니다, 하지 마",  # 재확인 M-5: 거둬들이는 마디
+        "발급번호 기준으로 다 채워줘, 아니 잠깐 기다려",
+    ],
+)
+def test_fill_everything_is_off_when_a_side_clause_points_at_something_unknown(setup, request_text):
+    _, docs, view = setup
+    result = interpret(request_text, docs, view, ask_many=fooled_with({}))
+    assert "직급" not in {c for _, c, _ in result.fields}
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 다 채워줘, 부탁해",  # 인사는 마디가 아니다
+        "발급번호 기준으로 다 채워주세요 감사합니다",
+        "발급번호로 찾아서 다 채워줘",  # 키를 찾는 마디
+    ],
+)
+def test_fill_everything_keeps_courtesy_and_key_clauses(setup, request_text):
+    _, docs, view = setup
+    result = interpret(request_text, docs, view, ask_many=fooled_with({}))
+    assert "직급" in {c for _, c, _ in result.fields}
+
+
+def test_fill_everything_keeps_header_row_fields(tmp_path):
+    """재확인 L-2: '연번 | 성명' 머리글 아래 연번 값이 문서마다 같아도 성명은 넘친 값이 아니다."""
+
+    def doc(number, name):
+        body = table(
+            [[cell("연번", 0, 0), cell("성명", 0, 1)], [cell("1", 1, 0), cell(name, 1, 1)]]
+        )
+        return [para(f"발급번호: {number}") + "<hp:p><hp:run>" + body + "</hp:run></hp:p>"]
+
+    sheet = [["발급번호", "이름"], ["A-01", None], ["A-02", None]]
+    _, docs, view = build(tmp_path, [doc("A-01", "가나다"), doc("A-02", "라마바")], sheet)
+    result = interpret("발급번호 기준으로 다 채워줘", docs, view, ask_many=fooled_with({}))
+    assert "성명" not in result.excluded

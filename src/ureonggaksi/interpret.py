@@ -203,7 +203,13 @@ def _overflowed_values(documents: tuple[Document, ...], fields) -> set[str]:
             continue
         if any(m.get(key) is None or m[key].text.strip() != text for m in maps[1:]):
             continue
-        right = _right_or_below(maps[0], block)[0]
+        right, below = _right_or_below(maps[0], block)
+        below_texts = [
+            n.text.strip() if (n := _right_or_below(m, m[key])[1]) is not None else None
+            for m in maps
+        ]
+        if below is not None and all(t == below_texts[0] for t in below_texts):
+            continue  # 아래 칸도 문서마다 같으면 머리글 표다('연번 | 성명' 아래 '1', 재확인 L-2)
         field = by_norm.get(_norm(right.text)) if right is not None else None
         if field is not None and field.rule.direction == "below":
             found.add(field.name)
@@ -852,9 +858,7 @@ def interpret(
     )
     skipped: list[str] = []
     unread: list[str] = []  # 모델이 열과 잇지 못한 모르는 말(2차 M-1)
-    settled_words: list[str] = (
-        [hint] if hint else []
-    )  # 빼기가 확정된 말과 키: '전부' 곁 마디에 와도 된다
+    settled_words: list[str] = []  # 빼기가 확정된 말: '전부' 곁 마디에 와도 된다
     conflicted: list[str] = []
     if pointing_unclear or (not simple and ask_many is None):
         drop = set(mentioned)
@@ -1023,7 +1027,7 @@ def interpret(
         and not any(_said_to_skip(request, w) for w in unread)
         # '전부' 동사 밖의 마디("평가는 놔둬", "평가 외에는")는 빼기가 확정된 말·키로만 되어 있어야 한다.
         # 빼기 낱말 목록으로는 목록 밖 표현이 샌다(4차 검수 H-1)
-        and _side_clauses_settled(request, settled_words)
+        and _side_clauses_settled(request, settled_words, hint)
         # 같은 라벨이 문서에 두 번 이상 나오는 서식은 값 칸이 항목명으로 잡힌다(3차 검수 H-3)
         and not _ambiguous_labels(documents)
     ):
@@ -1185,19 +1189,36 @@ FRAME_NOUNS = (
 )  # 자리·자료를 가리키는 말: "발급번호 기준으로 찾아서", "엑셀 보고"
 
 
-def _side_clauses_settled(request: str, settled: list[str]) -> bool:
-    """'전부' 곁 마디의 내용어가 모두 빼기가 확정된 말·키·자리 낱말 안에 든다."""
-    known = [
-        (m.start(), m.end())
-        for word in [*settled, *FRAME_NOUNS]
-        if word
-        for m in re.finditer(re.escape(word), request)
-    ]
-    return all(
-        any(a <= start and end <= b for a, b in known)
-        for clause in morph.side_clauses(request)
-        for start, end in clause
-    )
+KEY_STEMS = {"찾", "맞추", "대조", "매칭", "연결", "비교"}  # "발급번호로 찾아서": 키를 찾는 마디
+
+
+def _side_clauses_settled(request: str, skips: list[str], key: str | None) -> bool:
+    """'전부' 곁 마디마다 무엇을 하는지 확정됐다. 확정된 빼기 말이 있는 빼기 마디거나, 키가 있는 키 찾기 마디이고,
+    나머지 내용어는 빼기 말·키·자리 낱말 안에 든다.
+
+    내용어가 없는 마디("아니다, 하지 마"), 자리 낱말만 빼는 마디("표는 놔두고"), 가리키는 말만 있는 마디("그건
+    건너뛰고")는 무엇을 하라는지 몰라 끈다(재확인 M-4·M-5).
+    """
+
+    def spans(words):
+        return [
+            (m.start(), m.end()) for w in words if w for m in re.finditer(re.escape(w), request)
+        ]
+
+    skip_spans, key_spans = spans(skips), spans([key] if key else [])
+    known = skip_spans + key_spans + spans(FRAME_NOUNS)
+
+    def inside(span, pool):
+        return any(a <= span[0] and span[1] <= b for a, b in pool)
+
+    def settled(stem, nouns):
+        if not all(inside(n, known) for n in nouns):
+            return False
+        if any(inside(n, skip_spans) for n in nouns):
+            return True
+        return stem in KEY_STEMS and any(inside(n, key_spans) for n in nouns)
+
+    return all(settled(stem, nouns) for stem, nouns in morph.side_clauses(request))
 
 
 def _everything_requested(request: str, work_type) -> bool:

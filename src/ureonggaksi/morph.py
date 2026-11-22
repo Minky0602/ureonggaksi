@@ -322,12 +322,15 @@ def everything_spans(text: str) -> list[tuple[int, int]]:
     return [(tokens[i].start, tokens[i].end) for i, _, _ in _everything_verbs(tokens)]
 
 
-CONTENT_TAGS = ("NNG", "NNP", "SL", "SH")
+# 곁 마디의 내용어: 명사·외국어에 더해 대명사('그건')·수사·숫자·관형사('세 번째', '3열')도 무엇을 가리킨다(재확인 M-4)
+CONTENT_TAGS = ("NNG", "NNP", "SL", "SH", "NP", "NR", "SN", "MM")
+LIGHT_NOUNS = {"것", "거", "수", "쪽", "데"}  # 가리키는 대상이 없는 의존 명사
+COURTESY = {"부탁", "감사", "고맙"}  # "다 채워줘, 부탁해": 인사는 마디로 치지 않는다
 EXCEPT_NOUNS = {"외", "이외", "제외"}  # 평가 외에는, 평가 이외 전부
 
 
-def side_clauses(text: str) -> list[list[tuple[int, int]]]:
-    """'전부' 채우기 동사 묶음 밖에서 끝나는 마디마다 그 마디의 내용어(명사·외국어) 글자 범위.
+def side_clauses(text: str) -> list[tuple[str, list[tuple[int, int]]]]:
+    """'전부' 채우기 동사 묶음 밖에서 끝나는 마디마다 (서술어 어간, 내용어 글자 범위). 내용어가 없는 마디도 낸다.
 
     "평가는 놔둬, 다 채워줘"의 [평가], "평가 외에는 다 채워"의 [평가]. 다른 용언이 연결·종결 어미로 마디를
     끝내야 마디다. 관형형("보고서에 있는 거")은 꾸밈이라 마디를 끝내지 않는다. 마디를 끝내는 용언이
@@ -335,17 +338,19 @@ def side_clauses(text: str) -> list[list[tuple[int, int]]]:
     """
     tokens = _tokens(text)
     chain = {k for _, j, end in _everything_verbs(tokens) for k in range(j, end)}
-    clauses: list[list[tuple[int, int]]] = []
+    clauses: list[tuple[str, list[tuple[int, int]]]] = []
     nouns: list[tuple[int, int]] = []
     for k, token in enumerate(tokens):
         if k in chain or token.tag in ("SF", "SP"):
             nouns = []
             continue
         if token.tag.startswith("N") and token.form in EXCEPT_NOUNS:
-            clauses.append(nouns)
+            clauses.append((token.form, nouns))
             nouns = []
             continue
-        if token.tag.startswith(CONTENT_TAGS):
+        if token.tag.startswith(CONTENT_TAGS) or (
+            token.tag == "NNB" and token.form not in LIGHT_NOUNS
+        ):
             if token.form not in EVERYTHING_WORDS:
                 nouns.append((token.start, token.end))
             continue
@@ -356,11 +361,14 @@ def side_clauses(text: str) -> list[list[tuple[int, int]]]:
             m += 1
         if m < len(tokens) and tokens[m].tag not in ("EC", "EF"):
             continue  # 관형형·명사형은 마디를 끝내지 않는다
+        stem = token.form
         if token.tag.startswith(("XSV", "XSA")) and nouns and nouns[-1][1] == token.start:
+            stem = text[nouns[-1][0] : nouns[-1][1]]
             nouns.pop()
-        clauses.append(nouns)
+        if stem not in COURTESY:
+            clauses.append((stem, nouns))
         nouns = []
-    return [c for c in clauses if c]
+    return clauses
 
 
 def has_exclusive(text: str) -> bool:
