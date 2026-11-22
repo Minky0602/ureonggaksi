@@ -267,7 +267,7 @@ def everything_spans(text: str) -> list[tuple[int, int]]:
         j = i + 1
         while j < len(tokens) and (tokens[j].tag == "MAG" or tokens[j].tag.startswith("J")):
             j += 1
-        if j < len(tokens) and (_is_fill(tokens, j) or _is_check(tokens, j)):
+        if j < len(tokens) and (_fill_end(tokens, j) is not None or _is_check(tokens, j)):
             spans.append((token.start, token.end))
     return spans
 
