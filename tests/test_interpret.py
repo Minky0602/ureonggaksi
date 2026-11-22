@@ -2107,3 +2107,34 @@ def test_a_field_and_column_are_not_paired_otherwise(setup, request_text):
     _, docs, view = setup
     result = interpret(request_text, docs, view, ask_many=everyone_fills)
     assert ("연락처", "비고", "assumed") not in result.fields
+
+
+def test_a_pair_said_together_does_not_override_a_synonym(tmp_path):
+    """검수 r1 M-1: 동의어표로 짝이 서는 이름은 "A랑 B"로 이어 말해도 동의어 짝이 먼저다."""
+    sheet = [["발급번호", "사번", "비고"], ["A-01", None, None], ["A-02", None, None]]
+    _, docs, view = build(tmp_path, [certificate(*p) for p in PEOPLE], sheet)
+    result = interpret(
+        "발급번호 기준으로 직원번호랑 비고 대조해줘", docs, view, ask_many=everyone_fills
+    )
+    assert ("직원번호", "비고", "assumed") not in result.fields
+    assert ("직원번호", "사번", "synonym") in result.fields
+
+
+def test_a_joining_particle_toward_the_key_is_not_a_pair(setup):
+    """검수 r1 L-3: '비고랑 발급번호 기준으로'의 '랑'은 키와 잇는 말이다."""
+    _, docs, view = setup
+    result = interpret(
+        "비고랑 발급번호 기준으로 연락처 대조해줘", docs, view, ask_many=everyone_fills
+    )
+    assert ("연락처", "비고", "assumed") not in result.fields
+
+
+def test_a_name_variant_with_a_different_unit_is_not_a_synonym(tmp_path):
+    """검수 r1 M-2: 집행금액(천원)과 집행액은 단위가 달라 같은 이름이 아니다."""
+    rows = [("발급번호", "A-01"), ("집행액", "120000"), ("이수시간", "12")]
+    body = table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
+    docs = [["<hp:p><hp:run>" + body + "</hp:run></hp:p>"]]
+    sheet = [["발급번호", "집행금액(천원)", "이수시간"], ["A-01", None, None]]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("발급번호 기준으로 집행금액 채워줘", documents, view)
+    assert all(src != "synonym" for _, _, src in result.fields)
