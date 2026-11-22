@@ -19,6 +19,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 
+from . import morph
 from .errors import ServiceError
 from .extract import _normalized as normalized_label
 from .models import Block, Document
@@ -342,8 +343,14 @@ def _work_type(request: str) -> str | None:
     request = POLITE_ASK.sub(
         lambda m: m.group(1) + " ", request
     )  # 부탁 어미째 지운다("있어"는 검토 표지이기도 하다)
-    negated = bool(FILL_NEGATED.search(request))
-    fill = bool(FILL.search(FILL_NEGATED.sub(" ", request)))
+    # 정규식이 아는 꼴과 형태소로 읽은 꼴("다 채우진 마", "입력하지 않아도")을 함께 지운다(DIF-064)
+    spans = [m.span() for m in FILL_NEGATED.finditer(request)]
+    spans += morph.negated_fill_spans(request)
+    rest = request
+    for start, end in spans:
+        rest = rest[:start] + " " * (end - start) + rest[end:]
+    negated = bool(spans)
+    fill = bool(FILL.search(rest))
     if negated and fill:
         return None
     check = bool(CHECK.search(request))
@@ -437,7 +444,8 @@ def _unknown_words(request: str, names: list[str]) -> list[str]:
     for token in re.split(r"[\s,.!~·、/?]+", "".join(marked)):
         if not token or SIMPLE_TOKEN.fullmatch(token):
             continue
-        word = re.sub(rf"(?:{PARTICLE}|좀|요)+$", "", token.replace(NAME_MARK, ""))
+        # 조사는 형태소로 뗀다. 정규식으로 떼면 낱말 끝 글자까지 먹었다('평가는'→'평', DIF-064)
+        word = morph.strip_particles(re.sub(r"좀$", "", token.replace(NAME_MARK, "")))
         # 코드가 이미 아는 동사·빼기 표현('채우고', '놔두세')은 열 이름의 다른 말이 아니다(DIF-050 M4)
         if any(p.search(word) for p in (FILL, FILL_NEGATED, CHECK)) or NEGATED.match(word):
             continue
