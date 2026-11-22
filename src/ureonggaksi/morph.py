@@ -80,8 +80,9 @@ def _fill_end(tokens, i):
     if j < len(tokens) and tokens[j].form == "하" and tokens[j].tag in ("XSV", "VV"):
         return j + 1, adverb
     if j < len(tokens) and tokens[j].form == "금지":  # 입력 금지
-        # '입력 금지된 칸'·'입력 금지인 칸'(되·이 + 관형형)과 '입력 금지 칸'(명사)은 칸을 꾸민다(3차 검수 L-1).
-        # '금지야'·'금지돼 있어'·'금지 처리해줘'·'금지 부탁드려요'는 금지를 서술한다(4차 검수 H-A)
+        # '입력 금지된 칸'·'입력 금지인 칸'(되·이 + 관형형 + 명사)과 '입력 금지 칸'(명사)은 칸을 꾸민다(3차 검수 L-1).
+        # '금지야'·'금지돼 있어'·'금지 처리(해)줘'·'금지 부탁드려요'는 금지를 서술하고, 꾸밈을 받은 명사가 다시
+        # 서술어면('금지 칸이야', '금지된 걸로 하고') 역시 금지다(4차 검수 H-A·H-C·M-B)
         nxt = tokens[j + 1] if j + 1 < len(tokens) else None
         after = tokens[j + 2] if j + 2 < len(tokens) else None
         if (
@@ -90,13 +91,39 @@ def _fill_end(tokens, i):
             and after is not None
             and after.tag == "ETM"
         ):
-            return None
-        if nxt is not None and nxt.tag.startswith("N"):
-            predicate = after is not None and after.tag in ("XSV", "VV") and after.start == nxt.end
-            if not predicate:
+            head = j + 3
+            if (
+                head < len(tokens)
+                and tokens[head].tag.startswith("N")
+                and not _restated(tokens, head)
+            ):
+                return None
+        elif nxt is not None and nxt.tag.startswith("N"):
+            predicate = after is not None and (
+                after.tag == "XSV" or (after.tag.startswith("VV") and after.start == nxt.end)
+            )
+            head = j + 1
+            while head + 1 < len(tokens) and tokens[head + 1].tag.startswith("N"):
+                head += 1  # 명사가 이어지면 마지막 명사가 머리다('입력 금지 대상 항목이야')
+            if not predicate and not _restated(tokens, head):
                 return None
         return j + 1, True
     return None
+
+
+def _restated(tokens, h) -> bool:
+    """꾸밈을 받은 명사 h가 다시 서술어가 되는가. '…칸이야'(이다), '…걸로 하고'(것 + 부사격), '…게 낫겠어'·'…편이
+    좋겠어'(이/가 + 형용사)는 꾸밈이 아니라 하지 않겠다는 말이다. '…칸이면'(조건)과 '…걸 채워'·'…게 있으면'은
+    꾸밈이다(4차 검수 H-B·H-C·M-A)."""
+    nxt = tokens[h + 1] if h + 1 < len(tokens) else None
+    if nxt is None:
+        return False
+    if nxt.tag == "VCP":
+        follow = tokens[h + 2] if h + 2 < len(tokens) else None
+        return not (follow is not None and follow.tag == "EC" and follow.form in ("면", "으면"))
+    if nxt.tag == "JKB" and tokens[h].form in ("것", "거", "걸"):
+        return True
+    return nxt.tag in ("JKS", "JKC") and h + 2 < len(tokens) and tokens[h + 2].tag.startswith("VA")
 
 
 def _attributive(tokens, k) -> bool:
@@ -110,19 +137,8 @@ def _attributive(tokens, k) -> bool:
     noun = tokens[k + 1]
     if noun.form == "채":  # 안 채운 채로
         return False
-    if noun.form in ("것", "거", "걸"):
-        nxt = tokens[k + 2] if k + 2 < len(tokens) else None
-        # '않은 걸로 하고'(부사격)·'않은 게 좋겠어'(이 + 형용사)는 시제와 상관없이 하지 않겠다는 말이다.
-        # '못 채운 걸 채워줘'(목적격)·'안 채운 게 있으면'(이 + 있다)은 칸을 꾸민다(4차 검수 H-B)
-        if nxt is not None and nxt.tag == "JKB":
-            return False
-        if (
-            nxt is not None
-            and nxt.tag == "JKS"
-            and k + 3 < len(tokens)
-            and tokens[k + 3].tag == "VA"
-        ):
-            return False
+    if _restated(tokens, k + 1):  # 채우지 않은 걸로 하고, 안 채운 게 낫겠어
+        return False
     # '않는 게'·'않는 걸로'(현재형 + 것의 축약)는 하지 않겠다는 말이다. 과거형 '못 채운 걸 채워줘'·'안 채운 게
     # 있으면'은 칸을 꾸민다(3차 검수 M-1)
     contracted = k + 2 < len(tokens) and tokens[k + 2].start == noun.start  # 게(것+이)·걸(것+을)
