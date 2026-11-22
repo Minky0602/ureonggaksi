@@ -14,6 +14,8 @@ dependencies = [
   "openpyxl>=3.1.5,<4",
   "defusedxml>=0.7.1,<1",
   "regex>=2024.11.6",
+  "kiwipiepy==0.24.1",
+  "kiwipiepy-model==0.24.0",
 ]
 
 [project.optional-dependencies]
@@ -39,3 +41,8 @@ extend-exclude = ["docs", ".pytest-tmp"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]
+
+[tool.uv]
+# kiwipiepy는 학습 도구(knlm)용으로 numpy를 요구하지만 형태소 분석에는 쓰지 않는다. numpy가 있으면 openpyxl이
+# 불러와 메모리 상한을 건 XLSX 작업자에서 OpenBLAS 할당 실패가 난다. 배포물(EXE)과 같게 설치하지 않는다(DIF-064)
+override-dependencies = ["numpy ; sys_platform == 'never'"]

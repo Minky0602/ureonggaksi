@@ -15,6 +15,9 @@ def collect(target):
         "et_xmlfile",
         "defusedxml",
         "regex",
+        "kiwipiepy",
+        "kiwipiepy_model",
+        "tqdm",
     ):
         dist = distribution(name)
         count = 0

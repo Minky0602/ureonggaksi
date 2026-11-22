@@ -19,6 +19,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 
+from . import morph
 from .errors import ServiceError
 from .extract import _normalized as normalized_label
 from .models import Block, Document
@@ -29,8 +30,10 @@ from .xlsx import TargetView
 # 작업 종류 동사. "확인서"·"검토서"처럼 문서 이름에 든 글자는 동사가 아니다
 FILL = re.compile(r"채워|채우|채움|넣어|넣기|넣고|넣을|입력|기입|적어|옮겨|반영|써\s?줘")
 FILL_NEGATED = re.compile(  # 하지 않는 채우기: "채우지 마", "채워주지 마", "안 채워도 돼", "넣을 필요 없어"
-    r"(채우|채워|넣|넣어|입력하|기입하|적|적어|옮기|옮겨|써)\s*(주)?\s*지\s*(는|도|만)?\s*(마|말|않)"
-    r"|안\s*(채|넣|입력|기입|적|옮|써)|필요\s*(는|도)?\s*없|맙시다|(채우|넣으|입력하|기입하|적으|쓰)면\s*안"
+    # '안 채운 칸'·'채우지 않은 칸'은 칸을 꾸미는 관형형이라 하지 않는 채우기가 아니다(Kiwi PR 검수 M1).
+    # '-ㄴ 채로'·'않는 게'처럼 관형형이어도 부정인 꼴은 형태소 쪽(morph)이 잡는다(3차 검수 M-2)
+    r"(채우|채워|넣|넣어|입력하|기입하|적|적어|옮기|옮겨|써)\s*(주)?\s*지\s*(는|도|만)?\s*(마|말|않(?!은|는))"
+    r"|안\s*(채|넣|입력|기입|적|옮|써)(?!운|은|한|긴)|필요\s*(는|도)?\s*없|맙시다|(채우|넣으|입력하|기입하|적으|쓰)면\s*안(?!\s*(될까|되나|되겠))"
 )
 CHECK = re.compile(
     r"확인(?!서)|대조|검토(?!서)|비교|맞는지|맞나|같은지|일치|검증|틀린|다른지|차이|체크|점검|검사"
@@ -332,7 +335,8 @@ def _roster_fields(documents, section, table, top, names) -> list[FieldCandidate
 # "넣어 줄래?", "채워 줄 수 있어?": 부탁으로 끝나는 '?'는 묻는 말(검토)이 아니다(DIF-055)
 POLITE_ASK = re.compile(
     r"(채워|넣어|입력해|기입해|적어|옮겨|반영해|써)\s*"
-    r"(줄래요?|줄\s*수\s*(있어|있어요|있나요|있을까요?)|주실\s*(래요|수\s*있나요)|주시겠어요|주실래요?)\s*\?"
+    r"(줄래요?|줄\s*수\s*(있어|있어요|있나요|있을까요?)|주실\s*(래요|수\s*있나요)|주시겠어요|주실래요?"
+    r"|주시?면\s*안\s*(될까요?|되나요?|되겠습니까|돼요?))\s*\?"  # 채워 주시면 안 될까요?(3차 검수 M-3)
 )
 
 
@@ -342,8 +346,14 @@ def _work_type(request: str) -> str | None:
     request = POLITE_ASK.sub(
         lambda m: m.group(1) + " ", request
     )  # 부탁 어미째 지운다("있어"는 검토 표지이기도 하다)
-    negated = bool(FILL_NEGATED.search(request))
-    fill = bool(FILL.search(FILL_NEGATED.sub(" ", request)))
+    # 정규식이 아는 꼴과 형태소로 읽은 꼴("다 채우진 마", "입력하지 않아도")을 함께 지운다(DIF-064)
+    spans = [m.span() for m in FILL_NEGATED.finditer(request)]
+    spans += morph.negated_fill_spans(request)
+    rest = request
+    for start, end in spans:
+        rest = rest[:start] + " " * (end - start) + rest[end:]
+    negated = bool(spans)
+    fill = bool(FILL.search(rest))
     if negated and fill:
         return None
     check = bool(CHECK.search(request))
@@ -437,7 +447,8 @@ def _unknown_words(request: str, names: list[str]) -> list[str]:
     for token in re.split(r"[\s,.!~·、/?]+", "".join(marked)):
         if not token or SIMPLE_TOKEN.fullmatch(token):
             continue
-        word = re.sub(rf"(?:{PARTICLE}|좀|요)+$", "", token.replace(NAME_MARK, ""))
+        # 조사는 형태소로 뗀다. 정규식으로 떼면 낱말 끝 글자까지 먹었다('평가는'→'평', DIF-064)
+        word = morph.strip_particles(re.sub(r"좀$", "", token.replace(NAME_MARK, "")))
         # 코드가 이미 아는 동사·빼기 표현('채우고', '놔두세')은 열 이름의 다른 말이 아니다(DIF-050 M4)
         if any(p.search(word) for p in (FILL, FILL_NEGATED, CHECK)) or NEGATED.match(word):
             continue

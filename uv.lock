@@ -2,6 +2,9 @@ version = 1
 revision = 5
 requires-python = ">=3.12"
 
+[manifest]
+overrides = [{ name = "numpy", marker = "sys_platform == 'never'" }]
+
 [[package]]
 name = "altgraph"
 version = "0.17.5"
@@ -48,6 +51,35 @@ wheels = [
 ]
 
 [[package]]
+name = "kiwipiepy"
+version = "0.24.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "kiwipiepy-model" },
+    { name = "numpy", marker = "sys_platform == 'never'" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c1/9f/662623d6b43985bbd11c4a2e3977c1083f0a9a200e517780756a26346916/kiwipiepy-0.24.1.tar.gz", hash = "sha256:b5b14d3269419d3caaa60a0259991cb1f544b26a9bd2306c619fb0ea2acad7dc", size = 2568329, upload-time = "2026-10-20T16:08:58.506Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7a/98/cacd876564b48c159b697d05ffa11a2c7d56e14e279ab58b3a01830495e5/kiwipiepy-0.24.1-cp314-cp314t-macosx_10_15_x86_64.whl", hash = "sha256:0c41ff6a693d2f4db677d4c42aa60ffaeaa2fe89b8a9cf9e47a3566f93d5524a", size = 15212014, upload-time = "2026-10-20T16:32:38.67Z" },
+    { url = "https://files.pythonhosted.org/packages/2e/5a/8da6940c338f95982ee0b0c49d71f57e45c49ed93d8e95f7b8f4bd622d4e/kiwipiepy-0.24.1-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:2a63ebc44e867d90589c4c23b5672c479f641d68f0680cde445854fb40460b79", size = 5899832, upload-time = "2026-10-20T16:14:50.78Z" },
+    { url = "https://files.pythonhosted.org/packages/dc/91/4db23b4846210eb2d71971bf260e7aed9984aeff1ded8d2e3d076be7b19a/kiwipiepy-0.24.1-cp314-cp314t-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:0e60c6eea5fa31621f7c10c980be7383e96486795da2253d7856e27599f9cf38", size = 5235847, upload-time = "2026-10-20T16:31:57.14Z" },
+    { url = "https://files.pythonhosted.org/packages/ee/be/05f8c082904f0cf632d62853471540e24f5303769e6d516ed26cf5b6e94c/kiwipiepy-0.24.1-cp314-cp314t-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:c018ed2dcb0ba230b3ef35cba3991e16f8d36a863eb3c4d92a37db89291fedc2", size = 11678624, upload-time = "2026-10-20T16:53:26.024Z" },
+    { url = "https://files.pythonhosted.org/packages/ab/f2/02c3952ec03d7ae6f9883549d1d9f1a0c7ff67c582995228b45bd72dbb66/kiwipiepy-0.24.1-cp314-cp314t-win_amd64.whl", hash = "sha256:4baaf038b8030f57faf5f9dac672572e5d5fc3d241da9e768c7661f5d1e0d096", size = 3823083, upload-time = "2026-10-20T16:29:46.512Z" },
+    { url = "https://files.pythonhosted.org/packages/24/33/fb06c3011d27d91ca62bfcfa10d6023c53938cbd319cffa45551977649c0/kiwipiepy-0.24.1-cp39-abi3-macosx_10_14_x86_64.whl", hash = "sha256:360844cdbcf089ec5086044597c67f3250cb09872963651f13a93cea22200b75", size = 15200604, upload-time = "2026-10-20T16:31:06.324Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/12/ff0a659ef08977f86a73a156fafa3b7d251675d01ea3ef22869dd7e79e9c/kiwipiepy-0.24.1-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:be0544b23b8ea1be28a29358e4349289872b19e8ca25f57638c42f40d7441dbe", size = 5887287, upload-time = "2026-10-20T16:15:24.444Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/ed/06573eba1a21c1c17ee76e9c4e6bab121ae389fdd9177d7176296e744c85/kiwipiepy-0.24.1-cp39-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:c619e0fe324d0bfe3cf1a87938fd5b82f4c10ec72a2beaee87cc53a98346b947", size = 5232429, upload-time = "2026-10-20T16:31:58.478Z" },
+    { url = "https://files.pythonhosted.org/packages/fe/76/e83bd30d87ae92e3d45646e50228e733af86588db1f94c9f1cd9f219deda/kiwipiepy-0.24.1-cp39-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:b3574fa8092078fba4cbdd050217e63d131c191cac5b60b639a6b3e73719c149", size = 11675082, upload-time = "2026-10-20T16:53:27.882Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/75/131a0981e410e55e6f65d6b34e15a2e20f670055b48867910c1f2255f420/kiwipiepy-0.24.1-cp39-abi3-win_amd64.whl", hash = "sha256:c74bbe35d893a28019b1fbaad59b0f481337f3d7e05d577d4f4f891dcd19f138", size = 3720553, upload-time = "2026-10-20T16:35:36.406Z" },
+]
+
+[[package]]
+name = "kiwipiepy-model"
+version = "0.24.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b8/b8/38c99548461844e0be45073cc84c58678024ccb8b5930cabfbaf2bbbe081/kiwipiepy_model-0.24.0.tar.gz", hash = "sha256:55c99505984e4fd99a08ff2aed8abe95be6911d61a132102eef40f63418e1d21", size = 87880791, upload-time = "2026-09-25T17:03:00.04Z" }
+
+[[package]]
 name = "macholib"
 version = "1.16.4"
 source = { registry = "https://pypi.org/simple" }
@@ -58,6 +90,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/10/2f/97589876ea9674879
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c7/d1/a9f36f8ecdf0fb7c9b1e78c8d7af12b8c8754e74851ac7b94a8305540fc7/macholib-1.16.4-py2.py3-none-any.whl", hash = "sha256:da1a3fa8266e30f0ce7e97c6a54eefaae8edd1e5f86f3eb8b95457cae90265ea", size = 38117, upload-time = "2025-11-22T08:28:36.939Z" },
 ]
+
+[[package]]
+name = "numpy"
+version = "2.5.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4e/3a/8770c288c47f0b5c2a786d3c20e79f66fd245f2d42cd232d7cd5e00e83e5/numpy-2.5.5.tar.gz", hash = "sha256:5cddc243c75114ba845f01b1f87aca1572dbf7b6c2d88636ed3e1d2bccd7f1bf", size = 20873892, upload-time = "2026-11-15T21:32:28.607Z" }
 
 [[package]]
 name = "openpyxl"
@@ -338,11 +376,25 @@ wheels = [
 ]
 
 [[package]]
+name = "tqdm"
+version = "4.70.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0d/ea/b2a5bd54b28a324dae8211928b2d730b6547500342c7e6c6dea08bd0a485/tqdm-4.70.1.tar.gz", hash = "sha256:cefd0eca11b2a37a3aee776544d4f4ae913f02688135b5556b8788dfa474afc4", size = 171846, upload-time = "2026-09-11T07:25:16.601Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a7/03/921a3d3c75785aca9ebfbfcabfbc3a1be12e2ab5265deb026d55a5a3f83e/tqdm-4.70.1-py3-none-any.whl", hash = "sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73", size = 80199, upload-time = "2026-09-11T07:25:14.599Z" },
+]
+
+[[package]]
 name = "ureonggaksi"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "defusedxml" },
+    { name = "kiwipiepy" },
+    { name = "kiwipiepy-model" },
     { name = "openpyxl" },
     { name = "pyside6-essentials" },
     { name = "regex" },
@@ -358,6 +410,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "defusedxml", specifier = ">=0.7.1,<1" },
+    { name = "kiwipiepy", specifier = "==0.24.1" },
+    { name = "kiwipiepy-model", specifier = "==0.24.0" },
     { name = "openpyxl", specifier = ">=3.1.5,<4" },
     { name = "pyinstaller", marker = "extra == 'dev'", specifier = ">=6.11,<7" },
     { name = "pyside6-essentials", specifier = ">=6.8,<7" },

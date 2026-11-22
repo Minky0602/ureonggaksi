@@ -67,7 +67,7 @@ sudo apt-get install -y --no-install-recommends libgl1 libegl1 libxkbcommon0 lib
 
 `dist/Ureonggaksi/` 폴더가 만들어진다. `Ureonggaksi.exe`를 실행하며 폴더 전체가 필요하다. Python이 없는 PC에서의 실행은 아직 검증하지 않았다. 실행할 때마다 라이브러리를 임시 폴더에 푸는 onefile 방식 대신 onedir 방식을 쓴다. 관리자 권한, 한글이나 Excel 설치, 계정은 필요 없다.
 
-인터넷이 없는 다른 개발 PC로 옮길 때는 같은 Windows·Python 구성에서 `requirements.lock.txt`에 맞는 wheel을 미리 받아 `pip --no-index --find-links`로 설치하거나, 완성된 `dist` 폴더를 쓴다. `.venv` 폴더를 그대로 복사하지 않는다.
+인터넷이 없는 다른 개발 PC로 옮길 때는 같은 Windows·Python 구성에서 `requirements.lock.txt`에 맞는 wheel을 미리 받아 `pip install --no-deps --no-index --find-links <폴더> -r requirements.lock.txt`로 설치하거나(`--no-deps` 필수: kiwipiepy가 선언한 numpy는 쓰지 않아 uv 설정으로 뺐는데, pip는 그 설정을 모른다), 완성된 `dist` 폴더를 쓴다. `.venv` 폴더를 그대로 복사하지 않는다.
 
 ## 참고한 1차 자료
 
