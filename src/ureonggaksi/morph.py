@@ -233,3 +233,49 @@ def negated_fill_spans(text: str) -> list[tuple[int, int]]:
                 continue
             break
     return spans
+
+
+EVERYTHING_WORDS = {"전부", "모두", "다", "전체"}
+# 점검 동사: 확인·대조·검토… + 하다, 맞다·같다(맞는지·같은지), 보다(봐 줘)
+CHECK_NOUNS = {"확인", "대조", "검토", "비교", "점검", "검사", "검증", "체크"}
+CHECK_STEMS = {"맞", "같", "보", "살피"}
+
+
+def _is_check(tokens, i) -> bool:
+    token = tokens[i]
+    if token.tag in ("VA", "VV") and token.form in CHECK_STEMS:
+        return True
+    return (
+        token.tag == "NNG"
+        and token.form in CHECK_NOUNS
+        and i + 1 < len(tokens)
+        and tokens[i + 1].tag == "XSV"
+    )
+
+
+def everything_spans(text: str) -> list[tuple[int, int]]:
+    """'전부·모두·다·전체'가 바로 뒤 채우기·점검 동사를 꾸미는 자리("다 채워줘", "전부 맞는지").
+
+    '다른'(관형사)·'다 됐으면'(뒤가 '되다')·'모두 수고'(뒤가 명사)는 아니다. 사이에는 부사("다 같이")와
+    조사("전부를")만 올 수 있다.
+    """
+    tokens = _tokens(text)
+    spans = []
+    for i, token in enumerate(tokens):
+        if token.form not in EVERYTHING_WORDS or token.tag not in ("MAG", "NNG"):
+            continue
+        j = i + 1
+        while j < len(tokens) and (tokens[j].tag == "MAG" or tokens[j].tag.startswith("J")):
+            j += 1
+        if j < len(tokens) and (_is_fill(tokens, j) or _is_check(tokens, j)):
+            spans.append((token.start, token.end))
+    return spans
+
+
+def has_exclusive(text: str) -> bool:
+    """명사 뒤 보조사 '만'("직급만", "일부만"). 어느 것만 하라는 말이다."""
+    tokens = _tokens(text)
+    return any(
+        t.tag == "JX" and t.form == "만" and i > 0 and tokens[i - 1].tag.startswith("N")
+        for i, t in enumerate(tokens)
+    )

@@ -88,9 +88,6 @@ DIRECTION = re.compile(
     r"^(에서|에|으로|로)"
 )  # "전화번호에", "휴대전화로": 지목인데 "A를 B 칸에" 꼴이 아님
 NONE = "없음"
-# "보고서에 있는 거 다 채워줘", "신청서 내용 전부": 이름 없이 모든 항목을 말한다(낱말 하나로 떨어져 있을 때만,
-# '다른·다음'은 아니다)
-EVERYTHING = re.compile(r"(?:^|\s)(?:전부|모두|다|전체)(?=\s|$|[.,!?])")
 EVERYTHING_KEY, EVERYTHING_OPTIONS = "[요청] 전부", ("예", "아니오")
 
 # 모델 호출: (질문 글, 선택지) → 선택지 하나 또는 None
@@ -823,7 +820,12 @@ def interpret(
     aliased: dict[str, str] = {}  # 동의어표로 이은 모르는 말 → 열
     alias_skip: list[str] = []
     # '전부'를 말했다: 모르는 말이 없으면 코드가, 섞였으면 모델이 두 번 모두 '예'라고 읽어야 한다(DIF-063 3차)
-    everything_said = simple and bool(EVERYTHING.search(request))
+    # "다 채워줘"의 '다'는 형태소로 읽는다: 바로 뒤가 채우기·점검 동사일 때만('다른', '다 됐으면'은 아님)
+    everything_word = bool(morph.everything_spans(request))
+    everything_said = simple and everything_word
+    skip_settled = (
+        True  # 코드가 빼기로 읽은 이름을 모델도 빼기로 읽었다(모르는 말이 없으면 해당 없음)
+    )
     skipped: list[str] = []
     unread: list[str] = []  # 모델이 열과 잇지 못한 모르는 말(2차 M-1)
     conflicted: list[str] = []
@@ -852,13 +854,16 @@ def interpret(
         asked_names = list(dict.fromkeys([*mentioned, *aliased.values(), *coded_skip]))
         try:
             roles, meant, meant_skip, unread, everything_said = _read_request(
-                ask_many, request, asked_names, words, targets, bool(EVERYTHING.search(request))
+                ask_many, request, asked_names, words, targets, everything_word
             )
         except ServiceError as error:
             if not error.code.startswith("AI_"):
                 raise
             roles, meant, meant_skip, unread, everything_said = {}, [], [], [], False
         unread = [*unread, *overflow]
+        # 코드가 빼기로 읽은 이름(NEGATED)은 오탐이 있다("직급 그대로 다 옮겨", "참고해서"). 모델도 두 번 모두
+        # 빼기로 읽었을 때만 '빼고 전부'로 본다(3차 검수 M-1)
+        skip_settled = all(roles.get(n) in (SKIP_ROLE, "무관") for n in coded_skip)
         for word, column in aliased.items():
             if column in alias_skip:
                 continue
@@ -972,6 +977,13 @@ def interpret(
         # 동의어·모델로 채우라고 읽은 열이 있으면 그것만 채우는 요청이다("교육시간만 다 채워")
         and not [c for c in aliased.values() if c not in alias_skip]
         and not asked_columns
+        and skip_settled
+        # "수료시간만 다 채워", "일부만": 어느 것만 하라는 말이면 전부가 아니다(3차 검수 H-2)
+        and not morph.has_exclusive(request)
+        # 빼라고 한 말을 모델이 열과 잇지 못했으면 무엇을 뺄지 모른다("평가는 빼고 다", 3차 검수 H-1)
+        and not any(_said_to_skip(request, w) for w in unread)
+        # 같은 라벨이 문서에 두 번 이상 나오는 서식은 값 칸이 항목명으로 잡힌다(3차 검수 H-3)
+        and not _ambiguous_labels(documents)
     ):
         # 값이 문서마다 우연히 같으면 그 값 칸이 항목명으로 잡히고("12시간", "팀장") 아래 칸 값을 가져간다.
         # 그러면 다른 항목과 값이 똑같아져 어느 쪽이 진짜인지 가를 수 없다. 값처럼 생긴 이름과, 값이 다른
@@ -1130,10 +1142,11 @@ def _everything_requested(request: str, work_type) -> bool:
 
     "전부 넣지 마"·"다 빼줘"·"전부 비워 둬"는 전부가 아니다(검수 H-4). 이 검사는 모델 판단과 함께(AND) 쓴다.
     """
+    # "다 채우진 마"처럼 형태소로 읽은 하지 않는 채우기는 _work_type이 이미 거른다(작업 종류가 정해지지 않음)
     if work_type is None or FILL_NEGATED.search(request):
         return False
-    for word in EVERYTHING.finditer(request):
-        rest = request[word.end() :]
+    for _, end_of_word in morph.everything_spans(request):
+        rest = request[end_of_word:]
         hit, end = SKIP_WORDS.search(rest), CLAUSE_END.search(rest)
         if hit and (end is None or hit.start() < end.start()):
             return False  # 같은 마디에 빼기 낱말: "전부 빼고", "다 놔두고"
@@ -1185,7 +1198,8 @@ def _match_all(request, fields, columns, pairs, view, ask_many):
             "취합표 열:",
             *(f"- {_clean(c, 40)}{_examples(_column_values(view, c)[:3])}" for c in free),
             "문서 항목:",
-            *(f"- {_clean(f.name, 40)}{_examples(f.samples[:2])}" for f in order),
+            # 문서 글이 지시처럼 읽히지 않게 라벨도 따옴표로 감싼다(3차 검수 L-1)
+            *(f'- "{_clean(f.name, 40)}"{_examples(f.samples[:2])}' for f in order),
         ]
         return "\n".join(lines)
 
