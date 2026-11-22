@@ -190,6 +190,26 @@ def _right_or_below(cells, block: Block):
     return right, below
 
 
+def _overflowed_values(documents: tuple[Document, ...], fields) -> set[str]:
+    """항목명으로 잡혔지만 실은 옆 라벨의 값 칸인 이름. '주소 | 서울시 중구 / (아래) 세부주소'에서 값이 문서마다
+    우연히 같으면 '서울시 중구'가 항목명이 되고 '주소'는 항목을 잃는다. 고정 칸 X가 항목이 못 됐고 그 오른쪽 칸이
+    아래 값을 가진 항목이면 그 항목은 X의 값 칸이다(4차 검수 M-3)."""
+    by_norm = {_norm(f.name): f for f in fields}
+    maps = [_cells(d) for d in documents]
+    found = set()
+    for key, block in maps[0].items():
+        text = block.text.strip()
+        if not text or _norm(text) in by_norm:
+            continue
+        if any(m.get(key) is None or m[key].text.strip() != text for m in maps[1:]):
+            continue
+        right = _right_or_below(maps[0], block)[0]
+        field = by_norm.get(_norm(right.text)) if right is not None else None
+        if field is not None and field.rule.direction == "below":
+            found.add(field.name)
+    return found
+
+
 def _document_fields(documents: tuple[Document, ...]) -> list[FieldCandidate]:
     """같은 위치에 같은 글자가 모든 문서에 있으면 항목명, 그 오른쪽(없으면 아래) 칸이 값이다."""
     first, maps = documents[0], [_cells(d) for d in documents]
@@ -512,12 +532,16 @@ def _read_request(
     roles = {k.removeprefix("[이름] "): v for k, v in agreed.items() if k.startswith("[이름] ")}
     meant = [v.rsplit("/", 1) for k, v in agreed.items() if k.startswith("[말] ") and v != NONE]
     unread = [w for w in words if agreed.get(f"[말] {w}", NONE) == NONE]
+    skip_words = [
+        w for w in words if agreed.get(f"[말] {w}", NONE).endswith(f"/{SKIP_ROLE}")
+    ]  # 모델이 두 번 모두 어느 열의 빼기로 읽은 말
     return (
         roles,
         list(dict.fromkeys(c for c, r in meant if r == FILL_ROLE)),
         list(dict.fromkeys(c for c, r in meant if r == SKIP_ROLE)),
         unread,
         agreed.get(EVERYTHING_KEY) == EVERYTHING_OPTIONS[0],
+        skip_words,
     )
 
 
@@ -828,6 +852,9 @@ def interpret(
     )
     skipped: list[str] = []
     unread: list[str] = []  # 모델이 열과 잇지 못한 모르는 말(2차 M-1)
+    settled_words: list[str] = (
+        [hint] if hint else []
+    )  # 빼기가 확정된 말과 키: '전부' 곁 마디에 와도 된다
     conflicted: list[str] = []
     if pointing_unclear or (not simple and ask_many is None):
         drop = set(mentioned)
@@ -853,17 +880,29 @@ def interpret(
         # 동의어로 추정한 열의 빼기는 그 열만 빼고 표시한다. 다른 칸까지 질문으로 돌리지 않는다(검수 L-1)
         asked_names = list(dict.fromkeys([*mentioned, *aliased.values(), *coded_skip]))
         try:
-            roles, meant, meant_skip, unread, everything_said = _read_request(
+            roles, meant, meant_skip, unread, everything_said, skip_words = _read_request(
                 ask_many, request, asked_names, words, targets, everything_word
             )
         except ServiceError as error:
             if not error.code.startswith("AI_"):
                 raise
-            roles, meant, meant_skip, unread, everything_said = {}, [], [], [], False
+            roles, meant, meant_skip, unread, everything_said, skip_words = (
+                {},
+                [],
+                [],
+                [],
+                False,
+                [],
+            )
         unread = [*unread, *overflow]
         # 코드가 빼기로 읽은 이름(NEGATED)은 오탐이 있다("직급 그대로 다 옮겨", "참고해서"). 모델도 두 번 모두
         # 빼기로 읽었을 때만 '빼고 전부'로 본다(3차 검수 M-1)
         skip_settled = all(roles.get(n) in (SKIP_ROLE, "무관") for n in coded_skip)
+        settled_words += [
+            *coded_skip,
+            *skip_words,
+            *(w for w, c in aliased.items() if c in alias_skip),
+        ]
         for word, column in aliased.items():
             if column in alias_skip:
                 continue
@@ -982,6 +1021,9 @@ def interpret(
         and not morph.has_exclusive(request)
         # 빼라고 한 말을 모델이 열과 잇지 못했으면 무엇을 뺄지 모른다("평가는 빼고 다", 3차 검수 H-1)
         and not any(_said_to_skip(request, w) for w in unread)
+        # '전부' 동사 밖의 마디("평가는 놔둬", "평가 외에는")는 빼기가 확정된 말·키로만 되어 있어야 한다.
+        # 빼기 낱말 목록으로는 목록 밖 표현이 샌다(4차 검수 H-1)
+        and _side_clauses_settled(request, settled_words)
         # 같은 라벨이 문서에 두 번 이상 나오는 서식은 값 칸이 항목명으로 잡힌다(3차 검수 H-3)
         and not _ambiguous_labels(documents)
     ):
@@ -990,7 +1032,7 @@ def interpret(
         # 항목과 똑같은 후보는 모두 빼고 소명한다(덜 채울 뿐이다, 검수 r2 H-3)
         twins = {
             f.name for f in fields for g in fields if g.name != f.name and g.samples == f.samples
-        }
+        } | _overflowed_values(documents, fields)
         candidates = [
             f
             for f in fields
@@ -1135,6 +1177,27 @@ def _column_prompt(request, field: FieldCandidate, options, view) -> str:
     lines += _hint(field.name, options)
     lines += [f"- {_clean(o, 40)}{_examples(_column_values(view, o)[:3])}" for o in options]
     return "\n".join(lines)
+
+
+FRAME_NOUNS = (
+    *("기준", "칸", "빈칸", "열", "란", "행", "표", "시트", "엑셀", "문서", "서류"),
+    *("취합표", "현황표", "명단", "신청서", "확인서", "요청서"),
+)  # 자리·자료를 가리키는 말: "발급번호 기준으로 찾아서", "엑셀 보고"
+
+
+def _side_clauses_settled(request: str, settled: list[str]) -> bool:
+    """'전부' 곁 마디의 내용어가 모두 빼기가 확정된 말·키·자리 낱말 안에 든다."""
+    known = [
+        (m.start(), m.end())
+        for word in [*settled, *FRAME_NOUNS]
+        if word
+        for m in re.finditer(re.escape(word), request)
+    ]
+    return all(
+        any(a <= start and end <= b for a, b in known)
+        for clause in morph.side_clauses(request)
+        for start, end in clause
+    )
 
 
 def _everything_requested(request: str, work_type) -> bool:

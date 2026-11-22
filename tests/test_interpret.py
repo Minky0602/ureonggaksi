@@ -1944,3 +1944,80 @@ def test_fill_everything_reads_these_as_everything(setup, request_text):
     _, docs, view = setup
     result = interpret(request_text, docs, view, ask_many=fooled_with({}))
     assert "직급" in {c for _, c, _ in result.fields}
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 평가 외에는 다 채워줘",
+        "발급번호 기준으로 평가는 놔둬, 다 채워줘",
+        "발급번호 기준으로 평가는 그냥 둬 다 채워줘",
+        "발급번호 기준으로 평가는 건너뛰고 다 채워줘",
+        "발급번호 기준으로 평가는 패스하고 다 채워줘",
+        "발급번호 기준으로 평가는 됐고 다 채워줘",
+        "발급번호 기준으로 평가 말곤 다 채워줘",
+        "발급번호 기준으로 평가 이외 전부 채워줘",
+        "발급번호 기준으로 평가는 안 해도 되니까 다 채워줘",
+        "발급번호 기준으로 돈 빼고 다 채워줘",
+        "발급번호 기준으로 다 채워줘, 평가 놔두고",
+    ],
+)
+def test_fill_everything_is_off_when_a_side_clause_names_an_unsettled_word(setup, request_text):
+    """4차 검수 H-1: 빼기 낱말 목록 밖 표현이라도, '전부' 동사 밖 마디에 확정되지 않은 말이 있으면 켜지 않는다."""
+    _, docs, view = setup
+    result = interpret(request_text, docs, view, ask_many=fooled_with({}))
+    assert "점수" not in {c for _, c, _ in result.fields}
+
+
+def test_fill_everything_keeps_a_side_clause_the_model_settled_as_skip(setup):
+    """빼라고 한 말을 모델이 두 번 모두 그 열의 빼기로 읽었으면 그 열만 빼고 전부 채운다."""
+    _, docs, view = setup
+    result = interpret(
+        "발급번호 기준으로 평가는 놔둬, 다 채워줘",
+        docs,
+        view,
+        ask_many=fooled_with({"평가": "점수/제외"}),
+    )
+    columns = {c for _, c, _ in result.fields}
+    assert "직급" in columns and "점수" not in columns
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 다 채우면 곤란해",  # 4차 검수 M-1: 딸린 말
+        "발급번호 기준으로 다 채우는 건 아닌 것 같아",
+        "발급번호 기준으로 연락 칸에만 다 채워줘",  # 4차 검수 M-2: 조사 뒤 '만'
+        "발급번호 기준으로 첫 줄에서만 다 채워줘",
+    ],
+)
+def test_fill_everything_is_off_for_subordinate_or_exclusive_requests(setup, request_text):
+    _, docs, view = setup
+    result = interpret(request_text, docs, view, ask_many=fooled_with({}))
+    assert "직급" not in {c for _, c, _ in result.fields}
+
+
+def test_fill_everything_drops_a_value_cell_that_overflowed_into_a_label(tmp_path):
+    """4차 검수 M-3: '주소 | 서울시 중구 / 세부주소'에서 값이 우연히 같은 칸은 항목명이 아니다."""
+
+    def doc(number, name, detail):
+        body = table(
+            [
+                [cell("성명", 0, 0), cell(name, 0, 1)],
+                [cell("주소", 1, 0, rowspan=2), cell("서울시 중구", 1, 1)],
+                [cell(detail, 2, 1)],
+            ]
+        )
+        return [para(f"발급번호: {number}") + "<hp:p><hp:run>" + body + "</hp:run></hp:p>"]
+
+    sheet = [["발급번호", "이름", "주소"], ["A-01", None, None], ["A-02", None, None]]
+    _, docs, view = build(
+        tmp_path, [doc("A-01", "가나다", "세종대로 1"), doc("A-02", "라마바", "을지로 2")], sheet
+    )
+
+    def model(prompt, fields):
+        return {k: "주소" for k, o in fields.items() if "중구" in k and "주소" in o}
+
+    result = interpret("발급번호 기준으로 다 채워줘", docs, view, ask_many=model)
+    assert "주소" not in {c for _, c, _ in result.fields}
+    assert "서울시 중구" in result.excluded

@@ -253,29 +253,125 @@ def _is_check(tokens, i) -> bool:
     )
 
 
-def everything_spans(text: str) -> list[tuple[int, int]]:
-    """'전부·모두·다·전체'가 바로 뒤 채우기·점검 동사를 꾸미는 자리("다 채워줘", "전부 맞는지").
+def _main_chain(tokens, j):
+    """j의 채우기·점검 동사가 문장의 주 서술어면 그 동사 묶음이 끝나는 자리, 아니면 None.
 
-    '다른'(관형사)·'다 됐으면'(뒤가 '되다')·'모두 수고'(뒤가 명사)는 아니다. 사이에는 부사("다 같이")와
-    조사("전부를")만 올 수 있다.
+    보조 용언('채워 주세요', '채워 놓아')과 점검 연결('맞는지 확인해')을 지나 종결 어미나 문장 끝에 닿아야
+    한다. '다 채우면 곤란해'(조건)·'다 채우는 건 아닌 것 같아'(관형형)는 딸린 말이다(4차 검수 M-1).
     """
-    tokens = _tokens(text)
-    spans = []
+    found = _fill_end(tokens, j)
+    if found is not None:
+        k = found[0]
+    elif not _is_check(tokens, j):
+        return None
+    else:
+        k = j + 2 if tokens[j].tag == "NNG" else j + 1
+    while k < len(tokens):
+        token = tokens[k]
+        nxt = tokens[k + 1] if k + 1 < len(tokens) else None
+        if token.tag == "EP":
+            k += 1
+        elif token.tag == "EF":
+            return k + 1
+        elif token.tag == "ETN":  # 다 채우기만 해 주세요
+            m = k + 1
+            while m < len(tokens) and tokens[m].tag.startswith("J"):
+                m += 1
+            if (
+                m >= len(tokens)
+                or tokens[m].form != "하"
+                or not tokens[m].tag.startswith(("VV", "VX"))
+            ):
+                return None
+            k = m + 1
+        elif token.tag != "EC":
+            return None
+        elif nxt is None or nxt.tag in ("SF", "SP"):
+            return k + 1
+        elif nxt.tag.startswith("VX") and nxt.form not in NEGATING_AUX:
+            k += 2  # 채워 주세요, 채워 놓아
+        elif token.form.endswith("지") and _is_check(tokens, k + 1):
+            return _main_chain(tokens, k + 1)  # 다 맞는지 확인해 줘
+        else:
+            return None
+    return k
+
+
+def _everything_verbs(tokens) -> list[tuple[int, int, int]]:
+    """(전부 낱말 자리, 동사 자리, 동사 묶음 끝) 목록."""
+    found = []
     for i, token in enumerate(tokens):
         if token.form not in EVERYTHING_WORDS or token.tag not in ("MAG", "NNG"):
             continue
         j = i + 1
         while j < len(tokens) and (tokens[j].tag == "MAG" or tokens[j].tag.startswith("J")):
             j += 1
-        if j < len(tokens) and (_fill_end(tokens, j) is not None or _is_check(tokens, j)):
-            spans.append((token.start, token.end))
-    return spans
+        end = _main_chain(tokens, j) if j < len(tokens) else None
+        if end is not None:
+            found.append((i, j, end))
+    return found
+
+
+def everything_spans(text: str) -> list[tuple[int, int]]:
+    """'전부·모두·다·전체'가 주 서술어인 채우기·점검 동사를 꾸미는 자리("다 채워줘", "전부 맞는지 확인해 줘").
+
+    '다른'(관형사)·'다 됐으면'(뒤가 '되다')·'모두 수고'(뒤가 명사)·'다 채우면 곤란해'(딸린 말)는 아니다.
+    사이에는 부사("다 같이")와 조사("전부를")만 올 수 있다.
+    """
+    tokens = _tokens(text)
+    return [(tokens[i].start, tokens[i].end) for i, _, _ in _everything_verbs(tokens)]
+
+
+CONTENT_TAGS = ("NNG", "NNP", "SL", "SH")
+EXCEPT_NOUNS = {"외", "이외", "제외"}  # 평가 외에는, 평가 이외 전부
+
+
+def side_clauses(text: str) -> list[list[tuple[int, int]]]:
+    """'전부' 채우기 동사 묶음 밖에서 끝나는 마디마다 그 마디의 내용어(명사·외국어) 글자 범위.
+
+    "평가는 놔둬, 다 채워줘"의 [평가], "평가 외에는 다 채워"의 [평가]. 다른 용언이 연결·종결 어미로 마디를
+    끝내야 마디다. 관형형("보고서에 있는 거")은 꾸밈이라 마디를 끝내지 않는다. 마디를 끝내는 용언이
+    '명사 + 하다'면 그 명사('생략하고'의 '생략')는 서술어라 내용어에서 뺀다(4차 검수 H-1).
+    """
+    tokens = _tokens(text)
+    chain = {k for _, j, end in _everything_verbs(tokens) for k in range(j, end)}
+    clauses: list[list[tuple[int, int]]] = []
+    nouns: list[tuple[int, int]] = []
+    for k, token in enumerate(tokens):
+        if k in chain or token.tag in ("SF", "SP"):
+            nouns = []
+            continue
+        if token.tag.startswith("N") and token.form in EXCEPT_NOUNS:
+            clauses.append(nouns)
+            nouns = []
+            continue
+        if token.tag.startswith(CONTENT_TAGS):
+            if token.form not in EVERYTHING_WORDS:
+                nouns.append((token.start, token.end))
+            continue
+        if not token.tag.startswith(("VV", "VA", "VX", "XSV", "XSA", "VCP", "VCN")):
+            continue
+        m = k + 1
+        while m < len(tokens) and tokens[m].tag == "EP":
+            m += 1
+        if m < len(tokens) and tokens[m].tag not in ("EC", "EF"):
+            continue  # 관형형·명사형은 마디를 끝내지 않는다
+        if token.tag.startswith(("XSV", "XSA")) and nouns and nouns[-1][1] == token.start:
+            nouns.pop()
+        clauses.append(nouns)
+        nouns = []
+    return [c for c in clauses if c]
 
 
 def has_exclusive(text: str) -> bool:
-    """명사 뒤 보조사 '만'("직급만", "일부만"). 어느 것만 하라는 말이다."""
+    """명사 뒤 보조사 '만'("직급만", "일부만", "행에만"). 어느 것만 하라는 말이다. 조사를 건너 본다(4차 검수 M-2)."""
     tokens = _tokens(text)
-    return any(
-        t.tag == "JX" and t.form == "만" and i > 0 and tokens[i - 1].tag.startswith("N")
-        for i, t in enumerate(tokens)
-    )
+    for i, t in enumerate(tokens):
+        if t.tag != "JX" or t.form != "만":
+            continue
+        b = i - 1
+        while b >= 0 and tokens[b].tag.startswith("J"):
+            b -= 1
+        if b >= 0 and tokens[b].tag.startswith(("N", "SN", "SL", "SH")):
+            return True
+    return False
