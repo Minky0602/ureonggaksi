@@ -564,3 +564,16 @@ def test_dropping_a_name_with_no_pair_is_warned(files):
     )
     assert ("pair", "직위", "직급") in prepared.unsure
     assert any("‘직급’은(는) 뺄 짝이 없습니다" in w for w in prepared.warnings)
+
+
+def test_a_negated_everything_stays_off_after_the_work_type_answer(files):
+    """검수 H-4: '전부 넣지 마'에 작업 종류를 '채우기'로 답해도 문서 항목 전부를 채우지 않는다."""
+    sources, target, out, _ = files
+    request = "발급번호 기준으로 전부 넣지 마"
+    model = reader({}, {"직위": "직급/채움"})
+    first = prepare(request, sources, target, output_path=out, ask_many=model)
+    assert first.question is not None and first.question.slot == "work_type"
+    again = prepare(
+        request, sources, target, output_path=out, ask_many=model, answers=(("work_type", "fill"),)
+    )
+    assert again.plan is None or not again.plan.rule.fields
