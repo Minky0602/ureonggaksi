@@ -63,7 +63,7 @@ ALLOWED_WORD = (
     r"|기준|기준으로|찾아|찾아서|찾고|찾구|행을"
     r"|(?:칸|열|란)에?"
     rf"|(?:취합표|현황표|명단|표|시트|엑셀|문서|서류|신청서|확인서|요청서){PARTICLE}?"
-    r"|빈칸|빈칸을|빈칸에|다|모두|전부|각각"  # "다 채워줘": 빼는 동사가 오면 그 동사가 모르는 말이라 묻는다
+    r"|빈칸|빈칸을|빈칸에|다|모두|전부|전체|각각"  # "다 채워줘": 빼는 동사가 오면 그 동사가 모르는 말이라 묻는다
     rf"|{ENDING}|요|좀|부탁해|부탁해요|부탁합니다|부탁드립니다|감사합니다|감사해요|고맙습니다|[ㅠㅜ]+"
 )
 NAME_MARK = "\x00"
@@ -804,6 +804,9 @@ def interpret(
     # 모두 assumed로 표시해 미리보기에서 '확인 필요'로 보인다(P04 성능 개선, 2026-11-18 사용자 결정)
     mentioned = [*(p[0] for p in pairs), *(p[1] for p in pairs), *only_fields, *only_columns]
     assumed = False
+    meant: list[str] = []  # 모델이 채우라는 말로 읽은 열
+    aliased: dict[str, str] = {}  # 동의어표로 이은 모르는 말 → 열
+    alias_skip: list[str] = []
     skipped: list[str] = []
     unread: list[str] = []  # 모델이 열과 잇지 못한 모르는 말(2차 M-1)
     conflicted: list[str] = []
@@ -936,15 +939,19 @@ def interpret(
         if answer:
             pairs.append((answer, column, "model"))
 
-    # "전부/다 채워": 이름을 하나도 말하지 않았으면 문서 항목 전부가 후보다. 키·뺀 이름은 빼고, 같은 이름 →
-    # 동의어표 → 모델(한 번에 묻기) 차례로 짝짓는다. 짝이 없는 항목은 비우고 소명한다(DIF-063).
-    # 모르는 말이 섞였는데 모델이 없으면 다른 요청처럼 채우지 않는다("전부 넣지 말고…"를 읽을 수 없다)
-    if (
-        EVERYTHING.search(request)
-        and (simple or ask_many is not None)
-        and not pointing_unclear
-        # 말한 이름이 모두 빠졌어야 한다(키, 또는 모델이 빼라고 읽은 "직무는 나중에 따로 정할게")
-        and all(n == hint or n in off_limits for n, _ in mentions)
+    # "전부/다 채워": 채울 대상을 하나도 말하지 않았으면 문서 항목 전부가 후보다. 키·뺀 이름은 빼고, 같은 이름 →
+    # 동의어표 → 모델(한 번에 묻기) 차례로 짝짓는다. 사용자가 그 열을 말한 것이 아니므로 모두 '확인 필요'로
+    # 보인다. 짝이 없는 항목은 비우고 소명한다(DIF-063). 켜는 조건은 좁게 둔다(검수 H-1~H-4, M-3)
+    if _everything_requested(request, work_type, simple, ask_many) and (
+        not pointing_unclear
+        # 문서 한 장이면 항목명과 값을 가르지 못한다(값이 항목으로 잡힌다)
+        and (len(documents) > 1 or record.kind == "table_rows")
+        # 말한 이름은 키이거나 빼라고 읽은 것뿐이어야 한다. 해석하지 못했거나 갈린 이름이 있으면 끈다
+        and all(n == hint or n in skip or n in skipped for n, _ in mentions)
+        # 동의어·모델로 채우라고 읽은 대상이 있으면 그 대상만 채우는 요청이다("교육시간만 다 채워").
+        # 모델이 채우라고 읽은 열은 only_columns에 들어 있다. 모델이 답하지 않은 동의어도 말한 것이다
+        and not [c for c in aliased.values() if c not in alias_skip]
+        and not only_columns
     ):
         everything = _match_all(
             request,
@@ -953,7 +960,6 @@ def interpret(
             pairs,
             view,
             ask_many,
-            "assumed" if assumed else "match",
         )
         pairs += everything
         placed_names = {p[0] for p in pairs}
@@ -1086,7 +1092,25 @@ def _column_prompt(request, field: FieldCandidate, options, view) -> str:
     return "\n".join(lines)
 
 
-def _match_all(request, fields, columns, pairs, view, ask_many, same_source):
+def _everything_requested(request: str, work_type, simple: bool, ask_many) -> bool:
+    """'전부·모두·다·전체'를 낱말로 말했고, 작업 종류가 요청에서 정해졌고, 하지 말라는 말이 없다.
+
+    "전부 넣지 마"·"다 빼줘"·"전부 비워 둬"는 전부가 아니다(검수 H-4). 모르는 말이 섞였는데 모델이 없으면
+    뜻을 읽을 수 없어 켜지 않는다.
+    """
+    if work_type is None or FILL_NEGATED.search(request) or not (simple or ask_many is not None):
+        return False
+    found = False
+    for word in EVERYTHING.finditer(request):
+        rest = request[word.end() :]
+        hit, end = SKIP_WORDS.search(rest), CLAUSE_END.search(rest)
+        if hit and (end is None or hit.start() < end.start()):
+            return False  # 같은 마디에 빼기 낱말: "전부 빼고", "다 놔두고"
+        found = True
+    return found
+
+
+def _match_all(request, fields, columns, pairs, view, ask_many):
     """문서 항목마다 열을 정한다: 같은 이름 → 동의어표(양쪽 후보가 하나뿐) → 모델. 모델은 항목 전부를 한 번에
     묻고(JSON 객체 스키마), 항목·선택지 순서를 뒤집어 두 번 물어 같은 답만 받는다. 항목을 하나씩 물으면
     항목 수만큼 모델을 띄워 너무 느리다(10개면 3분 넘게)."""
@@ -1101,8 +1125,10 @@ def _match_all(request, fields, columns, pairs, view, ask_many, same_source):
         free = tuple(c for c in columns if c not in taken_columns)
         same = _resolve(field.name, free)
         listed = _synonym(field.name, free)
-        if same is not None:
-            found.append((field.name, same, same_source))
+        if (
+            same is not None
+        ):  # 사용자가 그 열을 말한 것이 아니다: 같은 이름이라도 '확인 필요'(검수 H-3)
+            found.append((field.name, same, "assumed"))
         elif listed is not None and _synonym(listed, names) == field.name:
             found.append((field.name, listed, "synonym"))
         else:
@@ -1112,8 +1138,14 @@ def _match_all(request, fields, columns, pairs, view, ask_many, same_source):
     free = tuple(c for c in columns if c not in taken_columns)
     if ask_many is None or not left or not free:
         return found
-    options = (*free, NONE)
-    asked = {f"[항목] {f.name}": options for f in left}
+
+    def allowed(field) -> tuple[str, ...]:
+        # 이름은 같고 단위만 다른 열(예산(천원)↔예산(원))은 값이 틀리므로 선택지에서 뺀다(2차 N01, 검수 M-2)
+        return tuple(
+            c for c in free if _norm(c) != _norm(field.name) or _unit(c) == _unit(field.name)
+        )
+
+    asked = {f"[항목] {f.name}": (*allowed(f), NONE) for f in left}
 
     def prompt(order) -> str:
         lines = [
@@ -1127,16 +1159,24 @@ def _match_all(request, fields, columns, pairs, view, ask_many, same_source):
         ]
         return "\n".join(lines)
 
-    def ask(order, choices):
-        fields_asked = {f"[항목] {f.name}": choices for f in order}
+    def ask(order, flip):
+        fields_asked = {
+            k: (*reversed(asked[k][:-1]), NONE) if flip else asked[k]
+            for k in (f"[항목] {f.name}" for f in order)
+        }
         answer = ask_many(prompt(order), fields_asked)
-        return {k: v for k, v in answer.items() if k in asked and v in options}
+        # 계약을 어긴 답(목록 밖 항목·선택지)은 버린다
+        return {k: v for k, v in answer.items() if k in asked and v in asked[k]}
 
-    flipped = tuple(reversed(options[:-1])) + (NONE,)
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        first_job = pool.submit(ask, left, options)
-        second_job = pool.submit(ask, list(reversed(left)), flipped)
-        first, second = first_job.result(), second_job.result()
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first_job = pool.submit(ask, left, False)
+            second_job = pool.submit(ask, list(reversed(left)), True)
+            first, second = first_job.result(), second_job.result()
+    except ServiceError as error:  # 모델 오류면 모델 없이 계속하고 남은 항목은 소명한다(검수 M-1)
+        if not error.code.startswith("AI_"):
+            raise
+        return found
     for field in left:
         answer = first.get(f"[항목] {field.name}")
         if answer and answer != NONE and second.get(f"[항목] {field.name}") == answer:
