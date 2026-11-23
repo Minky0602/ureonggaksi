@@ -2754,3 +2754,53 @@ def test_a_field_named_key_is_asked_when_rows_are_swapped(tmp_path, second, shee
     """검수 r3 V1~V3: 다른 후보가 두 문서 이상을 다른 행으로 보내면 묻는다(식별자 열이 아니어도)."""
     _, docs, view = build(tmp_path, _grant_docs(second), sheet, "대장")
     assert interpret("사업번호 기준으로 결과보고일 채워줘", docs, view).key is None
+
+
+def _split_by_call(name, first, second):
+    """두 번 묻기에서 name의 역할을 먼저 온 물음엔 first, 다음 물음엔 second로 답한다."""
+    import threading
+
+    lock, calls = threading.Lock(), []
+
+    def ask(prompt, fields):
+        with lock:
+            calls.append(1)
+            answer = first if len(calls) % 2 == 1 else second
+        out = fooled(prompt, fields)
+        if f"[이름] {name}" in fields:
+            out[f"[이름] {name}"] = answer
+        return out
+
+    return ask
+
+
+def test_a_check_keeps_a_name_the_model_answered_both_ways(setup):
+    """DIF-071 W04: 대조는 칸에 쓰지 않는다. 모델 두 답이 엇갈린 이름도 '확인 필요'로 견준다."""
+    _, docs, view = setup
+    request = "발급번호 기준으로 이수시간이 확인서랑 똑같은지 대조해 줘"
+    result = interpret(request, docs, view, ask_many=_split_by_call("이수시간", "채움", "무관"))
+    assert result.work_type == "check"
+    assert ("이수시간", "이수시간", "assumed") in result.fields
+
+
+def test_a_fill_still_drops_a_name_the_model_answered_both_ways(setup):
+    _, docs, view = setup
+    request = "발급번호 기준으로 이수시간 꼼꼼히 확인서 보고 채워줘"
+    result = interpret(request, docs, view, ask_many=_split_by_call("이수시간", "채움", "무관"))
+    assert "이수시간" not in {c for _, c, _ in result.fields}
+
+
+def test_a_column_already_paired_is_not_asked_again(setup):
+    """DIF-071 J04: 앞에서 짝이 선 열을 다시 물으면 다른 항목을 골라 한 열에 둘이 몰려 둘 다 버려졌다."""
+    _, docs, view = setup
+    asked = []
+
+    def choose(prompt, options):
+        asked.append(prompt)
+        return "점수" if "'평가점수'" in prompt else "연락처"
+
+    request = "발급번호 기준으로 점수 중에 평가점수랑 다른 사람 있어?"
+    reader = reads({"점수": "채움", "평가점수": "채움"})
+    result = interpret(request, docs, view, choose=choose, ask_many=reader)
+    assert ("평가점수", "점수", "model") in result.fields
+    assert not any("열 '점수'" in p for p in asked)
