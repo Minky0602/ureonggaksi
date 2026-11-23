@@ -96,7 +96,8 @@ def describe_rule(rule: RuleSet, view: TargetView, unsure=()) -> str:
     key = f"{rule.target.key_column}(으)로 행을 찾아"
     by = [n for kind, n, c in unsure if kind == "key" and c == rule.target.key_column]
     if by:  # 열만 보면 남의 번호(추천인사번)로 찾는 것을 알 수 없다(3차 M1)
-        key = f"{rule.target.key_column}(으)로 행을 찾아(문서의 ‘{by[0]}’ 값으로, 확인 필요)"
+        source = "" if _same(by[0], rule.target.key_column) else f"문서의 ‘{by[0]}’ 값으로, "
+        key = f"{rule.target.key_column}(으)로 행을 찾아({source}확인 필요)"
     parts = []
     for field in rule.fields:
         if not field.target_column:
@@ -361,7 +362,9 @@ def prepare(
             )
         # 열만 답한 키의 문서 항목 이름이 열과 다르면(추천인사번 → 사번) 미리보기에도 보인다(3차 M1)
         answered_key = (
-            [("key", *result.key)] if unnamed_key and result.key and not _same(*result.key) else []
+            [("key", *result.key)]
+            if result.key and (result.key_assumed or (unnamed_key and not _same(*result.key)))
+            else []
         )
         # 사용자가 미리보기에서 [빼기]한 짝은 쓰지 않는다(답 drop_field = 문서 항목)
         dropped = {value for slot, value in answers if slot == "drop_field"}

@@ -954,14 +954,67 @@ def test_number_like_column_does_not_break_a_key_tie(tmp_path):
         assert result.key is None and build_rule(result, view) is None
 
 
-def test_an_unnamed_key_is_asked_with_the_best_match_first(tmp_path):
-    """확실한 칸만 채운다: 말하지 않은 키는 값이 뚜렷이 맞아도 확정하지 않고 첫 선택지로 묻는다."""
+def test_an_unnamed_same_name_key_is_assumed(tmp_path):
+    """말하지 않은 키: 이름이 같고 문서 값이 모두 그 열에 있는 후보 하나면 쓰고 '확인 필요'(2026-11-23 결정)."""
     people = [("가나다", "S-1", "12"), ("라마바", "S-2", "8"), ("사아자", "S-3", "4")]
     sheet = [["이수시간", "성명"], [None, "가나다"], [None, "라마바"], [None, "사아자"]]
     _, documents, view = build(tmp_path, [_referral(*p) for p in people], sheet, "명단")
-    assert interpret("성명 기준으로 이수시간 채워줘", documents, view).key == ("성명", "성명")
+    named = interpret("성명 기준으로 이수시간 채워줘", documents, view)
+    assert named.key == ("성명", "성명") and not named.key_assumed
     guessed = interpret("이수시간 채워줘", documents, view)
-    assert guessed.key is None and dict(guessed.questions)["key_column"][0] == "성명"
+    assert guessed.key == ("성명", "성명") and guessed.key_assumed
+    assert "key_column" not in dict(guessed.questions)
+
+
+def _person(name, number, hours):
+    rows = [("성명", name), ("관리번호", number), ("이수시간", hours)]
+    body = table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
+    return ["<hp:p><hp:run>" + body + "</hp:run></hp:p>"]
+
+
+def test_an_unnamed_key_is_assumed_when_every_match_points_to_the_same_rows(tmp_path):
+    """성명·관리번호가 모두 맞아도 각 문서를 같은 행으로 보내면 어느 쪽이든 같다 → 추정."""
+    people = [("가나다", "A-11", "12"), ("라마바", "A-12", "8"), ("사아자", "A-13", "4")]
+    sheet = [
+        ["관리번호", "성명", "이수시간"],
+        ["A-13", "사아자", None],
+        ["A-11", "가나다", None],
+        ["A-12", "라마바", None],
+    ]
+    _, documents, view = build(tmp_path, [_person(*p) for p in people], sheet, "명단")
+    result = interpret("이수시간 채워줘", documents, view)
+    assert result.key_assumed and result.key in (("성명", "성명"), ("관리번호", "관리번호"))
+
+
+def test_an_unnamed_key_is_asked_when_same_name_columns_point_to_different_rows(tmp_path):
+    """성명은 1행, 관리번호는 2행을 가리키면 어느 쪽이 맞는지 모른다 → 묻는다."""
+    people = [("가나다", "A-12", "12"), ("라마바", "A-13", "8"), ("사아자", "A-11", "4")]
+    sheet = [
+        ["관리번호", "성명", "이수시간"],
+        ["A-11", "가나다", None],
+        ["A-12", "라마바", None],
+        ["A-13", "사아자", None],
+    ]
+    _, documents, view = build(tmp_path, [_person(*p) for p in people], sheet, "명단")
+    result = interpret("이수시간 채워줘", documents, view)
+    assert result.key is None and "key_column" in dict(result.questions)
+
+
+def test_an_unnamed_key_is_not_assumed_when_a_partial_match(tmp_path):
+    """문서 값 하나라도 열에 없으면 추정하지 않는다."""
+    people = [("가나다", "S-1", "12"), ("라마바", "S-2", "8"), ("하하하", "S-3", "4")]
+    sheet = [["이수시간", "성명"], [None, "가나다"], [None, "라마바"], [None, "사아자"]]
+    _, documents, view = build(tmp_path, [_referral(*p) for p in people], sheet, "명단")
+    result = interpret("이수시간 채워줘", documents, view)
+    assert result.key is None and "key_column" in dict(result.questions)
+
+
+def test_an_unnamed_key_is_not_assumed_from_a_name_the_request_used(tmp_path):
+    """요청이 채우라고 말한 이름은 키로 삼지 않는다."""
+    people = [("가나다", "S-1", "12"), ("라마바", "S-2", "8"), ("사아자", "S-3", "4")]
+    sheet = [["이수시간", "성명"], [None, "가나다"], [None, "라마바"], [None, "사아자"]]
+    _, documents, view = build(tmp_path, [_referral(*p) for p in people], sheet, "명단")
+    assert interpret("성명이랑 이수시간 채워줘", documents, view).key is None
 
 
 @pytest.mark.parametrize(
