@@ -96,7 +96,8 @@ def describe_rule(rule: RuleSet, view: TargetView, unsure=()) -> str:
     key = f"{rule.target.key_column}(으)로 행을 찾아"
     by = [n for kind, n, c in unsure if kind == "key" and c == rule.target.key_column]
     if by:  # 열만 보면 남의 번호(추천인사번)로 찾는 것을 알 수 없다(3차 M1)
-        key = f"{rule.target.key_column}(으)로 행을 찾아(문서의 ‘{by[0]}’ 값으로, 확인 필요)"
+        source = "" if _same(by[0], rule.target.key_column) else f"문서의 ‘{by[0]}’ 값으로, "
+        key = f"{rule.target.key_column}(으)로 행을 찾아({source}확인 필요)"
     parts = []
     for field in rule.fields:
         if not field.target_column:
@@ -245,7 +246,8 @@ def _apply_answers(result, answers: Pairs, view: TargetView):
             questions=tuple(q for q in result.questions if q[0] != "work_type"),
         )
     column = _answer(answers, "key_column")
-    if column and result.key is None and column in view.columns:
+    # 추정한 키보다 사용자 답이 앞선다(검수 r1 L1)
+    if column and (result.key is None or result.key_assumed) and column in view.columns:
         field = _key_field_for(result, view, column)
         if field is not None:
             # 키를 모를 때 만든 짝 가운데 키 항목·키 열의 짝은 뺀다. 키 열은 이미 값이 있는 열이다(3차 H1)
@@ -255,6 +257,7 @@ def _apply_answers(result, answers: Pairs, view: TargetView):
                 result,
                 fields=kept,
                 key=(field, column),
+                key_assumed=False,
                 record=replace(result.record, key_field=field),
                 questions=tuple(q for q in result.questions if q[0] != "key_column"),
             )
@@ -346,7 +349,7 @@ def prepare(
 
         def read(chooser, reader):
             found = interpret(request, documents, view, choose=chooser, ask_many=reader)
-            unnamed = found.key is None
+            unnamed = found.key is None or found.key_assumed
             return (*_apply_answers(found, answers, view), unnamed)
 
         failures: list[
@@ -361,7 +364,9 @@ def prepare(
             )
         # 열만 답한 키의 문서 항목 이름이 열과 다르면(추천인사번 → 사번) 미리보기에도 보인다(3차 M1)
         answered_key = (
-            [("key", *result.key)] if unnamed_key and result.key and not _same(*result.key) else []
+            [("key", *result.key)]
+            if result.key and (result.key_assumed or (unnamed_key and not _same(*result.key)))
+            else []
         )
         # 사용자가 미리보기에서 [빼기]한 짝은 쓰지 않는다(답 drop_field = 문서 항목)
         dropped = {value for slot, value in answers if slot == "drop_field"}

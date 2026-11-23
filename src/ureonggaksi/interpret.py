@@ -125,6 +125,8 @@ class Interpretation:
     # 빼라는 말로 읽었지만 모델이 채우라고 읽었거나 채우라고도 빼라고도 읽은 이름. 이 이름만 비우고
     # 경고로 알린다. 남은 짝이 없어 묻게 되면 질문이 이 이름을 짚는다(DIF-060·062)
     conflicted: tuple[str, ...] = ()
+    # 요청이 말하지 않은 키를 코드가 추정했다(이름이 같고 문서 값이 모두 맞으며, 다른 후보와 행이 같음) → '확인 필요'
+    key_assumed: bool = False
 
 
 def _norm(text: str) -> str:
@@ -637,6 +639,43 @@ def _identifier_like(values: list[str]) -> bool:
     return not all(len(v) <= 1 or (v.isdigit() and len(v) <= 3) for v in values)
 
 
+def _rows_of(view: TargetView, column: str) -> dict[str, set[str]]:
+    """열 값 → 그 값이 있는 행 번호들."""
+    index = view.columns.index(column)
+    letters = sorted(
+        {c.address.rstrip("0123456789") for c in view.cells}, key=lambda s: (len(s), s)
+    )
+    rows: dict[str, set[str]] = {}
+    if index >= len(letters):
+        return rows
+    for c in view.cells:
+        value = c.value.value.strip()
+        if c.address.rstrip("0123456789") == letters[index] and value:
+            rows.setdefault(value, set()).add(c.address[len(letters[index]) :])
+    return rows
+
+
+def _same_rows(a, b, by_name, view: TargetView) -> bool:
+    """키 후보 a와 후보 b (일치 수, 문서 항목, 열)가 각 문서를 다른 행으로 보내지 않는다. 남의 번호(추천인사번)가
+    사번 열과 맞으면 성명과 다른 행을 가리킨다(H1). a 열 값은 모두 달라 한 행이다. b 값이 여러 행에 있으면
+    b가 거의 식별자인 열(겹친 칸이 20% 이하, 작은 표는 1칸)일 때만 그 행들 안에 a의 행이 있는지 본다(검수 r2 M1).
+    같은 단체·같은 달처럼 흔히 겹치는 열의 값은 행을 가리키지 못해 견주지 않는다. 열에 없는 값도 견주지
+    않는다. 표본 수가 다르면(병합 칸이 있는 명단 표) 문서끼리 맞출 수 없어 같다고 보지 않는다(검수 r1 H1)."""
+    rows_a, rows_b = _rows_of(view, a[2]), _rows_of(view, b[2])
+    samples_a, samples_b = by_name[a[1]].samples, by_name[b[1]].samples
+    if len(samples_a) != len(samples_b):
+        return False
+    filled = sum(len(r) for r in rows_b.values())
+    # 겹친 칸이 20% 이하(작은 표는 1칸까지, 검수 r3)
+    identifier = filled > 0 and filled - len(rows_b) <= max(1, 0.2 * filled)
+    for x, y in zip(samples_a, samples_b, strict=True):
+        if len(rows_a.get(x, ())) != 1 or y not in rows_b:
+            continue
+        if (len(rows_b[y]) == 1 or identifier) and not rows_a[x] <= rows_b[y]:
+            return False
+    return True
+
+
 def _key_candidates(
     fields: list[FieldCandidate], view: TargetView, *, named: bool = False, any_hit: bool = False
 ) -> list[tuple[int, str, str]]:
@@ -727,7 +766,7 @@ def interpret(
     choose: Chooser | None = None,
     ask_many: AskMany | None = None,
 ) -> Interpretation:
-    """코드가 확정하는 것은 이름이 정규화 후 완전히 같은 짝과, 사용자가 지목한 키뿐이다(P04 ① 검수).
+    """코드가 확정하는 것은 이름이 정규화 후 완전히 같은 짝과, 사용자가 지목한 키다(P04 ① 검수). 추정한 키(key_assumed)는 '확인 필요'로 보인다.
 
     그 밖의 짝(이름이 다른 것)은 모델이 선택지에서 고르고, 모델이 없거나 '없음'이면 빼고 소명한다.
     """
@@ -752,6 +791,7 @@ def interpret(
     # 키: 'X로 찾아·X 기준'으로 말한 이름 → 없으면 엄격한 데이터 일치에서 1위가 뚜렷할 때만.
     # "이름으로 찾아서 이름 말고"처럼 말한 키를 스스로 지웠으면 다른 열을 추정하지 않고 묻는다(2차 R03)
     key = None
+    key_assumed = False  # 말하지 않은 키를 추정했다 → '확인 필요'
     guess = None  # 말하지 않은 키의 1순위 후보(질문의 첫 선택지)
     hint = next((n for n, after in mentions if KEY_AFTER.match(after)), None)
     named_keys = {n for n, a in found if KEY_AFTER.match(a)}
@@ -769,11 +809,27 @@ def interpret(
         if len(picked) == 1:
             key = (picked[0][1], picked[0][2])
     else:  # 키를 말하지 않았다
-        # 키는 추정해 확정하지 않고 묻는다(확실한 칸만 채운다, 2026-11-20 사용자 결정). 값 일치 1위가
+        # 키는 원칙적으로 묻는다(2026-11-20 사용자 결정, 아래 예외는 2026-11-23). 값 일치 1위가
         # 뚜렷하면 질문의 첫 선택지로 둔다. 값 모양(번호처럼 생긴 열)으로 동점을 가르지 않는다(DIF-050 H1)
         candidates = _key_candidates(fields, view)
         if candidates and (len(candidates) == 1 or candidates[0][0] > 2 * candidates[1][0]):
             guess = candidates[0][2]
+        # 예외: 이름이 같고 문서 값이 모두 그 열에 있는 후보가 있고, 값이 맞는 모든 후보가 각 문서를 같은 행으로
+        # 보내면 키로 쓰고 '확인 필요'로 보인다(2026-11-23 사용자 결정). 어느 후보를 골라도 결과가 같다.
+        # 요청이 다른 역할로 말한 이름은 키로 삼지 않는다
+        spoken = {n for n, _ in found}
+        sure = [
+            c
+            for c in candidates
+            if _same(c[1], c[2])
+            and c[0] == len([s for s in by_name[c[1]].samples if s])
+            and not ({c[1], c[2]} & spoken)
+            and view.columns.count(c[2]) == 1  # 머리글이 둘이면 어느 열인지 모른다(검수 r1 L2)
+        ]
+        # 값이 하나라도 맞는 모든 후보와 견준다. 약한 후보·값이 겹치는 열도 다른 행을 가리키면 묻는다(검수 r1 M1)
+        rivals_all = _key_candidates(fields, view, named=True, any_hit=True)
+        if sure and all(_same_rows(sure[0], c, by_name, view) for c in rivals_all):
+            key, key_assumed = (sure[0][1], sure[0][2]), True
     if key is not None:
         # 행 전체를 봤고, 그 열에 값이 맞는 다른 문서 항목이 없을 때만(3차 H1 성명·추천인, 4차 H3 이름·이름)
         rivals = [
@@ -782,7 +838,7 @@ def interpret(
             if c[2] == key[1] and c[1] != key[0]
         ]
         if rivals or not _covers_all_rows(view):
-            key = None
+            key, key_assumed = None, False
     if key is None:
         options = tuple(
             dict.fromkeys(
@@ -1134,6 +1190,7 @@ def interpret(
         skipped=tuple(skipped),
         unread=tuple(unread),
         conflicted=tuple(dict.fromkeys(conflicted)),
+        key_assumed=key_assumed,
     )
 
 
