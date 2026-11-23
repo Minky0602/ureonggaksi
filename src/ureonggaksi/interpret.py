@@ -657,19 +657,22 @@ def _rows_of(view: TargetView, column: str) -> dict[str, set[str]]:
 
 def _same_rows(a, b, by_name, view: TargetView) -> bool:
     """키 후보 a와 후보 b (일치 수, 문서 항목, 열)가 각 문서를 다른 행으로 보내지 않는다. 남의 번호(추천인사번)가
-    사번 열과 맞으면 성명과 다른 행을 가리킨다(H1). 한 행에만 있는 값끼리만 견준다: 여러 행에 있는 값(같은
-    단체·같은 달)은 행을 가리키지 못한다. 열에 없는 값도 견주지 않는다. 표본 수가 다르면(병합 칸이 있는
-    명단 표) 문서끼리 맞출 수 없어 같다고 보지 않는다(검수 r1 H1)."""
+    사번 열과 맞으면 성명과 다른 행을 가리킨다(H1). a 열 값은 모두 달라 한 행이다. b 값이 여러 행에 있으면
+    b가 거의 식별자인 열(값의 80% 이상이 서로 다름)일 때만 그 행들 안에 a의 행이 있는지 본다(검수 r2 M1).
+    같은 단체·같은 달처럼 흔히 겹치는 열의 값은 행을 가리키지 못해 견주지 않는다. 열에 없는 값도 견주지
+    않는다. 표본 수가 다르면(병합 칸이 있는 명단 표) 문서끼리 맞출 수 없어 같다고 보지 않는다(검수 r1 H1)."""
     rows_a, rows_b = _rows_of(view, a[2]), _rows_of(view, b[2])
     samples_a, samples_b = by_name[a[1]].samples, by_name[b[1]].samples
     if len(samples_a) != len(samples_b):
         return False
-    pairs = zip(samples_a, samples_b, strict=True)
-    return all(
-        rows_a[x] == rows_b[y]
-        for x, y in pairs
-        if len(rows_a.get(x, ())) == 1 and len(rows_b.get(y, ())) == 1
-    )
+    filled = sum(len(r) for r in rows_b.values())
+    identifier = filled > 0 and len(rows_b) >= 0.8 * filled
+    for x, y in zip(samples_a, samples_b, strict=True):
+        if len(rows_a.get(x, ())) != 1 or y not in rows_b:
+            continue
+        if (len(rows_b[y]) == 1 or identifier) and not rows_a[x] <= rows_b[y]:
+            return False
+    return True
 
 
 def _key_candidates(

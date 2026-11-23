@@ -2266,3 +2266,21 @@ def test_an_unnamed_key_is_not_assumed_from_a_doubled_header(tmp_path):
     docs = [_kv([("성명", a), ("이수시간", c)]) for a, c in people]
     _, documents, view = build(tmp_path, docs, sheet, "명단")
     assert not interpret("이수시간 채워줘", documents, view).key_assumed
+
+
+def test_an_unnamed_key_is_asked_when_an_identifier_on_two_rows_misses_its_row(tmp_path):
+    """검수 r2 M1: 거의 식별자인 열에서 두 행에 있는 값이라도 키가 가리킨 행이 그 안에 없으면 묻는다."""
+    sheet = [
+        ["사번", "성명", "이수시간"],
+        ["S-1001", "가나다", None],
+        ["S-1002", "라마바", None],
+        ["S-1003", "사아자", None],
+        ["S-1004", "차카타", None],
+        ["S-1005", "타파하", None],
+        ["S-1003", "거너더", None],
+    ]
+    docs = [_kv([("성명", "가나다"), ("사번", "S-1003"), ("이수시간", "1")])]
+    docs.append(_kv([("성명", "라마바"), ("사번", "S-1002"), ("이수시간", "2")]))
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("이수시간 채워줘", documents, view)
+    assert result.key is None and "key_column" in dict(result.questions)
