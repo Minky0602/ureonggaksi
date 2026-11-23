@@ -635,7 +635,8 @@ def _read_request(
         unread,
         agreed.get(EVERYTHING_KEY) == EVERYTHING_OPTIONS[0],
         skip_words,
-        # 두 답이 엇갈렸고 그중 한 번은 '채움'이었던 이름(대조에서 견줄 후보, DIF-071 검수 M2)
+        # 두 답이 엇갈렸고 그중 한 번은 '채움'이었던 이름(대조에서 견줄 후보, DIF-071 검수 M2). 다른 답이 없거나
+        # '제외'여도 넣는다: 4B는 J04 근무일수를 채움/제외로 답했다. 대조는 쓰지 않고 '확인 필요'로 보인다(r2 L1·L2)
         [
             k.removeprefix("[이름] ")
             for k in fields
