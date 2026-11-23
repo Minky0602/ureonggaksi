@@ -326,6 +326,8 @@ def everything_spans(text: str) -> list[tuple[int, int]]:
 CONTENT_TAGS = ("NNG", "NNP", "SL", "SH", "NP", "NR", "SN", "MM")
 LIGHT_NOUNS = {"것", "거", "수", "쪽", "데"}  # 가리키는 대상이 없는 의존 명사
 COURTESY = {"부탁", "감사", "고맙"}  # "다 채워줘, 부탁해": 인사는 마디로 치지 않는다
+REASON_ENDINGS = {"라", "라서", "어서", "아서", "여서", "니까", "으니까"}  # "계좌는 개인정보라 빼"
+LATER_NOUNS = {"나중", "추후"}  # "직무는 나중에 정할게": 미루는 때를 말하는 명사는 내용어가 아니다
 EXCEPT_NOUNS = {"외", "이외", "제외"}  # 평가 외에는, 평가 이외 전부
 
 
@@ -334,15 +336,28 @@ def side_clauses(text: str) -> list[tuple[str, list[tuple[int, int]]]]:
 
     "평가는 놔둬, 다 채워줘"의 [평가], "평가 외에는 다 채워"의 [평가]. 다른 용언이 연결·종결 어미로 마디를
     끝내야 마디다. 관형형("보고서에 있는 거")은 꾸밈이라 마디를 끝내지 않는다. 마디를 끝내는 용언이
-    '명사 + 하다'면 그 명사('생략하고'의 '생략')는 서술어라 내용어에서 뺀다(4차 검수 H-1).
+    '명사 + 하다'면 그 명사('생략하고'의 '생략')는 서술어라 내용어에서 뺀다(4차 검수 H-1). 이유를 대는
+    '-이라(서)·-이니까'는 마디를 끝내지 않고 이유 말을 빼고 뒤 마디에 붙는다. '나중·추후'는 내용어가 아니다.
     """
     tokens = _tokens(text)
     chain = {k for _, j, end in _everything_verbs(tokens) for k in range(j, end)}
     clauses: list[tuple[str, list[tuple[int, int]]]] = []
     nouns: list[tuple[int, int]] = []
+    topic = 0  # 이 마디에서 마지막 조사 앞까지의 내용어 수
+    reason: list[tuple[int, int]] | None = None  # 이유를 대고 아직 끝나지 않은 마디의 내용어 전부
+
+    def close_reason():
+        # 이유만 대고 무엇을 할지 말하지 않은 마디("평가는 민감한 정보라서")는 미확정 마디로 남긴다(검수 r1 H-1)
+        if reason is not None:
+            clauses.append(("이", reason))
+
     for k, token in enumerate(tokens):
         if k in chain or token.tag in ("SF", "SP"):
-            nouns = []
+            close_reason()
+            nouns, topic, reason = [], 0, None
+            continue
+        if token.tag.startswith("J"):
+            topic = len(nouns)
             continue
         if token.tag.startswith("N") and token.form in EXCEPT_NOUNS:
             clauses.append((token.form, nouns))
@@ -351,7 +366,7 @@ def side_clauses(text: str) -> list[tuple[str, list[tuple[int, int]]]]:
         if token.tag.startswith(CONTENT_TAGS) or (
             token.tag == "NNB" and token.form not in LIGHT_NOUNS
         ):
-            if token.form not in EVERYTHING_WORDS:
+            if token.form not in EVERYTHING_WORDS and token.form not in LATER_NOUNS:
                 nouns.append((token.start, token.end))
             continue
         if not token.tag.startswith(("VV", "VA", "VX", "XSV", "XSA", "VCP", "VCN")):
@@ -361,14 +376,60 @@ def side_clauses(text: str) -> list[tuple[str, list[tuple[int, int]]]]:
             m += 1
         if m < len(tokens) and tokens[m].tag not in ("EC", "EF"):
             continue  # 관형형·명사형은 마디를 끝내지 않는다
+        if (
+            m + 1 < len(tokens)
+            and tokens[m].tag == "EC"
+            and tokens[m + 1].tag == "VX"
+            and tokens[m + 1].form not in NEGATING_AUX
+        ):
+            continue  # "빼 줘": 보조 용언이 마디를 끝낸다. "빼지 마"는 따로 마디가 된다(검수 r2 M-1)
+        if token.tag == "VCP" and m < len(tokens) and tokens[m].form in REASON_ENDINGS:
+            # "계좌는 개인정보라 빼": 이유를 대는 '-이라'는 마디를 끝내지 않고 뒤 마디에 붙는다. 이유
+            # 말('개인정보')은 내용어가 아니고 주제('계좌')만 뒤 서술어의 대상으로 남는다
+            reason = (reason or []) + nouns
+            nouns = nouns[:topic]
+            continue
         stem = token.form
         if token.tag.startswith(("XSV", "XSA")) and nouns and nouns[-1][1] == token.start:
             stem = text[nouns[-1][0] : nouns[-1][1]]
             nouns.pop()
         if stem not in COURTESY:
             clauses.append((stem, nouns))
-        nouns = []
+        nouns, topic, reason = [], 0, None
+    close_reason()
     return clauses
+
+
+def aside_spans(text: str, *, later: bool = True) -> list[tuple[int, int]]:
+    """열 이름의 다른 말이 아닌 곁말의 글자 범위: 이유 말("계좌는 [개인정보라] 빼")과 미루는 말("직무는
+    [나중에 따로 정할게]"). 모르는 말로 모델에 넘기지 않는다. 마디를 어떻게 읽을지는 side_clauses가 정한다.
+    later=False면 이유 말만 낸다(미루는 말은 그 자체가 빼기 표현이다)."""
+    tokens = _tokens(text)
+    spans: list[tuple[int, int]] = []
+    begin = 0  # 이 마디에서 마지막 조사 뒤 첫 글자
+    later_at = None  # 이 마디에서 '나중·추후'가 시작한 글자
+    for k, token in enumerate(tokens):
+        if token.tag in ("SF", "SP"):
+            begin, later_at = token.end, None
+            continue
+        if token.tag.startswith(
+            "J"
+        ):  # 조사 뒤부터가 이유 말이다("연락처를 [개인정보라서]", 검수 r1 L-1)
+            begin = token.end
+            continue
+        if token.tag.startswith("N") and token.form in LATER_NOUNS and later_at is None:
+            later_at = token.start
+        if token.tag not in ("EC", "EF"):
+            continue
+        previous = tokens[k - 1] if k else None
+        if previous is not None and previous.tag == "VCP" and token.form in REASON_ENDINGS:
+            spans.append((begin, token.end))
+        elif later_at is not None and (k + 1 == len(tokens) or tokens[k + 1].tag != "VX"):
+            if later:
+                spans.append((later_at, token.end))
+            later_at = None
+        begin = token.end
+    return spans
 
 
 def has_exclusive(text: str) -> bool:
