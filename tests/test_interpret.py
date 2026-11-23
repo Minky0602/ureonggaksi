@@ -2284,3 +2284,19 @@ def test_an_unnamed_key_is_asked_when_an_identifier_on_two_rows_misses_its_row(t
     _, documents, view = build(tmp_path, docs, sheet, "명단")
     result = interpret("이수시간 채워줘", documents, view)
     assert result.key is None and "key_column" in dict(result.questions)
+
+
+def test_an_unnamed_key_is_asked_in_a_small_table_with_one_doubled_identifier(tmp_path):
+    """검수 r3: 4행 표에서 겹친 값이 하나여도 식별자 열로 보고 견준다."""
+    sheet = [
+        ["사번", "성명", "이수시간"],
+        ["S-1", "가나다", None],
+        ["S-2", "라마바", None],
+        ["S-9", "사아자", None],
+        ["S-9", "차카타", None],
+    ]
+    docs = [_kv([("성명", "가나다"), ("사번", "S-9"), ("이수시간", "1")])]
+    docs.append(_kv([("성명", "라마바"), ("사번", "S-2"), ("이수시간", "2")]))
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("이수시간 채워줘", documents, view)
+    assert result.key is None and "key_column" in dict(result.questions)
