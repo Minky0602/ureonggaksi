@@ -2380,3 +2380,23 @@ def test_a_reason_after_an_object_particle_keeps_the_name_as_skipped(setup):
 def test_lookalike_skip_words_are_not_skips(request_text):
     blanked = _blank(request_text, morph.aside_spans(request_text, later=False))
     assert not _negated(_mentions(blanked, ["이름", "연락처"]))
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "직급은 빼지 마",
+        "직급은 비우지 말고",
+        "직급은 비워 두지 마",
+        "직급은 놔두지 말고",
+        "직급은 개인정보라 빼지 마",
+    ],
+)
+def test_fill_everything_stays_off_for_do_not_skip(setup, tail):
+    """곁마디 검수 r2 M-1·L-1: '빼지 마'는 빼기가 아니다. 모델이 '무관'이라 해도 '전부'를 켜지 않는다."""
+    _, docs, view = setup
+    request = f"발급번호 기준으로 다 채워줘. {tail}"
+    reader = reads({"직급": "무관"}, {"전부": "예"})
+    result = interpret(request, docs, view, ask_many=reader)
+    assert "이수시간" not in {c for _, c, _ in result.fields}
+    assert "직급" not in _negated(_mentions(request, ["직급"]))

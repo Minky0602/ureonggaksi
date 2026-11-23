@@ -376,8 +376,13 @@ def side_clauses(text: str) -> list[tuple[str, list[tuple[int, int]]]]:
             m += 1
         if m < len(tokens) and tokens[m].tag not in ("EC", "EF"):
             continue  # 관형형·명사형은 마디를 끝내지 않는다
-        if m + 1 < len(tokens) and tokens[m].tag == "EC" and tokens[m + 1].tag == "VX":
-            continue  # "빼 줘": 보조 용언이 마디를 끝낸다
+        if (
+            m + 1 < len(tokens)
+            and tokens[m].tag == "EC"
+            and tokens[m + 1].tag == "VX"
+            and tokens[m + 1].form not in NEGATING_AUX
+        ):
+            continue  # "빼 줘": 보조 용언이 마디를 끝낸다. "빼지 마"는 따로 마디가 된다(검수 r2 M-1)
         if token.tag == "VCP" and m < len(tokens) and tokens[m].form in REASON_ENDINGS:
             # "계좌는 개인정보라 빼": 이유를 대는 '-이라'는 마디를 끝내지 않고 뒤 마디에 붙는다. 이유
             # 말('개인정보')은 내용어가 아니고 주제('계좌')만 뒤 서술어의 대상으로 남는다
