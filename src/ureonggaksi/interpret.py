@@ -48,7 +48,7 @@ NEGATED = re.compile(
     r"^(칸|열|란)?(에는|에|은|는|을|를|이|가|도|까지는|까지|만은|만)?"
     r"(빼(?!놓지|먹지)|제외|말고|그대로(?!옮|넣|채|입력|적|기입|반영)|손대지|건드리지|하지마|하지말|두고|놔두|참고|비워|비우"
     r"|채우지마|채우지말|넣지마|넣지말|보류|생략|취소"
-    r"|미루|(나중에?|나중으로|이따가?|다음에|다음(주|달|번)에)(?=하|해(?!당)|할|요|넣|채|처리|[,.;]|$)"
+    r"|미루|(나중에?|나중으로|추후에?|이따가?|다음에|다음(주|달|번)에)(따로)?(?=하|해(?!당)|할|요|넣|채|처리|정하|정할|정해|[,.;]|$)"
     r"|아직(하지|안하|안해|채우지|넣지|이야|이에요|이요))"
 )  # "번호 칸은 비워 둬", "비고 칸에 넣지 말고", "생일은 나중에 하고"(미루기는 SKIP_WORDS와 같은 뜻)
 # 코드가 항목 짝을 확정해도 되는 요청은 모든 낱말이 '이름+조사'이거나 아래 허용 낱말인 것뿐이다.
@@ -179,7 +179,7 @@ def _synonym(name: str, pool: tuple[str, ...]) -> str | None:
 SKIP_WORDS = re.compile(
     r"빼(?!놓지|먹지)|제외|(?<!먹지 )(?<!먹지)말고|놔두|두고|비워|비우|그대로(?!옮|넣|채|입력|적|기입|반영)|참고|취소|보류|생략|미루"
     r"|손대지|건드리지|하지\s*마|하지\s*말"
-    r"|(나중에?|나중으로|이따가?|다음에|다음\s*(주|달|번)에)(?=\s*(하|해(?!당)|할|요|넣|채|처리|[,.;]|$))"
+    r"|(나중에?|나중으로|추후에?|이따가?|다음에|다음\s*(주|달|번)에)(\s*따로)?(?=\s*(하|해(?!당)|할|요|넣|채|처리|정하|정할|정해|[,.;]|$))"
     r"|아직\s*(하지|안\s*하|안\s*해|채우지|넣지|이야|이에요|이요)"
 )  # 이름 경로의 빼기 낱말(NEGATED)과 같은 뜻을 쓴다. 미루기는 '하다'·마디 끝이 뒤따를 때만이다:
 # '다음 주까지'·'아직 비어 있는'·'신청인 다음에 생일'·'아직 안 채운 칸'·'나중에 확인할'은 미루기가 아니다(검수 L-1, PR #27)
@@ -482,8 +482,17 @@ def _simple(request: str, names: list[str]) -> bool:
     return all(SIMPLE_TOKEN.fullmatch(t) for t in tokens)
 
 
+def _blank(text: str, spans) -> str:
+    """범위를 같은 길이의 공백으로 가린다(다른 글자의 위치는 그대로)."""
+    for a, b in spans:
+        text = text[:a] + " " * (b - a) + text[b:]
+    return text
+
+
 def _unknown_words(request: str, names: list[str]) -> list[str]:
-    """허용 낱말도 이름도 아닌 말(조사·'좀'·'요'를 뗀 것). 모델이 열 이름의 다른 말인지 읽는다."""
+    """허용 낱말도 이름도 아닌 말(조사·'좀'·'요'를 뗀 것). 모델이 열 이름의 다른 말인지 읽는다.
+    이유 말·미루는 말("개인정보라", "나중에 따로 정할게")은 곁말이라 묻지 않는다(morph.aside_spans)."""
+    request = _blank(request, morph.aside_spans(request))
     marked, last = [], 0
     for start, end, name in _spans(request, names):
         if name:
@@ -499,6 +508,7 @@ def _unknown_words(request: str, names: list[str]) -> list[str]:
         # 코드가 이미 아는 동사·빼기 표현('채우고', '놔두세')은 열 이름의 다른 말이 아니다(DIF-050 M4)
         if any(p.search(word) for p in (FILL, FILL_NEGATED, CHECK)) or NEGATED.match(word):
             continue
+
         if len(word) >= 2 and re.search(r"[가-힣A-Za-z]", word):
             words.append(word)
     return list(dict.fromkeys(words))
@@ -777,7 +787,10 @@ def interpret(
     names = [f.name for f in fields]
     by_name = {f.name: f for f in fields}
     found = _mentions(request, columns + names)
-    skip = _negated(found)
+    # "계좌는 개인정보라 빼고": 이유 말을 가리고 빼기를 읽는다(이름 순서는 같다)
+    skip = _negated(
+        _mentions(_blank(request, morph.aside_spans(request, later=False)), columns + names)
+    )
     mentions = [(n, a) for n, a in found if n not in skip]
     simple = _simple(request, columns + names)
     # 열·항목 이름 자체가 빼기 낱말('제외')이면 이름으로 가려져 부정을 못 본다. 그런 이름이 나오면 묻는다(4차 M1)

@@ -253,3 +253,21 @@ def test_work_type_fourth_review_cases(request_text, expected):
 
 def test_question_in_a_later_clause_keeps_the_prohibition():
     assert morph.negated_fill_spans("직급은 넣어도 안 돼, 알겠지? 나머지 채워")
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("계좌는 개인정보라 일단 빼고, 다 채워줘", [("빼", ["계좌"])]),  # 이유 말은 내용어가 아니다
+        ("주소는 확인 중이니까 놔두고 다 채워줘", [("놔두", ["주소"])]),
+        ("주소는 빼 줘, 나머지 다 채워", [("주", ["주소"])]),  # 보조 용언이 마디를 끝낸다
+        ("다 채워줘. 직급은 나중에 따로 정할게", [("정하", ["직급"])]),  # '나중'은 내용어가 아니다
+        (
+            "다 채워 줘, 주소는 틀렸으니까 고쳐",
+            [("틀리", ["주소"]), ("고치", [])],
+        ),  # '-이라'가 아니다
+    ],
+)
+def test_side_clauses_join_reasons_and_drop_later_nouns(text, expected):
+    got = [(stem, [text[a:b] for a, b in spans]) for stem, spans in morph.side_clauses(text)]
+    assert got == expected

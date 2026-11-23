@@ -1443,7 +1443,7 @@ def test_fill_everything_is_off_when_only_the_model_reads_a_name_as_skipped(setu
     """검수 r2 M-1: 코드가 빼기로 읽지 않은 이름을 모델만 '제외'로 읽으면 끈다. 모델 오판 하나로 "직급만"이
     "직급 빼고 전부"로 뒤집힐 수 있다. 모델이 채우라고 읽어도 그 이름만 채우는 요청이다."""
     _, docs, view = setup
-    request = "발급번호 기준으로 보고서에 있는 거 다 채워줘. 직급은 나중에 따로 정할게"
+    request = "발급번호 기준으로 보고서에 있는 거 다 채워줘. 직급은 내가 따로 정할게"
     for role in ("제외", "채움"):
         reader = reads({"직급": role}, {"평가점수": "점수", "전부": "예"})
         result = interpret(request, docs, view, ask_many=reader)
@@ -2300,3 +2300,39 @@ def test_an_unnamed_key_is_asked_in_a_small_table_with_one_doubled_identifier(tm
     _, documents, view = build(tmp_path, docs, sheet, "명단")
     result = interpret("이수시간 채워줘", documents, view)
     assert result.key is None and "key_column" in dict(result.questions)
+
+
+def _skips_contact(prompt, fields):
+    return reads({"연락처": "제외"}, {"전부": "예"})(prompt, fields)
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 문서에 있는 거 전부 넣어줘. 연락처는 개인정보라 빼고",
+        "발급번호 기준으로 다 채워줘, 연락처는 개인정보라서 빼 주세요",
+        "발급번호 기준으로 다 채워줘. 연락처는 나중에 따로 정할게",
+        "연락처는 나중에 할게요, 발급번호 기준으로 다 채워줘",
+        "발급번호 기준으로 다 채워줘. 연락처는 추후 정하겠습니다",
+    ],
+)
+def test_fill_everything_reads_reason_and_later_clauses_as_skips(setup, request_text):
+    """이유를 대는 '-이라(서)'는 빼기 마디에 붙고, '나중에 (따로) 정할게'는 미루기(빼기)다."""
+    _, docs, view = setup
+    result = interpret(request_text, docs, view, ask_many=_skips_contact)
+    columns = {c for _, c, _ in result.fields}
+    assert "이수시간" in columns and "연락처" not in columns
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 다 채워줘. 연락처는 틀렸으니까 고쳐",  # 이유 뒤가 빼기가 아니다
+        "발급번호 기준으로 다 채워줘. 연락처는 나중에 확인할게",  # 미루는 일이 채우기가 아니다
+        "발급번호 기준으로 다 채워줘. 연락처는 개인정보라",  # 이유만 있고 무엇을 할지 없다
+    ],
+)
+def test_fill_everything_stays_off_for_other_reason_and_later_clauses(setup, request_text):
+    _, docs, view = setup
+    result = interpret(request_text, docs, view, ask_many=_skips_contact)
+    assert "이수시간" not in {c for _, c, _ in result.fields}
