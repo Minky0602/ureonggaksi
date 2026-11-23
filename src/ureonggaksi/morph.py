@@ -440,21 +440,33 @@ def deferred_spans(text: str) -> list[tuple[int, int]]:
     tokens = _tokens(text)
     spans: list[tuple[int, int]] = []
     nouns: list[tuple[int, int]] = []  # 이 마디에서 '나중' 앞까지의 명사
-    later = False
+    later = negated = False
     for k, token in enumerate(tokens):
         if token.tag in ("SF", "SP"):
-            nouns, later = [], False
+            nouns, later, negated = [], False, False
             continue
         if token.tag.startswith("N") and token.form in LATER_NOUNS:
             later = True
         elif token.tag in ("NNG", "NNP") and not later:
             nouns.append((token.start, token.end))
+        elif later and _negating(token):
+            negated = True  # "나중에 할 거 없어": 미루기를 부정했다(검수 L-1)
         if token.tag not in ("EC", "EF"):
             continue
-        if later and (k + 1 == len(tokens) or tokens[k + 1].tag != "VX"):
+        if later and not negated and (k + 1 == len(tokens) or tokens[k + 1].tag != "VX"):
             spans += nouns
-        nouns, later = [], False
+        nouns, later, negated = [], False, False
     return spans
+
+
+def _negating(token) -> bool:
+    """부정하는 말: '없다', '아니다', '안·못', 보조 용언 '않다·말다'."""
+    return (
+        (token.tag == "VA" and token.form == "없")
+        or token.tag == "VCN"
+        or (token.tag == "MAG" and token.form in NEGATING_ADVERBS)
+        or (token.tag == "VX" and token.form in NEGATING_AUX)
+    )
 
 
 def head_noun(label: str) -> str | None:

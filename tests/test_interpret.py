@@ -18,6 +18,8 @@ from ureonggaksi.interpret import (
     _named_in,
     _negated,
     _resolve,
+    _said_to_skip,
+    _unknown_words,
     build_rule,
     interpret,
 )
@@ -2460,3 +2462,37 @@ def test_a_name_said_both_before_and_in_a_deferral_is_not_deferred(setup):
     """한 번이라도 미루는 마디 밖에서 말한 이름은 미루기로 확정하지 않는다."""
     request = "직급 채우고 직급은 나중에 할게"
     assert not _named_in(request, ["직급"], morph.deferred_spans(request))
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 시간만 넣어 나머지는 비워둬",  # 검수 H-1: '만'은 빼기가 아니다
+        "발급번호 기준으로 시간은 빼지 말고 다 채워줘",  # 검수 M-1
+        "발급번호 기준으로 시간은 놔두지 말고 다 채워줘",
+    ],
+)
+def test_a_head_noun_is_not_read_as_skipped_for_only_or_do_not_skip(setup, request_text):
+    """DIF-069 검수 H-1·M-1: 끝 명사로 이은 열을 'X만'·'빼지 말고'에서 빼기로 읽지 않는다."""
+    _, docs, view = setup
+    assert not _said_to_skip(request_text, "시간")
+    result = interpret(request_text, docs, view, ask_many=fooled_with({}))
+    assert "이름" not in {c for _, c, _ in result.fields}  # '전부'는 켜지 않는다
+
+
+def test_a_negated_deferral_is_not_a_deferral():
+    """검수 L-1: '나중에 할 거 없어'는 미루기가 아니다."""
+    request = "발급번호 기준으로 다 채워줘. 직급은 나중에 할 거 없어"
+    assert not morph.deferred_spans(request)
+
+
+def test_head_noun_ignores_a_column_with_another_unit():
+    """검수 L-3: '금액'은 집행금액(천원)과 잇지 않는다."""
+    assert _headed("금액", ("집행금액(천원)", "비고")) is None
+
+
+def test_an_adverb_inside_a_column_name_is_still_asked():
+    """검수 L-2: '현재'는 부사지만 열 이름(현재직급) 안에 있어 모르는 말로 남는다."""
+    assert "현재" in _unknown_words(
+        "발급번호 기준으로 현재는 빼고 다 채워줘", ["발급번호", "현재직급"]
+    )

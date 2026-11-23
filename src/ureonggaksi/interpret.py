@@ -181,7 +181,9 @@ def _headed(word: str, pool: tuple[str, ...]) -> str | None:
     """word가 pool의 이름 하나만의 끝 명사와 같으면 그 이름('계좌'→지원계좌). 둘 이상('번호'→관리번호·
     전화번호)이거나 없으면 None. 4B는 이런 줄인 말을 열과 잇지 못했다(DIF-068·069)."""
     # 끝 글자가 같은 이름을 모두 센다. Kiwi가 '전화번호'를 한 낱말로 읽어도 '번호'로 끝나는 후보다
-    ending = [p for p in pool if _norm(p.split("(")[0]).endswith(_norm(word))]
+    ending = [p for p in pool if _norm(p).endswith(_norm(word))]
+    # 단위가 다르면 다른 이름이다('금액' ≠ 집행금액(천원), _synonym과 같다, 검수 L-3)
+    ending = [p for p in ending if _unit(p) == _unit(word)] if len(ending) == 1 else ending
     if len(ending) != 1 or morph.head_noun(ending[0]) != word:
         return None
     return ending[0]
@@ -208,15 +210,26 @@ SKIP_WORDS = re.compile(
 )  # 이름 경로의 빼기 낱말(NEGATED)과 같은 뜻을 쓴다. 미루기는 '하다'·마디 끝이 뒤따를 때만이다:
 # '다음 주까지'·'아직 비어 있는'·'신청인 다음에 생일'·'아직 안 채운 칸'·'나중에 확인할'은 미루기가 아니다(검수 L-1, PR #27)
 CLAUSE_END = re.compile(r"[,.;]|고\s")  # "생일 채우고 이수시간은 빼": '고 '에서 마디가 끝난다
+ONLY_AFTER = re.compile(r"(에)?만(?![원큼])")  # 낱말 바로 뒤 보조사 '만'("시간만", "비고에만")
+UNDO_BEFORE = re.compile(
+    r"(빼|제외하|놔두|비워\s*두|두|미루|비우)지\s*$"
+)  # '말고·마' 앞의 부정되는 빼기
 
 
 def _said_to_skip(request: str, word: str) -> bool:
     """그 낱말이 나온 어느 자리든, 같은 마디 뒤쪽에 빼기·미루기 표현이 있다. 넓게 잡는다(틀리면 덜 채울 뿐)."""
     for found in re.finditer(re.escape(word), request):
         rest = request[found.end() :]
-        hit, end = SKIP_WORDS.search(rest), CLAUSE_END.search(rest)
-        # 빼기 낱말이 첫 마디 끝보다 앞에서 시작하면 그 마디의 말이다("비워 두고 " 자체가 '고 '로 끝난다, 검수 M-1)
-        if hit and (end is None or hit.start() < end.start()):
+        if ONLY_AFTER.match(rest):
+            continue  # "시간만 넣어": 그것만 하라는 말이지 빼라는 말이 아니다(DIF-069 검수 H-1)
+        end = CLAUSE_END.search(rest)
+        for hit in SKIP_WORDS.finditer(rest):
+            # 빼기 낱말이 첫 마디 끝보다 앞에서 시작하면 그 마디의 말이다("비워 두고 " 자체가 '고 '로 끝난다, 검수 M-1)
+            if end is not None and hit.start() >= end.start():
+                break
+            # "빼지 말고": 앞의 빼기를 부정하는 '말고·마'는 빼기가 아니다(DIF-069 검수 M-1)
+            if hit.group().startswith(("말", "마")) and UNDO_BEFORE.search(rest[: hit.start()]):
+                continue
             return True
     return False
 
@@ -532,7 +545,8 @@ def _unknown_words(request: str, names: list[str]) -> list[str]:
         # 코드가 이미 아는 동사·빼기 표현('채우고', '놔두세')은 열 이름의 다른 말이 아니다(DIF-050 M4)
         if any(p.search(word) for p in (FILL, FILL_NEGATED, CHECK)) or NEGATED.match(word):
             continue
-        if morph.is_adverb(word):  # '일단', '우선': 열을 가리키지 않는다(DIF-069)
+        # '일단', '우선': 열을 가리키지 않는다. 열 이름 안에 든 말('현재'→현재직급)은 거르지 않는다(DIF-069, 검수 L-2)
+        if morph.is_adverb(word) and not any(_norm(word) in _norm(n) for n in names):
             continue
 
         if len(word) >= 2 and re.search(r"[가-힣A-Za-z]", word):
