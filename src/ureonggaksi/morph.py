@@ -343,12 +343,20 @@ def side_clauses(text: str) -> list[tuple[str, list[tuple[int, int]]]]:
     chain = {k for _, j, end in _everything_verbs(tokens) for k in range(j, end)}
     clauses: list[tuple[str, list[tuple[int, int]]]] = []
     nouns: list[tuple[int, int]] = []
-    topic = 0  # 이 마디에서 주제·주격 조사 앞까지의 내용어 수
+    topic = 0  # 이 마디에서 마지막 조사 앞까지의 내용어 수
+    reason: list[tuple[int, int]] | None = None  # 이유를 대고 아직 끝나지 않은 마디의 내용어 전부
+
+    def close_reason():
+        # 이유만 대고 무엇을 할지 말하지 않은 마디("평가는 민감한 정보라서")는 미확정 마디로 남긴다(검수 r1 H-1)
+        if reason is not None:
+            clauses.append(("이", reason))
+
     for k, token in enumerate(tokens):
         if k in chain or token.tag in ("SF", "SP"):
-            nouns, topic = [], 0
+            close_reason()
+            nouns, topic, reason = [], 0, None
             continue
-        if token.tag in ("JX", "JKS"):
+        if token.tag.startswith("J"):
             topic = len(nouns)
             continue
         if token.tag.startswith("N") and token.form in EXCEPT_NOUNS:
@@ -373,6 +381,7 @@ def side_clauses(text: str) -> list[tuple[str, list[tuple[int, int]]]]:
         if token.tag == "VCP" and m < len(tokens) and tokens[m].form in REASON_ENDINGS:
             # "계좌는 개인정보라 빼": 이유를 대는 '-이라'는 마디를 끝내지 않고 뒤 마디에 붙는다. 이유
             # 말('개인정보')은 내용어가 아니고 주제('계좌')만 뒤 서술어의 대상으로 남는다
+            reason = (reason or []) + nouns
             nouns = nouns[:topic]
             continue
         stem = token.form
@@ -381,7 +390,8 @@ def side_clauses(text: str) -> list[tuple[str, list[tuple[int, int]]]]:
             nouns.pop()
         if stem not in COURTESY:
             clauses.append((stem, nouns))
-        nouns, topic = [], 0
+        nouns, topic, reason = [], 0, None
+    close_reason()
     return clauses
 
 
@@ -391,13 +401,15 @@ def aside_spans(text: str, *, later: bool = True) -> list[tuple[int, int]]:
     later=False면 이유 말만 낸다(미루는 말은 그 자체가 빼기 표현이다)."""
     tokens = _tokens(text)
     spans: list[tuple[int, int]] = []
-    begin = 0  # 이 마디에서 주제·주격 조사 뒤 첫 글자
+    begin = 0  # 이 마디에서 마지막 조사 뒤 첫 글자
     later_at = None  # 이 마디에서 '나중·추후'가 시작한 글자
     for k, token in enumerate(tokens):
         if token.tag in ("SF", "SP"):
             begin, later_at = token.end, None
             continue
-        if token.tag in ("JX", "JKS"):
+        if token.tag.startswith(
+            "J"
+        ):  # 조사 뒤부터가 이유 말이다("연락처를 [개인정보라서]", 검수 r1 L-1)
             begin = token.end
             continue
         if token.tag.startswith("N") and token.form in LATER_NOUNS and later_at is None:

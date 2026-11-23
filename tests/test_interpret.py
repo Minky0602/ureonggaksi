@@ -6,10 +6,19 @@
 import pytest
 from conftest import cell, para, table, write_hwpx, write_xlsx
 
+from ureonggaksi import morph
 from ureonggaksi.analyze import analyze
 from ureonggaksi.hwpx import read_hwpx
 from ureonggaksi.inputs import open_inputs
-from ureonggaksi.interpret import _ask_model, _resolve, build_rule, interpret
+from ureonggaksi.interpret import (
+    _ask_model,
+    _blank,
+    _mentions,
+    _negated,
+    _resolve,
+    build_rule,
+    interpret,
+)
 from ureonggaksi.xlsx import inspect_target
 
 PEOPLE = [
@@ -2336,3 +2345,38 @@ def test_fill_everything_stays_off_for_other_reason_and_later_clauses(setup, req
     _, docs, view = setup
     result = interpret(request_text, docs, view, ask_many=_skips_contact)
     assert "이수시간" not in {c for _, c, _ in result.fields}
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 다 채워줘. 평가는 민감한 정보라서",  # 검수 r1 H-1: 이유만 대고 끝남
+        "발급번호 기준으로 평가는 민감한 정보라서 나머지 다 채워",
+    ],
+)
+def test_fill_everything_stays_off_after_a_reason_with_nothing_to_do(setup, request_text):
+    _, docs, view = setup
+    reader = reads({}, {"전부": "예", "평가점수": "점수"})
+    result = interpret(request_text, docs, view, ask_many=reader)
+    assert "점수" not in {c for _, c, _ in result.fields}
+
+
+def test_a_reason_after_an_object_particle_keeps_the_name_as_skipped(setup):
+    """검수 r1 L-1: '연락처를 개인정보라서 빼고'도 연락처를 뺀다(이유 말은 조사 뒤부터)."""
+    _, docs, view = setup
+    request = "발급번호 기준으로 연락처를 개인정보라서 빼고 다 채워줘"
+    result = interpret(request, docs, view, ask_many=_skips_contact)
+    columns = {c for _, c, _ in result.fields}
+    assert "이수시간" in columns and "연락처" not in columns
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 이름 다음에 정해진 순서로 다 채워",  # 검수 r1 L-2: '정해진'은 미루기가 아니다
+        "발급번호 기준으로 다 채워줘, 연락처는 개인정보라 빼지 말고",  # L-3: '빼지 말고'는 빼기가 아니다
+    ],
+)
+def test_lookalike_skip_words_are_not_skips(request_text):
+    blanked = _blank(request_text, morph.aside_spans(request_text, later=False))
+    assert not _negated(_mentions(blanked, ["이름", "연락처"]))
