@@ -1151,7 +1151,13 @@ def interpret(
         # 모델이 반박하지 않은 빼기(답 없음·어긋남)는 빼라는 말로 남겨 '확인 필요'로 보인다. 틀려도 덜 채울 뿐이다
         skipped = [n for n in skipped if n not in conflicted]
         # 갈린 이름은 짝 후보에서도, 모델 선택지(off_limits)에서도 뺀다. meant도 여기서 걸러진다
-        drop = {n for n in mentioned if roles.get(n) != FILL_ROLE} | set(uncertain)
+        # 대조는 칸에 쓰지 않는다(write_selected 항상 False). 모델 두 답이 엇갈린 이름은 버리지 않고 '확인
+        # 필요'로 견준다. 4B는 대조 요청의 이름 역할을 자주 엇갈려 답했다(DIF-071 J04·W04). 두 번 모두 채움이
+        # 아닌 같은 답이면 지금처럼 뺀다
+        undecided = {n for n in mentioned if n not in roles} if work_type == "check" else set()
+        drop = {n for n in mentioned if roles.get(n) != FILL_ROLE and n not in undecided} | set(
+            uncertain
+        )
         for column in meant:  # "이름" → 봉사자명: 채우라는 말이 가리킨 열을 요청한 열로 더한다
             if column not in mentioned and column not in only_columns:
                 only_columns.append(column)
