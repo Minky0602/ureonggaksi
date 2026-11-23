@@ -19,6 +19,7 @@ from ureonggaksi.interpret import (
     _negated,
     _resolve,
     _said_to_skip,
+    _shape_fits,
     _unknown_words,
     build_rule,
     interpret,
@@ -2543,3 +2544,213 @@ def test_a_synonym_only_skip_keeps_the_column_out(setup):
 def test_only_then_do_not_fill_the_rest_is_not_a_skip(request_text):
     """검수 r3 H-1: 'X만 넣어 나머지는 넣지 마'의 부정은 나머지를 가리킨다. X는 빼기가 아니다."""
     assert not _said_to_skip(request_text, "시간")
+
+
+def _grants(tmp_path, extra_column=None, swapped=False):
+    """보조금 서식 흉내: 문서 '사업번호'(넷 중 하나는 표에 없음), 열 '사업코드'. swapped면 표의 사업명 둘이 뒤바뀜."""
+    head = ["사업코드", "사업명", "결과보고일"] + ([extra_column] if extra_column else [])
+    first, second = ("어르신돌봄", "청소년캠프") if swapped else ("청소년캠프", "어르신돌봄")
+    rows = [
+        ["P-11", first, None],
+        ["P-12", second, None],
+        ["P-13", "마을축제", None],
+        ["P-14", "독서모임", None],
+    ]
+    if extra_column:
+        rows = [r + [c] for r, c in zip(rows, ["P-11", "Q-1", "Q-2", "Q-3"], strict=True)]
+    docs = [
+        _kv([("사업번호", n), ("사업명", m), ("결과보고일", "2026-03-0" + str(i))])
+        for i, (n, m) in enumerate(
+            [
+                ("P-11", "청소년캠프"),
+                ("P-12", "어르신돌봄"),
+                ("P-13", "마을축제"),
+                ("P-99", "환경정화"),
+            ],
+            1,
+        )
+    ]
+    return build(tmp_path, docs, [head, *rows], "대장")
+
+
+def test_a_key_named_by_a_document_field_uses_its_only_matching_column(tmp_path):
+    """DIF-070 G14: '사업번호 기준'(열은 사업코드)은 값이 맞는 열이 하나뿐이면 키로 쓰고 '확인 필요'로 보인다."""
+    _, docs, view = _grants(tmp_path)
+    result = interpret("사업번호 기준으로 결과보고일 채워줘", docs, view)
+    assert result.key == ("사업번호", "사업코드") and result.key_assumed
+
+
+def test_a_key_named_by_a_document_field_is_asked_when_two_columns_match(tmp_path):
+    _, docs, view = _grants(tmp_path, extra_column="예비코드")
+    result = interpret("사업번호 기준으로 결과보고일 채워줘", docs, view)
+    assert result.key is None and "key_column" in dict(result.questions)
+
+
+def test_a_column_found_by_synonym_pairs_with_its_same_named_field(setup):
+    """DIF-070 J02: '생일'→생년월일 열에 같은 이름의 문서 항목이 있으면 모델에 묻지 않고 짝짓는다."""
+    _, docs, view = setup
+    asked = []
+    reader = reads({"이수시간": "채움", "직급": "채움"})
+    result = interpret(
+        "발급번호 기준으로 시간 넣어줘", docs, view, choose=first_option(asked), ask_many=reader
+    )
+    assert ("이수시간", "이수시간", "assumed") in result.fields and not asked
+
+
+@pytest.mark.parametrize(
+    ("samples", "existing", "fits"),
+    [
+        (["010-4182-7730", "010-7023-5519"], ["01039917702", "01070235519"], True),
+        (["010-4182-7730", "010-7023-5519"], ["120", "85"], False),
+    ],
+)
+def test_a_mobile_number_without_hyphens_is_still_a_phone(samples, existing, fits):
+    """DIF-070 W01: 하이픈 없는 휴대전화도 연락처 형태다."""
+    assert _shape_fits(samples, existing) is fits
+
+
+def test_a_field_named_key_is_asked_when_another_field_points_to_other_rows(tmp_path):
+    """검수 M1: 사업명이 다른 행을 가리키면(표의 사업명 둘이 뒤바뀜) 키를 추정하지 않고 묻는다."""
+    _, docs, view = _grants(tmp_path, swapped=True)
+    result = interpret("사업번호 기준으로 결과보고일 채워줘", docs, view)
+    assert result.key is None
+
+
+def test_a_field_named_key_is_not_a_column_the_user_asked_to_fill(tmp_path):
+    """검수 M2: 채우라고 말한 사업코드를 키로 삼지 않는다."""
+    _, docs, view = _grants(tmp_path)
+    result = interpret("사업번호 기준으로 사업코드랑 결과보고일 채워줘", docs, view)
+    assert result.key is None
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "사업번호 기준 말고 결과보고일 채워줘",
+        "사업번호 기준은 빼고 결과보고일 채워줘",
+        "사업번호로 찾지 말고 결과보고일 채워줘",
+    ],
+)
+def test_a_key_the_user_takes_back_is_not_used(tmp_path, request_text):
+    """검수 M4: 말한 키를 부정하면 키로 쓰지 않는다."""
+    _, docs, view = _grants(tmp_path)
+    assert interpret(request_text, docs, view).key is None
+
+
+def test_subsidy_is_not_a_synonym_of_granted_amount():
+    """검수 M3: '보조금'은 교부결정액 등 여러 금액을 가리켜 교부액과 묶지 않는다."""
+    from ureonggaksi.interpret import _synonym
+
+    assert _synonym("보조금", ("교부결정액", "교부액")) is None
+    assert _synonym("보조금교부액", ("교부결정액", "교부액")) == "교부액"
+
+
+@pytest.mark.parametrize(
+    ("tail", "undone"),
+    [
+        ("기준 안 쓰고", True),
+        ("로 찾지 않고", True),
+        ("기준으로 하지 않고", True),
+        ("기준은 제외하고", True),
+        ("기준이 아닌", True),
+        ("기준 대신", True),
+        ("기준으로 빼먹지 말고", False),
+        ("기준 전부 빼지 말고", False),
+        ("기준 돈 빼지 말고", False),
+        ("기준으로 채워 주시고", False),
+        ("기준으로 맞지 않는 건 비워", False),  # 검수 r3 L1
+        ("로 찾아서 맞지 않으면 비워", False),
+        ("기준 돈 빼지 않고", False),
+        ("기준 하나도 빼지는 말고", False),
+        ("기준 전부 안 빼고", False),
+    ],
+)
+def test_key_undone_reads_only_negations_of_the_key(tail, undone):
+    """검수 r2 L-a·N1: 키를 지우는 말만 잡고, 다른 것을 빼지 말라는 말은 잡지 않는다."""
+    from ureonggaksi.interpret import KEY_UNDONE, _compact
+
+    assert bool(KEY_UNDONE.match(_compact(tail))) is undone
+
+
+def test_a_field_named_key_survives_a_person_name_on_another_row(tmp_path):
+    """DIF-070 G14: 대표자 같은 사람 이름이 다른 행에 우연히 있어도 말한 키를 버리지 않는다(식별자 열만 견준다)."""
+    head = ["사업코드", "사업명", "대표", "결과보고일"]
+    rows = [
+        ["P-11", "청소년캠프", "김하나", None],
+        ["P-12", "어르신돌봄", "이두리", None],
+        ["P-13", "마을축제", "박세나", None],
+        ["P-14", "독서모임", "김하나", None],
+    ]
+    docs = [
+        _kv([("사업번호", n), ("사업명", m), ("대표자", r), ("결과보고일", "2026-03-0" + str(i))])
+        for i, (n, m, r) in enumerate(
+            [
+                ("P-11", "청소년캠프", "최다솜"),
+                ("P-12", "어르신돌봄", "이두리"),
+                ("P-13", "마을축제", "김하나"),
+                ("P-99", "환경정화", "정우리"),
+            ],
+            1,
+        )
+    ]
+    _, documents, view = build(tmp_path, docs, [head, *rows], "대장")
+    result = interpret("사업번호 기준으로 결과보고일 채워줘", documents, view)
+    assert result.key == ("사업번호", "사업코드") and result.key_assumed
+
+
+_PROJECTS = ["청년창업지원", "마을공동체", "전통시장활성화", "문화예술교육"]
+
+
+def _grant_docs(second):
+    """문서 넷(P-99는 표에 없음): 사업번호와 두 번째 항목(이름, 값)."""
+    return [
+        _kv([("사업번호", n), second(i), ("결과보고일", f"2026-03-0{i}")])
+        for i, n in enumerate(["P-11", "P-12", "P-13", "P-99"], 1)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("second", "sheet"),
+    [
+        # V1: 사업명이 뒤바뀌고 열에 중복 하나(식별자 열이 아님)
+        (
+            lambda i: ("사업명", _PROJECTS[i - 1]),
+            [
+                ["사업코드", "사업명", "결과보고일"],
+                ["P-11", _PROJECTS[1], None],
+                ["P-12", _PROJECTS[0], None],
+                ["P-13", _PROJECTS[2], None],
+                ["P-14", _PROJECTS[2], None],
+            ],
+        ),
+        # V2: 사업명이 2/4만 맞고 그 둘이 뒤바뀜
+        (
+            lambda i: ("사업명", [_PROJECTS[0], _PROJECTS[1], "없는사업A", "없는사업B"][i - 1]),
+            [
+                ["사업코드", "사업명", "결과보고일"],
+                ["P-11", _PROJECTS[1], None],
+                ["P-12", _PROJECTS[0], None],
+                ["P-13", _PROJECTS[2], None],
+                ["P-14", _PROJECTS[3], None],
+            ],
+        ),
+        # V3: 숫자뿐인 다른 이름 식별자(사업자번호→등록번호)가 뒤바뀜
+        (
+            lambda i: (
+                "사업자번호",
+                ["1012345678", "1023456789", "1034567890", "1045678901"][i - 1],
+            ),
+            [
+                ["사업코드", "등록번호", "결과보고일"],
+                ["P-11", "1023456789", None],
+                ["P-12", "1012345678", None],
+                ["P-13", "1034567890", None],
+                ["P-14", "1999999999", None],
+            ],
+        ),
+    ],
+)
+def test_a_field_named_key_is_asked_when_rows_are_swapped(tmp_path, second, sheet):
+    """검수 r3 V1~V3: 다른 후보가 두 문서 이상을 다른 행으로 보내면 묻는다(식별자 열이 아니어도)."""
+    _, docs, view = build(tmp_path, _grant_docs(second), sheet, "대장")
+    assert interpret("사업번호 기준으로 결과보고일 채워줘", docs, view).key is None

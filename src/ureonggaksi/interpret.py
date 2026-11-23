@@ -44,6 +44,12 @@ CHECK = re.compile(
 # "요청번호 기준", "이름으로 찾아", "이름으로 대조", "발급번호로 행을". '로'만으로는 키가 아니다:
 # "비고를 이름으로 채워줘"는 이름을 넣으라는 뜻일 수 있다(PR #18 6차 검수 H1). "직급별로"는 묶기다
 KEY_AFTER = re.compile(r"^(기준|(으로|로)(찾|대조|맞추|맞춰|매칭|연결|비교|확인|검토|행))")
+# 말한 키를 지우는 말: 키 표현 바로 뒤 '-지 말·않'("로 찾지 말고") 또는 네 글자 안의 부정("기준 말고", "기준이
+# 아닌", "기준 안 쓰고"). 다른 것을 빼지 말라는 말("기준으로 빼먹지 말고", "기준 돈 빼지 말고")은 아니다(검수 r2 L-a·N1)
+KEY_UNDONE = re.compile(
+    KEY_AFTER.pattern
+    + r"(지말|지마|지않|[가-힣]{0,4}?((?<!빼지)(?<!놓지)(?<!먹지)(?<!빼지는)말고|(?<!안)빼(?!먹지|놓지|지말|지마|지는|지않)|아니|아닌|(?<!맞지)(?<!같지)(?<!빼지)(?<!맞지는)않|제외|무시|대신|안쓰))"
+)
 NEGATED = re.compile(
     r"^(칸|열|란)?(에는|에|은|는|을|를|이|가|도|까지는|까지|만은|만)?"
     r"(빼(?!놓지|먹지|지말|지마)|제외(?!하지말|하지마)|말고|그대로(?!옮|넣|채|입력|적|기입|반영)|손대지|건드리지|하지마|하지말"
@@ -717,6 +723,10 @@ def _rows_of(view: TargetView, column: str) -> dict[str, set[str]]:
 
 
 def _same_rows(a, b, by_name, view: TargetView) -> bool:
+    return _row_conflicts(a, b, by_name, view) == 0
+
+
+def _row_conflicts(a, b, by_name, view: TargetView) -> int:
     """키 후보 a와 후보 b (일치 수, 문서 항목, 열)가 각 문서를 다른 행으로 보내지 않는다. 남의 번호(추천인사번)가
     사번 열과 맞으면 성명과 다른 행을 가리킨다(H1). a 열 값은 모두 달라 한 행이다. b 값이 여러 행에 있으면
     b가 거의 식별자인 열(겹친 칸이 20% 이하, 작은 표는 1칸)일 때만 그 행들 안에 a의 행이 있는지 본다(검수 r2 M1).
@@ -725,16 +735,17 @@ def _same_rows(a, b, by_name, view: TargetView) -> bool:
     rows_a, rows_b = _rows_of(view, a[2]), _rows_of(view, b[2])
     samples_a, samples_b = by_name[a[1]].samples, by_name[b[1]].samples
     if len(samples_a) != len(samples_b):
-        return False
+        return len(samples_a) + len(samples_b)  # 문서끼리 맞출 수 없다: 어긋난 것으로 본다
     filled = sum(len(r) for r in rows_b.values())
     # 겹친 칸이 20% 이하(작은 표는 1칸까지, 검수 r3)
     identifier = filled > 0 and filled - len(rows_b) <= max(1, 0.2 * filled)
+    conflicts = 0
     for x, y in zip(samples_a, samples_b, strict=True):
         if len(rows_a.get(x, ())) != 1 or y not in rows_b:
             continue
         if (len(rows_b[y]) == 1 or identifier) and not rows_a[x] <= rows_b[y]:
-            return False
-    return True
+            conflicts += 1
+    return conflicts
 
 
 def _key_candidates(
@@ -860,7 +871,9 @@ def interpret(
     hint = next((n for n, after in mentions if KEY_AFTER.match(after)), None)
     named_keys = {n for n, a in found if KEY_AFTER.match(a)}
     # 키를 둘 말했거나("이름 기준 말고 발급번호 기준으로"), 말한 키에 모르는 말이 닿았으면 묻는다(PR #18 H2)
-    conflicting = any(n in skip for n in named_keys) or len(named_keys) > 1
+    # "사업번호 기준 말고", "로 찾지 말고": 말한 키를 스스로 지웠다(DIF-070 검수 M4)
+    undone = any(KEY_UNDONE.match(a) for n, a in found if KEY_AFTER.match(a))
+    conflicting = any(n in skip for n in named_keys) or len(named_keys) > 1 or undone
     if conflicting:
         hint = None
     elif hint:
@@ -872,6 +885,32 @@ def interpret(
         ]
         if len(picked) == 1:
             key = (picked[0][1], picked[0][2])
+        elif not picked and field is not None and column is None:
+            # 문서 항목 이름으로 키를 말했고("사업번호 기준", 열은 사업코드) 80%에 못 미쳤다(표에 없는 문서가
+            # 섞임). 값이 맞는 열이 하나뿐이고 추정 기준(60%, 2건 이상, 열 값이 서로 다름)을 넘으면 그 열을
+            # 키로 쓰고 '확인 필요'로 보인다(DIF-070 G14). 두 열 이상이면 묻는다
+            hits = [c for c in _key_candidates(fields, view) if c[1] == field]
+            weak = [
+                c for c in _key_candidates(fields, view, named=True, any_hit=True) if c[1] == field
+            ]
+            # 채우라고 말한 열·머리글이 둘인 열은 키가 아니고(검수 M2), 값이 맞는 다른 후보가 문서를 다른 행으로
+            # 보내면 묻는다(말하지 않은 키 추정과 같은 검사, 검수 M1)
+            # 값이 맞는 다른 후보가 문서를 다른 행으로 보내면 묻는다. 식별자 열(값이 모두 다름)은 한 건만
+            # 어긋나도, 그 밖의 열은 두 건 이상 어긋날 때 묻는다. 대표자처럼 사람 이름은 동명이인 하나로
+            # 어긋날 수 있다(DIF-070 G14 실측). 행이 뒤바뀐 표는 두 건 이상 어긋난다(검수 r3 V1~V3)
+            strict = {(c[1], c[2]) for c in _key_candidates(fields, view)}
+            rivals_all = [
+                (c, 1 if (c[1], c[2]) in strict else 2)
+                for c in _key_candidates(fields, view, named=True, any_hit=True)
+            ]
+            if (
+                len(hits) == 1
+                and len(weak) == 1
+                and hits[0][2] not in {n for n, _ in found}
+                and view.columns.count(hits[0][2]) == 1
+                and all(_row_conflicts(hits[0], c, by_name, view) < n for c, n in rivals_all)
+            ):
+                key, key_assumed = (hits[0][1], hits[0][2]), True
     else:  # 키를 말하지 않았다
         # 키는 원칙적으로 묻는다(2026-11-20 사용자 결정, 아래 예외는 2026-11-23). 값 일치 1위가
         # 뚜렷하면 질문의 첫 선택지로 둔다. 값 모양(번호처럼 생긴 열)으로 동점을 가르지 않는다(DIF-050 H1)
@@ -1155,6 +1194,12 @@ def interpret(
             column,
             tuple(n for n in names if n != key_field and n not in taken and n not in off_limits),
         )
+        # 동의어·모델로 찾은 열("생일"→생년월일)에 이름이 같은 문서 항목이 있으면 그것이다. 모델에 물으면 4B가
+        # 두 답을 엇갈려 버렸다(DIF-070 J02). 사용자가 그 이름을 말한 것이 아니므로 '확인 필요'다
+        same = _resolve(column, list(options))
+        if same is not None:
+            pairs.append((same, column, "assumed"))
+            continue
         listed = _synonym(column, tuple(n for n in names if n != key_field))
         if (
             listed in options
@@ -1276,7 +1321,8 @@ def _kind(value: str) -> str:
     v = value.strip()
     if re.fullmatch(r"\d{4}\s*[-./년]\s*\d{1,2}\s*[-./월]\s*\d{1,2}\s*일?\.?", v):
         return "date"
-    if re.fullmatch(r"(0\d{1,2}-\d{3,4}(-\d{4})?|내선\s*\d+)", v):
+    # 휴대전화는 하이픈 없이도 적는다("01039917702", DIF-070 W01)
+    if re.fullmatch(r"(0\d{1,2}-\d{3,4}(-\d{4})?|010\d{8}|01[16789]\d{7,8}|내선\s*\d+)", v):
         return "phone"
     if re.fullmatch(r"[\d,]+(\.\d+)?\s*(원|천원|시간|명|개|점|%)?", v):
         return "number"
