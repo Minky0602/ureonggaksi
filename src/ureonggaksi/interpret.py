@@ -177,25 +177,70 @@ def _synonym(name: str, pool: tuple[str, ...]) -> str | None:
     return found[0] if len(found) == 1 else None
 
 
+def _headed(word: str, pool: tuple[str, ...]) -> str | None:
+    """word가 pool의 이름 하나만의 끝 명사와 같으면 그 이름('계좌'→지원계좌). 둘 이상('번호'→관리번호·
+    전화번호)이거나 없으면 None. 4B는 이런 줄인 말을 열과 잇지 못했다(DIF-068·069)."""
+    # 끝 글자가 같은 이름을 모두 센다. Kiwi가 '전화번호'를 한 낱말로 읽어도 '번호'로 끝나는 후보다
+    ending = [p for p in pool if _norm(p).endswith(_norm(word))]
+    # 단위가 다르면 다른 이름이다('금액' ≠ 집행금액(천원), _synonym과 같다, 검수 L-3)
+    ending = [p for p in ending if _unit(p) == _unit(word)] if len(ending) == 1 else ending
+    if len(ending) != 1 or morph.head_noun(ending[0]) != word:
+        return None
+    return ending[0]
+
+
+def _named_in(request: str, names: list[str], spans: list[tuple[int, int]]) -> set[str]:
+    """요청에 나온 자리마다 글자 전부가 spans 안에 드는 이름. 한 번이라도 밖에 나오면 아니다."""
+    covered = {i for a, b in spans for i in range(a, b)}
+    out = set()
+    for name in names:
+        places = [m.span() for m in re.finditer(re.escape(name), request)]
+        if places and all(set(range(a, b)) <= covered for a, b in places):
+            out.add(name)
+    return out
+
+
 # 낱말 뒤 같은 마디 안의 빼기·미루기 표현("생일이랑 이메일은 빼", "생일은 이번엔 놔두고", "다음 주에")
 SKIP_WORDS = re.compile(
     r"빼(?!놓지|먹지|지\s*[말마])|제외(?!\s*하지\s*[말마])|(?<!먹지 )(?<!먹지)말고|놔두(?!지\s*[말마])|두고"
-    r"|비워(?!\s*두지\s*[말마])|비우(?!지\s*[말마])|그대로(?!옮|넣|채|입력|적|기입|반영)|참고|취소|보류|생략|미루"
+    r"|비워(?!\s*두지\s*[말마])|비우(?!지\s*[말마])|그대로(?!옮|넣|채|입력|적|기입|반영)|참고|취소|보류|생략|미루(?!지\s*[말마])"
     r"|손대지|건드리지|하지\s*마|하지\s*말"
     r"|(나중에?|나중으로|추후에?|이따가?|다음에|다음\s*(주|달|번)에)(\s*따로)?(?=\s*(하|해(?!당)|할|요|넣|채|처리|정하|정할|정해(?!진)|[,.;]|$))"
     r"|아직\s*(하지|안\s*하|안\s*해|채우지|넣지|이야|이에요|이요)"
 )  # 이름 경로의 빼기 낱말(NEGATED)과 같은 뜻을 쓴다. 미루기는 '하다'·마디 끝이 뒤따를 때만이다:
 # '다음 주까지'·'아직 비어 있는'·'신청인 다음에 생일'·'아직 안 채운 칸'·'나중에 확인할'은 미루기가 아니다(검수 L-1, PR #27)
 CLAUSE_END = re.compile(r"[,.;]|고\s")  # "생일 채우고 이수시간은 빼": '고 '에서 마디가 끝난다
+ONLY_AFTER = re.compile(r"(에)?만(?![원큼])")  # 낱말 바로 뒤 보조사 '만'("시간만", "비고에만")
+OTHERS = re.compile(r"나머지|다른|그\s*외")
+UNDO_BEFORE = re.compile(
+    r"(빼|제외하|놔두|비워\s*두|두|미루|비우)지\s*$"
+)  # '말고·마' 앞의 부정되는 빼기
 
 
 def _said_to_skip(request: str, word: str) -> bool:
     """그 낱말이 나온 어느 자리든, 같은 마디 뒤쪽에 빼기·미루기 표현이 있다. 넓게 잡는다(틀리면 덜 채울 뿐)."""
     for found in re.finditer(re.escape(word), request):
         rest = request[found.end() :]
-        hit, end = SKIP_WORDS.search(rest), CLAUSE_END.search(rest)
-        # 빼기 낱말이 첫 마디 끝보다 앞에서 시작하면 그 마디의 말이다("비워 두고 " 자체가 '고 '로 끝난다, 검수 M-1)
-        if hit and (end is None or hit.start() < end.start()):
+        end = CLAUSE_END.search(rest)
+        # "시간만 넣어 나머지는 비워": 'X만' 뒤에 채우기나 '나머지'가 먼저 오면 X는 채울 것이다(검수 r1 H-1).
+        # "시간만 빼고"·"시간만 넣지 마"처럼 'X만' 바로 뒤가 빼기면 빼기다(검수 r2 H-1)
+        only = ONLY_AFTER.match(rest)
+        clause = rest[: end.start()] if end else rest
+        negated = FILL_NEGATED.search(clause) if only else None
+        # "시간만 넣어 나머지는 넣지 마"의 부정은 나머지를 가리킨다(검수 r3 H-1)
+        if negated and not (
+            FILL.search(clause[: negated.start()]) or OTHERS.search(clause[: negated.start()])
+        ):
+            return True
+        for hit in SKIP_WORDS.finditer(rest):
+            # 빼기 낱말이 첫 마디 끝보다 앞에서 시작하면 그 마디의 말이다("비워 두고 " 자체가 '고 '로 끝난다, 검수 M-1)
+            if end is not None and hit.start() >= end.start():
+                break
+            if only and (FILL.search(rest[: hit.start()]) or OTHERS.search(rest[: hit.start()])):
+                break
+            # "빼지 말고": 앞의 빼기를 부정하는 '말고·마'는 빼기가 아니다(DIF-069 검수 M-1)
+            if hit.group().startswith(("말", "마")) and UNDO_BEFORE.search(rest[: hit.start()]):
+                continue
             return True
     return False
 
@@ -510,6 +555,9 @@ def _unknown_words(request: str, names: list[str]) -> list[str]:
         word = morph.strip_particles(re.sub(r"좀$", "", token.replace(NAME_MARK, "")))
         # 코드가 이미 아는 동사·빼기 표현('채우고', '놔두세')은 열 이름의 다른 말이 아니다(DIF-050 M4)
         if any(p.search(word) for p in (FILL, FILL_NEGATED, CHECK)) or NEGATED.match(word):
+            continue
+        # '일단', '우선': 열을 가리키지 않는다. 열 이름 안에 든 말('현재'→현재직급)은 거르지 않는다(DIF-069, 검수 L-2)
+        if morph.is_adverb(word) and not any(_norm(word) in _norm(n) for n in names):
             continue
 
         if len(word) >= 2 and re.search(r"[가-힣A-Za-z]", word):
@@ -977,8 +1025,9 @@ def interpret(
         # 동의어표: 요청의 모르는 말이 열 하나만 가리키면("생일"→생년월일) 그 열을 요청한 이름처럼 다룬다.
         # 채우라는 뜻인지는 다른 이름과 같이 모델의 역할 판단으로 정하고, 같은 마디에 빼기·미루기 표현이
         # 있으면 빼기로 본다(DIF-055, 검수 M1)
+        # 동의어표에 없으면 끝 명사로 잇는다('계좌는 빼고'→지원계좌). 다른 줄인 말과 같이 '확인 필요'다
         for word in every_word:
-            column = _synonym(word, targets)
+            column = _synonym(word, targets) or _headed(word, targets)
             if column and column not in mentioned and column not in aliased.values():
                 aliased[word] = column
         alias_skip = [c for w, c in aliased.items() if _said_to_skip(request, w)]
@@ -986,7 +1035,13 @@ def interpret(
         overflow = [w for w in overflow if w not in aliased]
         coded_skip = [n for n in skip if n != hint]
         # 동의어로 추정한 열의 빼기는 그 열만 빼고 표시한다. 다른 칸까지 질문으로 돌리지 않는다(검수 L-1)
-        asked_names = list(dict.fromkeys([*mentioned, *aliased.values(), *coded_skip]))
+        # 코드가 이미 빼기로 정한 열(alias_skip)은 역할을 묻지 않는다. 답을 쓰지 않는데 물음만 늘면 실제 4B가
+        # '[요청] 전부'를 엇갈려 답했다(DIF-069 실측 W05)
+        asked_names = list(
+            dict.fromkeys(
+                [*mentioned, *(c for c in aliased.values() if c not in alias_skip), *coded_skip]
+            )
+        )
         try:
             roles, meant, meant_skip, unread, everything_said, skip_words = _read_request(
                 ask_many, request, asked_names, words, targets, everything_word
@@ -1005,7 +1060,13 @@ def interpret(
         unread = [*unread, *overflow]
         # 코드가 빼기로 읽은 이름(NEGATED)은 오탐이 있다("직급 그대로 다 옮겨", "참고해서"). 모델도 두 번 모두
         # 빼기로 읽었을 때만 '빼고 전부'로 본다(3차 검수 M-1)
-        skip_settled = all(roles.get(n) in (SKIP_ROLE, "무관") for n in coded_skip)
+        # 형태소로 미루기가 확정된 이름("직무는 나중에 따로 정할게")은 모델 답이 엇갈려도 빼기로 인정한다. 비우는
+        # 쪽이라 틀려도 덜 채울 뿐이다. 모델이 두 번 모두 채움·키라고 했으면 갈린 것으로 둔다(DIF-069)
+        deferred = _named_in(request, coded_skip, morph.deferred_spans(request))
+        skip_settled = all(
+            roles.get(n) in (SKIP_ROLE, "무관") or (n in deferred and n not in roles)
+            for n in coded_skip
+        )
         settled_words += [
             *coded_skip,
             *skip_words,
