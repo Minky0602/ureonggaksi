@@ -2529,3 +2529,17 @@ def test_a_synonym_only_skip_keeps_the_column_out(setup):
         "발급번호 기준으로 교육시간만 빼고 다 채워줘", docs, view, ask_many=fooled_with({})
     )
     assert "이수시간" not in {c for _, c, _ in result.fields}
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "시간만 넣어 나머지는 넣지 마",
+        "시간만 입력해 다른 칸은 채우지 마",
+        "시간만 채워 그 외에는 채우지 마",
+        "시간만 적어 다른 데는 적지 마",
+    ],
+)
+def test_only_then_do_not_fill_the_rest_is_not_a_skip(request_text):
+    """검수 r3 H-1: 'X만 넣어 나머지는 넣지 마'의 부정은 나머지를 가리킨다. X는 빼기가 아니다."""
+    assert not _said_to_skip(request_text, "시간")

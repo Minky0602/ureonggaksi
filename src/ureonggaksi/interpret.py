@@ -225,7 +225,12 @@ def _said_to_skip(request: str, word: str) -> bool:
         # "시간만 넣어 나머지는 비워": 'X만' 뒤에 채우기나 '나머지'가 먼저 오면 X는 채울 것이다(검수 r1 H-1).
         # "시간만 빼고"·"시간만 넣지 마"처럼 'X만' 바로 뒤가 빼기면 빼기다(검수 r2 H-1)
         only = ONLY_AFTER.match(rest)
-        if only and FILL_NEGATED.search(rest[: end.start()] if end else rest):
+        clause = rest[: end.start()] if end else rest
+        negated = FILL_NEGATED.search(clause) if only else None
+        # "시간만 넣어 나머지는 넣지 마"의 부정은 나머지를 가리킨다(검수 r3 H-1)
+        if negated and not (
+            FILL.search(clause[: negated.start()]) or OTHERS.search(clause[: negated.start()])
+        ):
             return True
         for hit in SKIP_WORDS.finditer(rest):
             # 빼기 낱말이 첫 마디 끝보다 앞에서 시작하면 그 마디의 말이다("비워 두고 " 자체가 '고 '로 끝난다, 검수 M-1)
