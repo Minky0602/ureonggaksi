@@ -2858,3 +2858,41 @@ def test_repeated_values_in_roster_rows_do_not_block_fill_everything(tmp_path):
     result = interpret("참여자번호 기준으로 다 채워줘", documents, view, ask_many=fooled)
     columns = {c for _, c, _ in result.fields}
     assert {"출근일수", "담당업무"} <= columns
+
+
+def _guardian_docs():
+    """신청인 행 아래 보호자 '성명|관계|연락처' 행이 다시 나오는 가로 서식. 보호자 라마바는 대상 표의 다른 사람이다."""
+
+    def doc(applicant, guardian):
+        rows = [
+            [cell(h, 0, i) for i, h in enumerate(("성명", "소속", "연락처"))],
+            [cell(v, 1, i) for i, v in enumerate(applicant)],
+            [cell(h, 2, i) for i, h in enumerate(("성명", "관계", "연락처"))],
+            [cell(v, 3, i) for i, v in enumerate(guardian)],
+        ]
+        return ["<hp:p><hp:run>" + table(rows) + "</hp:run></hp:p>"]
+
+    return [
+        doc(("가나다", "총무과", "010-1111-1111"), ("라마바", "부", "010-9999-0001")),
+        doc(("사아자", "민원과", "010-2222-2222"), ("차카타", "모", "010-9999-0002")),
+    ]
+
+
+@pytest.mark.parametrize("request_text", ["성명 기준으로 연락처 채워줘", "성명 기준으로 다 채워줘"])
+def test_a_table_repeating_its_header_is_not_a_roster(tmp_path, request_text):
+    """DIF-072 검수(기존 H·M-1): 머리글 이름이 아래 행에 다시 나오면 명단이 아니다. 보호자 번호를 신청인 행에 넣지 않는다."""
+    sheet = [
+        ["성명", "소속", "연락처"],
+        ["가나다", None, None],
+        ["라마바", None, None],
+        ["사아자", None, None],
+    ]
+    inputs, documents, view = build(tmp_path, _guardian_docs(), sheet, "명단")
+    result = interpret(request_text, documents, view, ask_many=fooled)
+    assert result.record.kind != "table_rows"
+    rule = build_rule(result, view)
+    if rule is not None:
+        plan = analyze(inputs, rule)
+        assert not any(
+            "010-9999" in str(item.proposed) and item.write_selected for item in plan.items
+        )
