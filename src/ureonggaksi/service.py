@@ -246,7 +246,8 @@ def _apply_answers(result, answers: Pairs, view: TargetView):
             questions=tuple(q for q in result.questions if q[0] != "work_type"),
         )
     column = _answer(answers, "key_column")
-    if column and result.key is None and column in view.columns:
+    # 추정한 키보다 사용자 답이 앞선다(검수 r1 L1)
+    if column and (result.key is None or result.key_assumed) and column in view.columns:
         field = _key_field_for(result, view, column)
         if field is not None:
             # 키를 모를 때 만든 짝 가운데 키 항목·키 열의 짝은 뺀다. 키 열은 이미 값이 있는 열이다(3차 H1)
@@ -256,6 +257,7 @@ def _apply_answers(result, answers: Pairs, view: TargetView):
                 result,
                 fields=kept,
                 key=(field, column),
+                key_assumed=False,
                 record=replace(result.record, key_field=field),
                 questions=tuple(q for q in result.questions if q[0] != "key_column"),
             )
@@ -347,7 +349,7 @@ def prepare(
 
         def read(chooser, reader):
             found = interpret(request, documents, view, choose=chooser, ask_many=reader)
-            unnamed = found.key is None
+            unnamed = found.key is None or found.key_assumed
             return (*_apply_answers(found, answers, view), unnamed)
 
         failures: list[

@@ -594,3 +594,31 @@ def test_an_assumed_key_is_shown_as_needing_a_check(tmp_path):
     assert prepared.question is None and prepared.plan is not None
     assert ("key", "성명", "성명") in prepared.unsure
     assert "성명(으)로 행을 찾아(확인 필요)" in prepared.interpretation
+
+
+def test_a_key_answer_wins_over_an_assumed_key(tmp_path):
+    """검수 r1 L1: 미리 준 키 답이 추정한 키보다 앞선다."""
+    sources = []
+    people = [("가나다", "S-1001", "12"), ("라마바", "S-1002", "8"), ("사아자", "S-1003", "4")]
+    for i, (name, number, hours) in enumerate(people):
+        rows = [("성명", name), ("사번", number), ("이수시간", hours)]
+        body = table([[cell(k, r, 0), cell(v, r, 1)] for r, (k, v) in enumerate(rows)])
+        sources.append(
+            write_hwpx(tmp_path / f"d{i}.hwpx", ["<hp:p><hp:run>" + body + "</hp:run></hp:p>"])
+        )
+    sheet = [
+        ["사번", "성명", "이수시간"],
+        ["S-1001", "가나다", None],
+        ["S-1002", "라마바", None],
+        ["S-1003", "사아자", None],
+    ]
+    target = write_xlsx(tmp_path / "명단.xlsx", sheet, sheet="명단")
+    out = tmp_path / "out.xlsx"
+    assumed = prepare("이수시간 채워줘", sources, target, output_path=out)
+    assert any(kind == "key" for kind, _, _ in assumed.unsure)
+    for column in ("성명", "사번"):
+        answered = prepare(
+            "이수시간 채워줘", sources, target, answers=(("key_column", column),), output_path=out
+        )
+        assert answered.plan.rule.target.key_column == column
+        assert not any(kind == "key" for kind, _, _ in answered.unsure)

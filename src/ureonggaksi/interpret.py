@@ -639,27 +639,37 @@ def _identifier_like(values: list[str]) -> bool:
     return not all(len(v) <= 1 or (v.isdigit() and len(v) <= 3) for v in values)
 
 
-def _rows_of(view: TargetView, column: str) -> dict[str, str]:
-    """열 값 → 그 칸의 행 번호."""
+def _rows_of(view: TargetView, column: str) -> dict[str, set[str]]:
+    """열 값 → 그 값이 있는 행 번호들."""
     index = view.columns.index(column)
     letters = sorted(
         {c.address.rstrip("0123456789") for c in view.cells}, key=lambda s: (len(s), s)
     )
+    rows: dict[str, set[str]] = {}
     if index >= len(letters):
-        return {}
-    return {
-        c.value.value.strip(): c.address[len(letters[index]) :]
-        for c in view.cells
-        if c.address.rstrip("0123456789") == letters[index] and c.value.value.strip()
-    }
+        return rows
+    for c in view.cells:
+        value = c.value.value.strip()
+        if c.address.rstrip("0123456789") == letters[index] and value:
+            rows.setdefault(value, set()).add(c.address[len(letters[index]) :])
+    return rows
 
 
 def _same_rows(a, b, by_name, view: TargetView) -> bool:
-    """두 키 후보 (일치 수, 문서 항목, 열)가 각 문서를 같은 행으로 보낸다. 남의 번호(추천인사번)가 사번 열과
-    맞으면 성명과 다른 행을 가리킨다(H1). 한쪽 값이 열에 없는 문서는 견주지 않는다."""
+    """키 후보 a와 후보 b (일치 수, 문서 항목, 열)가 각 문서를 다른 행으로 보내지 않는다. 남의 번호(추천인사번)가
+    사번 열과 맞으면 성명과 다른 행을 가리킨다(H1). 한 행에만 있는 값끼리만 견준다: 여러 행에 있는 값(같은
+    단체·같은 달)은 행을 가리키지 못한다. 열에 없는 값도 견주지 않는다. 표본 수가 다르면(병합 칸이 있는
+    명단 표) 문서끼리 맞출 수 없어 같다고 보지 않는다(검수 r1 H1)."""
     rows_a, rows_b = _rows_of(view, a[2]), _rows_of(view, b[2])
-    pairs = zip(by_name[a[1]].samples, by_name[b[1]].samples, strict=True)
-    return all(rows_a[x] == rows_b[y] for x, y in pairs if x in rows_a and y in rows_b)
+    samples_a, samples_b = by_name[a[1]].samples, by_name[b[1]].samples
+    if len(samples_a) != len(samples_b):
+        return False
+    pairs = zip(samples_a, samples_b, strict=True)
+    return all(
+        rows_a[x] == rows_b[y]
+        for x, y in pairs
+        if len(rows_a.get(x, ())) == 1 and len(rows_b.get(y, ())) == 1
+    )
 
 
 def _key_candidates(
@@ -810,8 +820,11 @@ def interpret(
             if _same(c[1], c[2])
             and c[0] == len([s for s in by_name[c[1]].samples if s])
             and not ({c[1], c[2]} & spoken)
+            and view.columns.count(c[2]) == 1  # 머리글이 둘이면 어느 열인지 모른다(검수 r1 L2)
         ]
-        if sure and all(_same_rows(sure[0], c, by_name, view) for c in candidates):
+        # 값이 하나라도 맞는 모든 후보와 견준다. 약한 후보·값이 겹치는 열도 다른 행을 가리키면 묻는다(검수 r1 M1)
+        rivals_all = _key_candidates(fields, view, named=True, any_hit=True)
+        if sure and all(_same_rows(sure[0], c, by_name, view) for c in rivals_all):
             key, key_assumed = (sure[0][1], sure[0][2]), True
     if key is not None:
         # 행 전체를 봤고, 그 열에 값이 맞는 다른 문서 항목이 없을 때만(3차 H1 성명·추천인, 4차 H3 이름·이름)

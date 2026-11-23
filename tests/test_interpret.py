@@ -2191,3 +2191,78 @@ def test_a_name_variant_with_a_different_unit_is_not_a_synonym(tmp_path):
     _, documents, view = build(tmp_path, docs, sheet, "명단")
     result = interpret("발급번호 기준으로 집행금액 채워줘", documents, view)
     assert all(src != "synonym" for _, _, src in result.fields)
+
+
+def _kv(rows):
+    body = table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
+    return ["<hp:p><hp:run>" + body + "</hp:run></hp:p>"]
+
+
+def test_an_unnamed_key_is_asked_when_a_roster_row_is_merged(tmp_path):
+    """검수 r1 H1: 병합 칸이 있는 명단 표는 항목마다 값 수가 달라 행을 맞출 수 없다 → 예외 없이 묻는다."""
+    head = [cell(h, 0, i) for i, h in enumerate(("연번", "성명", "사번", "부서"))]
+    rows = [
+        head,
+        [cell("1", 1, 0), cell("가나다", 1, 1), cell("S-1001", 1, 2), cell("총무", 1, 3)],
+        [cell("2", 2, 0), cell("라마바", 2, 1), cell("S-1002", 2, 2), cell("민원", 2, 3)],
+        [cell("3", 3, 0), cell("사아자", 3, 1), cell("S-1003", 3, 2), cell("감사", 3, 3)],
+        [cell("4", 4, 0), cell("홍길동", 4, 1, colspan=2), cell("기획", 4, 3)],
+    ]
+    docs = [["<hp:p><hp:run>" + table(rows) + "</hp:run></hp:p>"]]
+    sheet = [
+        ["성명", "사번", "부서"],
+        ["가나다", "S-1001", None],
+        ["라마바", "S-1002", None],
+        ["사아자", "S-1003", None],
+        ["홍길동", None, None],
+    ]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("부서 채워줘", documents, view)
+    assert result.key is None and "key_column" in dict(result.questions)
+
+
+@pytest.mark.parametrize(
+    "people, sheet",
+    [
+        (  # 사번이 절반만 맞지만(약한 후보) 성명과 다른 행을 가리킨다
+            [("가나다", "S-1002"), ("라마바", "S-1001"), ("사아자", "X-9"), ("차카타", "X-8")],
+            [
+                ["사번", "성명", "이수시간"],
+                ["S-1001", "가나다", None],
+                ["S-1002", "라마바", None],
+                ["S-1003", "사아자", None],
+                ["S-1004", "차카타", None],
+            ],
+        ),
+        (  # 사번 열에 같은 값이 있어 엄격 후보에서 빠지지만 성명과 다른 행을 가리킨다
+            [("가나다", "S-1002"), ("라마바", "S-1001"), ("사아자", "S-1003")],
+            [
+                ["사번", "성명", "이수시간"],
+                ["S-1001", "가나다", None],
+                ["S-1002", "라마바", None],
+                ["S-1003", "사아자", None],
+                ["S-1003", "차카타", None],
+            ],
+        ),
+    ],
+)
+def test_an_unnamed_key_is_asked_when_any_matching_column_disagrees(tmp_path, people, sheet):
+    """검수 r1 M1: 값이 하나라도 맞는 모든 후보와 견준다."""
+    docs = [_kv([("성명", a), ("사번", b), ("이수시간", "1")]) for a, b in people]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    result = interpret("이수시간 채워줘", documents, view)
+    assert result.key is None and "key_column" in dict(result.questions)
+
+
+def test_an_unnamed_key_is_not_assumed_from_a_doubled_header(tmp_path):
+    """검수 r1 L2: 머리글 '성명'이 둘이면 어느 열인지 모른다."""
+    people = [("가나다", "12"), ("라마바", "8"), ("사아자", "4")]
+    sheet = [
+        ["성명", "이수시간", "성명"],
+        ["가나다", None, "김"],
+        ["라마바", None, "이"],
+        ["사아자", None, "박"],
+    ]
+    docs = [_kv([("성명", a), ("이수시간", c)]) for a, c in people]
+    _, documents, view = build(tmp_path, docs, sheet, "명단")
+    assert not interpret("이수시간 채워줘", documents, view).key_assumed
