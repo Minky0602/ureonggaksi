@@ -2827,3 +2827,34 @@ def test_a_check_drops_a_name_the_model_never_read_as_compare(setup, first, seco
     reader = _split_by_call("이수시간", first, second) if first else reads({"점수": "채움"})
     result = interpret(request, docs, view, ask_many=reader)
     assert "이수시간" not in {c for _, c, _ in result.fields}
+
+
+def _roster_docs(rows_by_doc):
+    """명단 표 문서들: 머리글(참여자번호·성명·출근일수·담당업무) + 사람마다 한 행."""
+    out = []
+    for people in rows_by_doc:
+        head = [cell(h, 0, i) for i, h in enumerate(("참여자번호", "성명", "출근일수", "담당업무"))]
+        body = [[cell(v, r, i) for i, v in enumerate(p)] for r, p in enumerate(people, 1)]
+        out.append(["<hp:p><hp:run>" + table([head, *body]) + "</hp:run></hp:p>"])
+    return out
+
+
+def test_repeated_values_in_roster_rows_do_not_block_fill_everything(tmp_path):
+    """DIF-072 J05: 명단 표의 값('21일', '제초 작업')이 여러 사람에게 같아도 반복 라벨이 아니다."""
+    docs = _roster_docs(
+        [
+            [("J-1", "가나다", "21일", "제초 작업"), ("J-2", "라마바", "21일", "제초 작업")],
+            [("J-3", "사아자", "20일", "하천 정비"), ("J-4", "차카타", "19일", "제초 작업")],
+        ]
+    )
+    sheet = [
+        ["참여자번호", "성명", "출근일수", "담당업무"],
+        ["J-1", "가나다", None, None],
+        ["J-2", "라마바", None, None],
+        ["J-3", "사아자", None, None],
+        ["J-4", "차카타", None, None],
+    ]
+    _, documents, view = build(tmp_path, docs, sheet, "집계")
+    result = interpret("참여자번호 기준으로 다 채워줘", documents, view, ask_many=fooled)
+    columns = {c for _, c, _ in result.fields}
+    assert {"출근일수", "담당업무"} <= columns

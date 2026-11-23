@@ -353,11 +353,24 @@ def _document_fields(documents: tuple[Document, ...]) -> list[FieldCandidate]:
     return list(found.values())
 
 
-def _ambiguous_labels(documents: tuple[Document, ...]) -> set[str]:
-    """첫 문서에서 둘 이상 나오는 라벨(표 칸·문단 "라벨:"). 항목 후보에서 빠진 이름이다."""
+def _ambiguous_labels(
+    documents: tuple[Document, ...], record: RecordRule | None = None
+) -> set[str]:
+    """첫 문서에서 둘 이상 나오는 라벨(표 칸·문단 "라벨:"). 항목 후보에서 빠진 이름이다.
+    명단 표(record.kind == table_rows)의 머리글 아래 칸은 사람마다의 값이라 라벨이 아니다("21일", "제초 작업"이
+    여러 사람에게 같은 것은 흔하다, DIF-072 J05)."""
     counts: dict[str, int] = {}
     paragraph_label = re.compile(r"^\s*([^:：\s][^:：]{0,19}?)\s*[:：]")
     for block in documents[0].blocks:
+        if (
+            record is not None
+            and record.kind == "table_rows"
+            and block.kind == "cell"
+            and block.table == record.table
+            and (not record.section or block.section == record.section)
+            and block.row > record.header_row
+        ):
+            continue
         text = block.text.strip() if block.kind == "cell" else ""
         if block.kind == "paragraph" and (m := paragraph_label.match(block.text)):
             text = m.group(1)
@@ -1205,7 +1218,7 @@ def interpret(
             pairs.append((field, answer, "model"))
     # 문서에 같은 이름 라벨이 있지만 겹쳐서 뺀 열: 답은 그 라벨뿐이라 다른 항목을 고르게 하지 않는다(6차 A01)
     asked_columns = list(only_columns)  # 겹친 라벨로 빠지기 전, 채우라고 말한(읽은) 열(검수 r2 L-4)
-    ambiguous = _ambiguous_labels(documents)
+    ambiguous = _ambiguous_labels(documents, record)
     held += [c for c in only_columns if _norm(c) in ambiguous]
     only_columns = [c for c in only_columns if _norm(c) not in ambiguous]
     for column in only_columns:
@@ -1270,7 +1283,7 @@ def interpret(
         # 빼기 낱말 목록으로는 목록 밖 표현이 샌다(4차 검수 H-1)
         and _side_clauses_settled(request, settled_words, hint)
         # 같은 라벨이 문서에 두 번 이상 나오는 서식은 값 칸이 항목명으로 잡힌다(3차 검수 H-3)
-        and not _ambiguous_labels(documents)
+        and not _ambiguous_labels(documents, record)
     ):
         # 값이 문서마다 우연히 같으면 그 값 칸이 항목명으로 잡히고("12시간", "팀장") 아래 칸 값을 가져간다.
         # 그러면 다른 항목과 값이 똑같아져 어느 쪽이 진짜인지 가를 수 없다. 값처럼 생긴 이름과, 값이 다른
