@@ -2804,3 +2804,26 @@ def test_a_column_already_paired_is_not_asked_again(setup):
     result = interpret(request, docs, view, choose=choose, ask_many=reader)
     assert ("평가점수", "점수", "model") in result.fields
     assert not any("열 '점수'" in p for p in asked)
+
+
+def test_a_wrong_model_pair_still_collides_with_a_same_name_pair(setup):
+    """검수 M1: 모델이 연락처를 이수시간 열로 잘못 골라도, 같은 이름 짝(이수시간)과 겹쳐 둘 다 빠진다."""
+    _, docs, view = setup
+
+    def choose(prompt, options):
+        return "이수시간" if "이수시간" in options else "없음"
+
+    reader = reads({"이수시간": "채움", "연락처": "채움"}, {"교육시간": "이수시간/채움"})
+    request = "발급번호 기준으로 교육시간이랑 연락처 채워줘"
+    result = interpret(request, docs, view, choose=choose, ask_many=reader)
+    assert ("연락처", "이수시간", "model") not in result.fields
+
+
+@pytest.mark.parametrize("first, second", [("제외", "무관"), (None, None)])
+def test_a_check_drops_a_name_the_model_never_read_as_compare(setup, first, second):
+    """검수 M2: 제외·무관으로 엇갈렸거나 답이 없으면(AI 오류 흉내) 대조하지 않는다."""
+    _, docs, view = setup
+    request = "발급번호 기준으로 이수시간은 됐고 점수가 확인서랑 같은지 대조해 줘"
+    reader = _split_by_call("이수시간", first, second) if first else reads({"점수": "채움"})
+    result = interpret(request, docs, view, ask_many=reader)
+    assert "이수시간" not in {c for _, c, _ in result.fields}

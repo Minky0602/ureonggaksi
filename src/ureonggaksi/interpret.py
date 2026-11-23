@@ -635,6 +635,14 @@ def _read_request(
         unread,
         agreed.get(EVERYTHING_KEY) == EVERYTHING_OPTIONS[0],
         skip_words,
+        # 두 답이 엇갈렸고 그중 한 번은 '채움'이었던 이름(대조에서 견줄 후보, DIF-071 검수 M2)
+        [
+            k.removeprefix("[이름] ")
+            for k in fields
+            if k.startswith("[이름] ")
+            and k not in agreed
+            and FILL_ROLE in (first.get(k), second.get(k))
+        ],
     )
 
 
@@ -1082,18 +1090,19 @@ def interpret(
             )
         )
         try:
-            roles, meant, meant_skip, unread, everything_said, skip_words = _read_request(
-                ask_many, request, asked_names, words, targets, everything_word
+            roles, meant, meant_skip, unread, everything_said, skip_words, half_fill = (
+                _read_request(ask_many, request, asked_names, words, targets, everything_word)
             )
         except ServiceError as error:
             if not error.code.startswith("AI_"):
                 raise
-            roles, meant, meant_skip, unread, everything_said, skip_words = (
+            roles, meant, meant_skip, unread, everything_said, skip_words, half_fill = (
                 {},
                 [],
                 [],
                 [],
                 False,
+                [],
                 [],
             )
         unread = [*unread, *overflow]
@@ -1151,10 +1160,14 @@ def interpret(
         # 모델이 반박하지 않은 빼기(답 없음·어긋남)는 빼라는 말로 남겨 '확인 필요'로 보인다. 틀려도 덜 채울 뿐이다
         skipped = [n for n in skipped if n not in conflicted]
         # 갈린 이름은 짝 후보에서도, 모델 선택지(off_limits)에서도 뺀다. meant도 여기서 걸러진다
-        # 대조는 칸에 쓰지 않는다(write_selected 항상 False). 모델 두 답이 엇갈린 이름은 버리지 않고 '확인
-        # 필요'로 견준다. 4B는 대조 요청의 이름 역할을 자주 엇갈려 답했다(DIF-071 J04·W04). 두 번 모두 채움이
-        # 아닌 같은 답이면 지금처럼 뺀다
-        undecided = {n for n in mentioned if n not in roles} if work_type == "check" else set()
+        # 대조는 칸에 쓰지 않는다(write_selected 항상 False). 모델 두 답이 엇갈렸고 한 번은 '채움'이었던
+        # 이름은 버리지 않고 '확인 필요'로 견준다. 4B는 대조 요청의 이름 역할을 자주 엇갈려 답했다(DIF-071 J04·W04).
+        # 제외·무관으로 엇갈렸거나("됐고"), 답이 없거나(AI 오류), 빼라는 말로 읽은 이름은 지금처럼 뺀다(검수 M2·L1)
+        undecided = (
+            {n for n in mentioned if n in half_fill and n not in skipped}
+            if work_type == "check"
+            else set()
+        )
         drop = {n for n in mentioned if roles.get(n) != FILL_ROLE and n not in undecided} | set(
             uncertain
         )
@@ -1171,8 +1184,6 @@ def interpret(
     only_columns = [n for n in only_columns if n not in drop]
     off_limits = skip | set(unclear) | drop | set(skipped)  # 뺀 열·이름은 모델 선택지에도 없다
     for field in only_fields:
-        if field in {p[0] for p in pairs}:
-            continue
         taken = {p[1] for p in pairs}
         options = _order(
             field,
@@ -1197,8 +1208,6 @@ def interpret(
     held += [c for c in only_columns if _norm(c) in ambiguous]
     only_columns = [c for c in only_columns if _norm(c) not in ambiguous]
     for column in only_columns:
-        if column in {p[1] for p in pairs}:
-            continue  # 앞에서 이미 짝이 섰다. 다시 물으면 한 열에 둘이 몰려 둘 다 버려졌다(DIF-071 J04)
         taken = {p[0] for p in pairs}
         options = _order(
             column,
@@ -1217,6 +1226,10 @@ def interpret(
         ):
             # 동의어표: 양쪽 모두 후보가 하나뿐일 때만(DIF-055, 검수 M3)
             pairs.append((listed, column, "synonym"))
+            continue
+        # 같은 이름·동의어 짝은 위에서 더해 겹치면 한 열에 둘로 걸러진다(검수 M1). 모델만 다시 묻지 않는다: 앞에서
+        # 이미 짝이 선 열을 다시 물으면 다른 항목을 골라 한 열에 둘이 몰려 맞는 짝까지 버려졌다(DIF-071 J04)
+        if column in {p[1] for p in pairs}:
             continue
         answer = _ask_model(
             choose, lambda o, c=column: _field_prompt(request, c, o, by_name, view), options
