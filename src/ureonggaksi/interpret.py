@@ -48,7 +48,7 @@ KEY_AFTER = re.compile(r"^(기준|(으로|로)(찾|대조|맞추|맞춰|매칭|�
 # 아닌", "기준 안 쓰고"). 다른 것을 빼지 말라는 말("기준으로 빼먹지 말고", "기준 돈 빼지 말고")은 아니다(검수 r2 L-a·N1)
 KEY_UNDONE = re.compile(
     KEY_AFTER.pattern
-    + r"(지말|지마|지않|[가-힣]{0,4}?((?<!빼지)(?<!놓지)(?<!먹지)말고|빼(?!먹지|놓지|지말|지마)|아니|아닌|않|제외|무시|대신|안쓰))"
+    + r"(지말|지마|지않|[가-힣]{0,4}?((?<!빼지)(?<!놓지)(?<!먹지)(?<!빼지는)말고|(?<!안)빼(?!먹지|놓지|지말|지마|지는|지않)|아니|아닌|(?<!맞지)(?<!같지)(?<!빼지)(?<!맞지는)않|제외|무시|대신|안쓰))"
 )
 NEGATED = re.compile(
     r"^(칸|열|란)?(에는|에|은|는|을|를|이|가|도|까지는|까지|만은|만)?"
@@ -723,6 +723,10 @@ def _rows_of(view: TargetView, column: str) -> dict[str, set[str]]:
 
 
 def _same_rows(a, b, by_name, view: TargetView) -> bool:
+    return _row_conflicts(a, b, by_name, view) == 0
+
+
+def _row_conflicts(a, b, by_name, view: TargetView) -> int:
     """키 후보 a와 후보 b (일치 수, 문서 항목, 열)가 각 문서를 다른 행으로 보내지 않는다. 남의 번호(추천인사번)가
     사번 열과 맞으면 성명과 다른 행을 가리킨다(H1). a 열 값은 모두 달라 한 행이다. b 값이 여러 행에 있으면
     b가 거의 식별자인 열(겹친 칸이 20% 이하, 작은 표는 1칸)일 때만 그 행들 안에 a의 행이 있는지 본다(검수 r2 M1).
@@ -731,16 +735,17 @@ def _same_rows(a, b, by_name, view: TargetView) -> bool:
     rows_a, rows_b = _rows_of(view, a[2]), _rows_of(view, b[2])
     samples_a, samples_b = by_name[a[1]].samples, by_name[b[1]].samples
     if len(samples_a) != len(samples_b):
-        return False
+        return len(samples_a) + len(samples_b)  # 문서끼리 맞출 수 없다: 어긋난 것으로 본다
     filled = sum(len(r) for r in rows_b.values())
     # 겹친 칸이 20% 이하(작은 표는 1칸까지, 검수 r3)
     identifier = filled > 0 and filled - len(rows_b) <= max(1, 0.2 * filled)
+    conflicts = 0
     for x, y in zip(samples_a, samples_b, strict=True):
         if len(rows_a.get(x, ())) != 1 or y not in rows_b:
             continue
         if (len(rows_b[y]) == 1 or identifier) and not rows_a[x] <= rows_b[y]:
-            return False
-    return True
+            conflicts += 1
+    return conflicts
 
 
 def _key_candidates(
@@ -890,15 +895,20 @@ def interpret(
             ]
             # 채우라고 말한 열·머리글이 둘인 열은 키가 아니고(검수 M2), 값이 맞는 다른 후보가 문서를 다른 행으로
             # 보내면 묻는다(말하지 않은 키 추정과 같은 검사, 검수 M1)
-            # 견줄 상대는 값이 모두 다른 식별자 열뿐이다. 대표자처럼 사람 이름이 다른 행에 우연히 있는 열까지
-            # 견주면 사용자가 말한 키를 버렸다(DIF-070 G14 실측)
-            rivals_all = _key_candidates(fields, view)
+            # 값이 맞는 다른 후보가 문서를 다른 행으로 보내면 묻는다. 식별자 열(값이 모두 다름)은 한 건만
+            # 어긋나도, 그 밖의 열은 두 건 이상 어긋날 때 묻는다. 대표자처럼 사람 이름은 동명이인 하나로
+            # 어긋날 수 있다(DIF-070 G14 실측). 행이 뒤바뀐 표는 두 건 이상 어긋난다(검수 r3 V1~V3)
+            strict = {(c[1], c[2]) for c in _key_candidates(fields, view)}
+            rivals_all = [
+                (c, 1 if (c[1], c[2]) in strict else 2)
+                for c in _key_candidates(fields, view, named=True, any_hit=True)
+            ]
             if (
                 len(hits) == 1
                 and len(weak) == 1
                 and hits[0][2] not in {n for n, _ in found}
                 and view.columns.count(hits[0][2]) == 1
-                and all(_same_rows(hits[0], c, by_name, view) for c in rivals_all)
+                and all(_row_conflicts(hits[0], c, by_name, view) < n for c, n in rivals_all)
             ):
                 key, key_assumed = (hits[0][1], hits[0][2]), True
     else:  # 키를 말하지 않았다

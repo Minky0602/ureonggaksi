@@ -2658,6 +2658,11 @@ def test_subsidy_is_not_a_synonym_of_granted_amount():
         ("기준 전부 빼지 말고", False),
         ("기준 돈 빼지 말고", False),
         ("기준으로 채워 주시고", False),
+        ("기준으로 맞지 않는 건 비워", False),  # 검수 r3 L1
+        ("로 찾아서 맞지 않으면 비워", False),
+        ("기준 돈 빼지 않고", False),
+        ("기준 하나도 빼지는 말고", False),
+        ("기준 전부 안 빼고", False),
     ],
 )
 def test_key_undone_reads_only_negations_of_the_key(tail, undone):
@@ -2691,3 +2696,61 @@ def test_a_field_named_key_survives_a_person_name_on_another_row(tmp_path):
     _, documents, view = build(tmp_path, docs, [head, *rows], "대장")
     result = interpret("사업번호 기준으로 결과보고일 채워줘", documents, view)
     assert result.key == ("사업번호", "사업코드") and result.key_assumed
+
+
+_PROJECTS = ["청년창업지원", "마을공동체", "전통시장활성화", "문화예술교육"]
+
+
+def _grant_docs(second):
+    """문서 넷(P-99는 표에 없음): 사업번호와 두 번째 항목(이름, 값)."""
+    return [
+        _kv([("사업번호", n), second(i), ("결과보고일", f"2026-03-0{i}")])
+        for i, n in enumerate(["P-11", "P-12", "P-13", "P-99"], 1)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("second", "sheet"),
+    [
+        # V1: 사업명이 뒤바뀌고 열에 중복 하나(식별자 열이 아님)
+        (
+            lambda i: ("사업명", _PROJECTS[i - 1]),
+            [
+                ["사업코드", "사업명", "결과보고일"],
+                ["P-11", _PROJECTS[1], None],
+                ["P-12", _PROJECTS[0], None],
+                ["P-13", _PROJECTS[2], None],
+                ["P-14", _PROJECTS[2], None],
+            ],
+        ),
+        # V2: 사업명이 2/4만 맞고 그 둘이 뒤바뀜
+        (
+            lambda i: ("사업명", [_PROJECTS[0], _PROJECTS[1], "없는사업A", "없는사업B"][i - 1]),
+            [
+                ["사업코드", "사업명", "결과보고일"],
+                ["P-11", _PROJECTS[1], None],
+                ["P-12", _PROJECTS[0], None],
+                ["P-13", _PROJECTS[2], None],
+                ["P-14", _PROJECTS[3], None],
+            ],
+        ),
+        # V3: 숫자뿐인 다른 이름 식별자(사업자번호→등록번호)가 뒤바뀜
+        (
+            lambda i: (
+                "사업자번호",
+                ["1012345678", "1023456789", "1034567890", "1045678901"][i - 1],
+            ),
+            [
+                ["사업코드", "등록번호", "결과보고일"],
+                ["P-11", "1023456789", None],
+                ["P-12", "1012345678", None],
+                ["P-13", "1034567890", None],
+                ["P-14", "1999999999", None],
+            ],
+        ),
+    ],
+)
+def test_a_field_named_key_is_asked_when_rows_are_swapped(tmp_path, second, sheet):
+    """검수 r3 V1~V3: 다른 후보가 두 문서 이상을 다른 행으로 보내면 묻는다(식별자 열이 아니어도)."""
+    _, docs, view = build(tmp_path, _grant_docs(second), sheet, "대장")
+    assert interpret("사업번호 기준으로 결과보고일 채워줘", docs, view).key is None
