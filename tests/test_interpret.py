@@ -19,6 +19,7 @@ from ureonggaksi.interpret import (
     _negated,
     _resolve,
     _said_to_skip,
+    _shape_fits,
     _unknown_words,
     build_rule,
     interpret,
@@ -2543,3 +2544,54 @@ def test_a_synonym_only_skip_keeps_the_column_out(setup):
 def test_only_then_do_not_fill_the_rest_is_not_a_skip(request_text):
     """검수 r3 H-1: 'X만 넣어 나머지는 넣지 마'의 부정은 나머지를 가리킨다. X는 빼기가 아니다."""
     assert not _said_to_skip(request_text, "시간")
+
+
+def _grants(tmp_path, extra_column=None):
+    """보조금 서식 흉내: 문서 '사업번호'(넷 중 하나는 표에 없음), 열 '사업코드'."""
+    head = ["사업코드", "사업명", "결과보고일"] + ([extra_column] if extra_column else [])
+    rows = [["P-11", "가", None], ["P-12", "나", None], ["P-13", "다", None], ["P-14", "라", None]]
+    if extra_column:
+        rows = [r + [c] for r, c in zip(rows, ["P-11", "Q-1", "Q-2", "Q-3"], strict=True)]
+    docs = [
+        _kv([("사업번호", n), ("사업명", m), ("결과보고일", "2026-03-0" + str(i))])
+        for i, (n, m) in enumerate(
+            [("P-11", "가"), ("P-12", "나"), ("P-13", "다"), ("P-99", "마")], 1
+        )
+    ]
+    return build(tmp_path, docs, [head, *rows], "대장")
+
+
+def test_a_key_named_by_a_document_field_uses_its_only_matching_column(tmp_path):
+    """DIF-070 G14: '사업번호 기준'(열은 사업코드)은 값이 맞는 열이 하나뿐이면 키로 쓰고 '확인 필요'로 보인다."""
+    _, docs, view = _grants(tmp_path)
+    result = interpret("사업번호 기준으로 결과보고일 채워줘", docs, view)
+    assert result.key == ("사업번호", "사업코드") and result.key_assumed
+
+
+def test_a_key_named_by_a_document_field_is_asked_when_two_columns_match(tmp_path):
+    _, docs, view = _grants(tmp_path, extra_column="예비코드")
+    result = interpret("사업번호 기준으로 결과보고일 채워줘", docs, view)
+    assert result.key is None and "key_column" in dict(result.questions)
+
+
+def test_a_column_found_by_synonym_pairs_with_its_same_named_field(setup):
+    """DIF-070 J02: '생일'→생년월일 열에 같은 이름의 문서 항목이 있으면 모델에 묻지 않고 짝짓는다."""
+    _, docs, view = setup
+    asked = []
+    reader = reads({"이수시간": "채움", "직급": "채움"})
+    result = interpret(
+        "발급번호 기준으로 시간 넣어줘", docs, view, choose=first_option(asked), ask_many=reader
+    )
+    assert ("이수시간", "이수시간", "assumed") in result.fields and not asked
+
+
+@pytest.mark.parametrize(
+    ("samples", "existing", "fits"),
+    [
+        (["010-4182-7730", "010-7023-5519"], ["01039917702", "01070235519"], True),
+        (["010-4182-7730", "010-7023-5519"], ["120", "85"], False),
+    ],
+)
+def test_a_mobile_number_without_hyphens_is_still_a_phone(samples, existing, fits):
+    """DIF-070 W01: 하이픈 없는 휴대전화도 연락처 형태다."""
+    assert _shape_fits(samples, existing) is fits

@@ -872,6 +872,16 @@ def interpret(
         ]
         if len(picked) == 1:
             key = (picked[0][1], picked[0][2])
+        elif not picked and field is not None and column is None:
+            # 문서 항목 이름으로 키를 말했고("사업번호 기준", 열은 사업코드) 80%에 못 미쳤다(표에 없는 문서가
+            # 섞임). 값이 맞는 열이 하나뿐이고 추정 기준(60%, 2건 이상, 열 값이 서로 다름)을 넘으면 그 열을
+            # 키로 쓰고 '확인 필요'로 보인다(DIF-070 G14). 두 열 이상이면 묻는다
+            hits = [c for c in _key_candidates(fields, view) if c[1] == field]
+            weak = [
+                c for c in _key_candidates(fields, view, named=True, any_hit=True) if c[1] == field
+            ]
+            if len(hits) == 1 and len(weak) == 1:
+                key, key_assumed = (hits[0][1], hits[0][2]), True
     else:  # 키를 말하지 않았다
         # 키는 원칙적으로 묻는다(2026-11-20 사용자 결정, 아래 예외는 2026-11-23). 값 일치 1위가
         # 뚜렷하면 질문의 첫 선택지로 둔다. 값 모양(번호처럼 생긴 열)으로 동점을 가르지 않는다(DIF-050 H1)
@@ -1155,6 +1165,12 @@ def interpret(
             column,
             tuple(n for n in names if n != key_field and n not in taken and n not in off_limits),
         )
+        # 동의어·모델로 찾은 열("생일"→생년월일)에 이름이 같은 문서 항목이 있으면 그것이다. 모델에 물으면 4B가
+        # 두 답을 엇갈려 버렸다(DIF-070 J02). 사용자가 그 이름을 말한 것이 아니므로 '확인 필요'다
+        same = _resolve(column, list(options))
+        if same is not None:
+            pairs.append((same, column, "assumed"))
+            continue
         listed = _synonym(column, tuple(n for n in names if n != key_field))
         if (
             listed in options
@@ -1276,7 +1292,8 @@ def _kind(value: str) -> str:
     v = value.strip()
     if re.fullmatch(r"\d{4}\s*[-./년]\s*\d{1,2}\s*[-./월]\s*\d{1,2}\s*일?\.?", v):
         return "date"
-    if re.fullmatch(r"(0\d{1,2}-\d{3,4}(-\d{4})?|내선\s*\d+)", v):
+    # 휴대전화는 하이픈 없이도 적는다("01039917702", DIF-070 W01)
+    if re.fullmatch(r"(0\d{1,2}-\d{3,4}(-\d{4})?|01[016789]\d{7,8}|내선\s*\d+)", v):
         return "phone"
     if re.fullmatch(r"[\d,]+(\.\d+)?\s*(원|천원|시간|명|개|점|%)?", v):
         return "number"
