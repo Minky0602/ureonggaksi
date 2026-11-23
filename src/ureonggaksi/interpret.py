@@ -1024,7 +1024,13 @@ def interpret(
         overflow = [w for w in overflow if w not in aliased]
         coded_skip = [n for n in skip if n != hint]
         # 동의어로 추정한 열의 빼기는 그 열만 빼고 표시한다. 다른 칸까지 질문으로 돌리지 않는다(검수 L-1)
-        asked_names = list(dict.fromkeys([*mentioned, *aliased.values(), *coded_skip]))
+        # 코드가 이미 빼기로 정한 열(alias_skip)은 역할을 묻지 않는다. 답을 쓰지 않는데 물음만 늘면 실제 4B가
+        # '[요청] 전부'를 엇갈려 답했다(DIF-069 실측 W05)
+        asked_names = list(
+            dict.fromkeys(
+                [*mentioned, *(c for c in aliased.values() if c not in alias_skip), *coded_skip]
+            )
+        )
         try:
             roles, meant, meant_skip, unread, everything_said, skip_words = _read_request(
                 ask_many, request, asked_names, words, targets, everything_word
