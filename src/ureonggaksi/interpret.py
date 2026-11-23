@@ -1171,6 +1171,8 @@ def interpret(
     only_columns = [n for n in only_columns if n not in drop]
     off_limits = skip | set(unclear) | drop | set(skipped)  # 뺀 열·이름은 모델 선택지에도 없다
     for field in only_fields:
+        if field in {p[0] for p in pairs}:
+            continue
         taken = {p[1] for p in pairs}
         options = _order(
             field,
@@ -1195,6 +1197,8 @@ def interpret(
     held += [c for c in only_columns if _norm(c) in ambiguous]
     only_columns = [c for c in only_columns if _norm(c) not in ambiguous]
     for column in only_columns:
+        if column in {p[1] for p in pairs}:
+            continue  # 앞에서 이미 짝이 섰다. 다시 물으면 한 열에 둘이 몰려 둘 다 버려졌다(DIF-071 J04)
         taken = {p[0] for p in pairs}
         options = _order(
             column,
