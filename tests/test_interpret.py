@@ -2643,3 +2643,51 @@ def test_subsidy_is_not_a_synonym_of_granted_amount():
 
     assert _synonym("보조금", ("교부결정액", "교부액")) is None
     assert _synonym("보조금교부액", ("교부결정액", "교부액")) == "교부액"
+
+
+@pytest.mark.parametrize(
+    ("tail", "undone"),
+    [
+        ("기준 안 쓰고", True),
+        ("로 찾지 않고", True),
+        ("기준으로 하지 않고", True),
+        ("기준은 제외하고", True),
+        ("기준이 아닌", True),
+        ("기준 대신", True),
+        ("기준으로 빼먹지 말고", False),
+        ("기준 전부 빼지 말고", False),
+        ("기준 돈 빼지 말고", False),
+        ("기준으로 채워 주시고", False),
+    ],
+)
+def test_key_undone_reads_only_negations_of_the_key(tail, undone):
+    """검수 r2 L-a·N1: 키를 지우는 말만 잡고, 다른 것을 빼지 말라는 말은 잡지 않는다."""
+    from ureonggaksi.interpret import KEY_UNDONE, _compact
+
+    assert bool(KEY_UNDONE.match(_compact(tail))) is undone
+
+
+def test_a_field_named_key_survives_a_person_name_on_another_row(tmp_path):
+    """DIF-070 G14: 대표자 같은 사람 이름이 다른 행에 우연히 있어도 말한 키를 버리지 않는다(식별자 열만 견준다)."""
+    head = ["사업코드", "사업명", "대표", "결과보고일"]
+    rows = [
+        ["P-11", "청소년캠프", "김하나", None],
+        ["P-12", "어르신돌봄", "이두리", None],
+        ["P-13", "마을축제", "박세나", None],
+        ["P-14", "독서모임", "김하나", None],
+    ]
+    docs = [
+        _kv([("사업번호", n), ("사업명", m), ("대표자", r), ("결과보고일", "2026-03-0" + str(i))])
+        for i, (n, m, r) in enumerate(
+            [
+                ("P-11", "청소년캠프", "최다솜"),
+                ("P-12", "어르신돌봄", "이두리"),
+                ("P-13", "마을축제", "김하나"),
+                ("P-99", "환경정화", "정우리"),
+            ],
+            1,
+        )
+    ]
+    _, documents, view = build(tmp_path, docs, [head, *rows], "대장")
+    result = interpret("사업번호 기준으로 결과보고일 채워줘", documents, view)
+    assert result.key == ("사업번호", "사업코드") and result.key_assumed
