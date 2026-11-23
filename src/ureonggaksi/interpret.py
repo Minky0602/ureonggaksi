@@ -422,16 +422,23 @@ def _roster_table(documents: tuple[Document, ...], view: TargetView):
         overlap = sum(1 for n in names if n and _related(n, view.columns))
         # 머리글 이름이 아래 행에 다시 나오면(보호자 '성명|관계|연락처' 행, 쪽마다 반복된 머리글) 아래 행이 모두
         # 같은 사람들의 행이 아니다. 명단으로 읽으면 보호자 번호가 표시 없이 들어갔다(DIF-072 검수 기존 H)
+        # 한 행에 머리글 이름과 같은 칸이 둘 이상일 때만이다. 값 하나가 머리글과 같은 것('참석' 열의 '참석',
+        # 이름이 '비고'인 사람)은 흔하다(검수 r2 M-1). 그런 표가 후보였으면 다른 표로 넘어가지 않는다: 작은 표를
+        # 명단으로 골라 감독자 값을 모두의 칸에 넣었다(검수 r2 H-1)
         heads = {_norm(n) for n in names if n}
-        repeated = any(
-            c.kind == "cell"
-            and (c.section, c.table) == (section, table)
-            and c.row > top
-            and _norm(c.text) in heads
-            for d in documents
-            for c in d.blocks
-        )
-        if repeated:
+        hits: dict[tuple[int, int], int] = {}
+        for i, d in enumerate(documents):
+            for c in d.blocks:
+                if (
+                    c.kind == "cell"
+                    and (c.section, c.table) == (section, table)
+                    and c.row > top
+                    and _norm(c.text) in heads
+                ):
+                    hits[(i, c.row)] = hits.get((i, c.row), 0) + 1
+        if any(n >= 2 for n in hits.values()):
+            if same_everywhere and overlap >= 2:
+                return None
             continue
         if same_everywhere and overlap >= 2 and (best is None or overlap > best[0]):
             best = (overlap, section, table, top, names)

@@ -2894,5 +2894,51 @@ def test_a_table_repeating_its_header_is_not_a_roster(tmp_path, request_text):
     if rule is not None:
         plan = analyze(inputs, rule)
         assert not any(
-            "010-9999" in str(item.proposed) and item.write_selected for item in plan.items
+            item.proposed and "010-9999" in item.proposed.value and item.write_selected
+            for item in plan.items
         )
+
+
+def _attendance_docs(with_supervisor):
+    """명단 '참여자번호|성명|참석|담당업무'('참석' 값이 머리글과 같다), 원하면 감독자 표 '성명|담당업무'가 뒤에 붙는다."""
+
+    def doc(people, supervisor):
+        head = ("참여자번호", "성명", "참석", "담당업무")
+        rows = [[cell(h, 0, i) for i, h in enumerate(head)]]
+        rows += [[cell(v, r, i) for i, v in enumerate(p)] for r, p in enumerate(people, 1)]
+        body = "<hp:p><hp:run>" + table(rows) + "</hp:run></hp:p>"
+        if with_supervisor:
+            sup = [
+                [cell("성명", 0, 0), cell("담당업무", 0, 1)],
+                [cell(supervisor, 1, 0), cell("현장 총괄", 1, 1)],
+            ]
+            body += "<hp:p><hp:run>" + table(sup) + "</hp:run></hp:p>"
+        return [body]
+
+    return [
+        doc(
+            [("J-1", "가나다", "참석", "제초 작업"), ("J-2", "라마바", "불참", "하천 정비")],
+            "가나다",
+        ),
+        doc([("J-3", "사아자", "참석", "도로 청소")], "사아자"),
+    ]
+
+
+@pytest.mark.parametrize("with_supervisor", [False, True])
+def test_a_value_equal_to_one_header_keeps_the_roster(tmp_path, with_supervisor):
+    """검수 r2 M-1·H-1: '참석' 값 하나로 명단을 버리지 않고, 감독자 표를 명단으로 고르지 않는다."""
+    sheet = [
+        ["참여자번호", "성명", "참석", "담당업무"],
+        ["J-1", "가나다", None, None],
+        ["J-2", "라마바", None, None],
+        ["J-3", "사아자", None, None],
+    ]
+    inputs, documents, view = build(tmp_path, _attendance_docs(with_supervisor), sheet, "집계")
+    result = interpret("성명 기준으로 담당업무 채워줘", documents, view, ask_many=fooled)
+    rule = build_rule(result, view)
+    assert rule is not None
+    values = {
+        i.proposed.value for i in analyze(inputs, rule).items if i.write_selected and i.proposed
+    }
+    assert "현장 총괄" not in values
+    assert {"제초 작업", "하천 정비", "도로 청소"} <= values
