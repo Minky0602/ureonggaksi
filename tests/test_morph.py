@@ -271,3 +271,35 @@ def test_question_in_a_later_clause_keeps_the_prohibition():
 def test_side_clauses_join_reasons_and_drop_later_nouns(text, expected):
     got = [(stem, [text[a:b] for a, b in spans]) for stem, spans in morph.side_clauses(text)]
     assert got == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("다 채워줘. 직무는 나중에 따로 정할게", ["직무"]),
+        ("직무랑 직급은 추후 정하겠습니다", ["직무", "직급"]),
+        ("직무 채우고 직급은 나중에 할게", ["직급"]),  # 앞 마디의 직무는 미루지 않았다
+        (
+            "직무는 나중에 채워 줘",
+            [],
+        ),  # 보조 용언이 뒤따르면 미루기로 보지 않는다(aside_spans와 같다)
+        ("다 채워줘", []),
+    ],
+)
+def test_deferred_spans_are_the_nouns_before_later(text, expected):
+    assert [text[a:b] for a, b in morph.deferred_spans(text)] == expected
+
+
+@pytest.mark.parametrize(
+    ("label", "head"),
+    [("지원계좌", "계좌"), ("보증금(만원)", None), ("평가점수", "점수"), ("직급", None)],
+)
+def test_head_noun_is_the_last_noun_of_a_compound(label, head):
+    assert morph.head_noun(label) == head
+
+
+def test_adverbs_are_not_asked_as_unknown_words():
+    """DIF-069(W05): '일단'은 부사라 모델에 묻지 않는다."""
+    request = "관리번호로 찾아서 전부 넣어 줘요. 계좌는 개인정보라 일단 빼고요."
+    assert "일단" not in _unknown_words(request, ["관리번호", "지원계좌"])
+    assert morph.is_adverb("일단") and not morph.is_adverb("계좌")

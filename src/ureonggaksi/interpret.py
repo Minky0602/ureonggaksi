@@ -177,6 +177,27 @@ def _synonym(name: str, pool: tuple[str, ...]) -> str | None:
     return found[0] if len(found) == 1 else None
 
 
+def _headed(word: str, pool: tuple[str, ...]) -> str | None:
+    """word가 pool의 이름 하나만의 끝 명사와 같으면 그 이름('계좌'→지원계좌). 둘 이상('번호'→관리번호·
+    전화번호)이거나 없으면 None. 4B는 이런 줄인 말을 열과 잇지 못했다(DIF-068·069)."""
+    # 끝 글자가 같은 이름을 모두 센다. Kiwi가 '전화번호'를 한 낱말로 읽어도 '번호'로 끝나는 후보다
+    ending = [p for p in pool if _norm(p.split("(")[0]).endswith(_norm(word))]
+    if len(ending) != 1 or morph.head_noun(ending[0]) != word:
+        return None
+    return ending[0]
+
+
+def _named_in(request: str, names: list[str], spans: list[tuple[int, int]]) -> set[str]:
+    """요청에 나온 자리마다 글자 전부가 spans 안에 드는 이름. 한 번이라도 밖에 나오면 아니다."""
+    covered = {i for a, b in spans for i in range(a, b)}
+    out = set()
+    for name in names:
+        places = [m.span() for m in re.finditer(re.escape(name), request)]
+        if places and all(set(range(a, b)) <= covered for a, b in places):
+            out.add(name)
+    return out
+
+
 # 낱말 뒤 같은 마디 안의 빼기·미루기 표현("생일이랑 이메일은 빼", "생일은 이번엔 놔두고", "다음 주에")
 SKIP_WORDS = re.compile(
     r"빼(?!놓지|먹지|지\s*[말마])|제외(?!\s*하지\s*[말마])|(?<!먹지 )(?<!먹지)말고|놔두(?!지\s*[말마])|두고"
@@ -510,6 +531,8 @@ def _unknown_words(request: str, names: list[str]) -> list[str]:
         word = morph.strip_particles(re.sub(r"좀$", "", token.replace(NAME_MARK, "")))
         # 코드가 이미 아는 동사·빼기 표현('채우고', '놔두세')은 열 이름의 다른 말이 아니다(DIF-050 M4)
         if any(p.search(word) for p in (FILL, FILL_NEGATED, CHECK)) or NEGATED.match(word):
+            continue
+        if morph.is_adverb(word):  # '일단', '우선': 열을 가리키지 않는다(DIF-069)
             continue
 
         if len(word) >= 2 and re.search(r"[가-힣A-Za-z]", word):
@@ -977,8 +1000,9 @@ def interpret(
         # 동의어표: 요청의 모르는 말이 열 하나만 가리키면("생일"→생년월일) 그 열을 요청한 이름처럼 다룬다.
         # 채우라는 뜻인지는 다른 이름과 같이 모델의 역할 판단으로 정하고, 같은 마디에 빼기·미루기 표현이
         # 있으면 빼기로 본다(DIF-055, 검수 M1)
+        # 동의어표에 없으면 끝 명사로 잇는다('계좌는 빼고'→지원계좌). 다른 줄인 말과 같이 '확인 필요'다
         for word in every_word:
-            column = _synonym(word, targets)
+            column = _synonym(word, targets) or _headed(word, targets)
             if column and column not in mentioned and column not in aliased.values():
                 aliased[word] = column
         alias_skip = [c for w, c in aliased.items() if _said_to_skip(request, w)]
@@ -1005,7 +1029,13 @@ def interpret(
         unread = [*unread, *overflow]
         # 코드가 빼기로 읽은 이름(NEGATED)은 오탐이 있다("직급 그대로 다 옮겨", "참고해서"). 모델도 두 번 모두
         # 빼기로 읽었을 때만 '빼고 전부'로 본다(3차 검수 M-1)
-        skip_settled = all(roles.get(n) in (SKIP_ROLE, "무관") for n in coded_skip)
+        # 형태소로 미루기가 확정된 이름("직무는 나중에 따로 정할게")은 모델 답이 엇갈려도 빼기로 인정한다. 비우는
+        # 쪽이라 틀려도 덜 채울 뿐이다. 모델이 두 번 모두 채움·키라고 했으면 갈린 것으로 둔다(DIF-069)
+        deferred = _named_in(request, coded_skip, morph.deferred_spans(request))
+        skip_settled = all(
+            roles.get(n) in (SKIP_ROLE, "무관") or (n in deferred and n not in roles)
+            for n in coded_skip
+        )
         settled_words += [
             *coded_skip,
             *skip_words,

@@ -432,6 +432,47 @@ def aside_spans(text: str, *, later: bool = True) -> list[tuple[int, int]]:
     return spans
 
 
+def deferred_spans(text: str) -> list[tuple[int, int]]:
+    """미루는 마디("직무는 [나중에 따로 정할게]")에서 '나중·추후' 앞에 온 명사의 글자 범위. 미루는 대상이다.
+
+    마디는 문장 부호나 앞 마디의 연결·종결 어미에서 시작한다. 미루는 말의 범위는 aside_spans와 같게 읽는다.
+    """
+    tokens = _tokens(text)
+    spans: list[tuple[int, int]] = []
+    nouns: list[tuple[int, int]] = []  # 이 마디에서 '나중' 앞까지의 명사
+    later = False
+    for k, token in enumerate(tokens):
+        if token.tag in ("SF", "SP"):
+            nouns, later = [], False
+            continue
+        if token.tag.startswith("N") and token.form in LATER_NOUNS:
+            later = True
+        elif token.tag in ("NNG", "NNP") and not later:
+            nouns.append((token.start, token.end))
+        if token.tag not in ("EC", "EF"):
+            continue
+        if later and (k + 1 == len(tokens) or tokens[k + 1].tag != "VX"):
+            spans += nouns
+        nouns, later = [], False
+    return spans
+
+
+def head_noun(label: str) -> str | None:
+    """여러 형태소로 된 이름의 끝 명사('지원계좌'→'계좌', '이수시간'→'시간'). 한 형태소 이름이나 끝이 명사가
+    아니면 None. 괄호 안 단위는 보지 않는다."""
+    text = label.split("(")[0].split("（")[0].strip()
+    tokens = _tokens(text)
+    if len(tokens) < 2 or tokens[-1].tag not in ("NNG", "NNP"):
+        return None
+    return tokens[-1].form
+
+
+def is_adverb(word: str) -> bool:
+    """부사로만 된 말('일단', '우선', '그냥'). 열 이름의 다른 말이 아니다."""
+    tokens = _tokens(word)
+    return bool(tokens) and all(t.tag in ("MAG", "MAJ") for t in tokens)
+
+
 def has_exclusive(text: str) -> bool:
     """명사 뒤 보조사 '만'("직급만", "일부만", "행에만"). 어느 것만 하라는 말이다. 조사를 건너 본다(4차 검수 M-2)."""
     tokens = _tokens(text)

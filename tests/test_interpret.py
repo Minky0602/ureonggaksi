@@ -13,7 +13,9 @@ from ureonggaksi.inputs import open_inputs
 from ureonggaksi.interpret import (
     _ask_model,
     _blank,
+    _headed,
     _mentions,
+    _named_in,
     _negated,
     _resolve,
     build_rule,
@@ -1871,7 +1873,6 @@ def fooled_with(meant):
     "request_text",
     [
         "발급번호 기준으로 평가는 빼고 다 채워줘",
-        "발급번호 기준으로 시간은 빼고 전부 채워줘",
         "발급번호 기준으로 연락 쪽은 놔두고 다 채워줘",
     ],
 )
@@ -1880,6 +1881,15 @@ def test_fill_everything_is_off_when_the_skipped_word_is_not_tied_to_a_column(se
     _, docs, view = setup
     result = interpret(request_text, docs, view, ask_many=fooled_with({}))
     assert not {"이름", "직급", "점수", "비고"} & {c for _, c, _ in result.fields}
+
+
+def test_fill_everything_ties_a_skipped_head_noun_to_its_only_column(setup):
+    """DIF-069: '시간'은 열 하나(이수시간)의 끝 명사다. 모델이 잇지 못해도 그 열을 빼고 전부 채운다."""
+    _, docs, view = setup
+    request = "발급번호 기준으로 시간은 빼고 전부 채워줘"
+    result = interpret(request, docs, view, ask_many=fooled_with({}))
+    columns = {c for _, c, _ in result.fields}
+    assert "이수시간" not in columns and {"이름", "직급"} <= columns
 
 
 def test_fill_everything_leaves_out_a_skipped_word_the_model_ties_to_a_column(setup):
@@ -2400,3 +2410,53 @@ def test_fill_everything_stays_off_for_do_not_skip(setup, tail):
     result = interpret(request, docs, view, ask_many=reader)
     assert "이수시간" not in {c for _, c, _ in result.fields}
     assert "직급" not in _negated(_mentions(request, ["직급"]))
+
+
+def test_a_head_noun_ties_only_when_one_name_ends_with_it():
+    """DIF-069: '번호'로 끝나는 이름이 둘이면(Kiwi가 '전화번호'를 한 낱말로 읽어도) 잇지 않는다. 앞 명사는 잇지 않는다."""
+    assert _headed("계좌", ("지원계좌", "비고")) == "지원계좌"
+    assert _headed("번호", ("관리번호", "전화번호")) is None
+    assert _headed("평가", ("평가점수", "비고")) is None
+    assert _headed("계좌", ("계좌", "비고")) is None  # 한 형태소 이름은 같은 이름 짝이 맡는다
+
+
+def _split_on(name, first, second):
+    """두 번 묻기에서 name의 역할을 첫 물음엔 first, 둘째엔 second로 답하는 모델(4B가 엇갈린 J05 흉내)."""
+    calls = []
+
+    def ask(prompt, fields):
+        out = fooled(prompt, fields)
+        key = f"[이름] {name}"
+        if key in fields:
+            # 두 물음은 항목 순서가 서로 뒤집혀 있다. 첫 항목이 '[요청] 전부'가 아니면 첫 물음이다
+            out[key] = first if not list(fields)[0].startswith("[요청]") else second
+        calls.append(out)
+        return out
+
+    return ask
+
+
+@pytest.mark.parametrize(
+    "tail", ["직급은 나중에 따로 정할게", "직급은 추후 정하겠습니다", "직급은 나중에 할게요"]
+)
+def test_a_deferred_name_is_skipped_even_when_the_model_answers_split(setup, tail):
+    """DIF-069(J05): 형태소로 미루기가 확정된 이름은 모델 두 답이 엇갈려도 빼고 전부 채운다."""
+    _, docs, view = setup
+    request = f"발급번호 기준으로 다 채워줘. {tail}"
+    result = interpret(request, docs, view, ask_many=_split_on("직급", "채움", "무관"))
+    columns = {c for _, c, _ in result.fields}
+    assert "직급" not in columns and {"이름", "이수시간"} <= columns
+
+
+def test_a_deferred_name_the_model_twice_reads_as_fill_keeps_everything_off(setup):
+    """모델이 두 번 모두 '채움'이면 갈린 것이라 '전부'를 켜지 않는다(미루기 인정은 답이 엇갈릴 때만)."""
+    _, docs, view = setup
+    request = "발급번호 기준으로 다 채워줘. 직급은 나중에 따로 정할게"
+    result = interpret(request, docs, view, ask_many=_split_on("직급", "채움", "채움"))
+    assert "이수시간" not in {c for _, c, _ in result.fields}
+
+
+def test_a_name_said_both_before_and_in_a_deferral_is_not_deferred(setup):
+    """한 번이라도 미루는 마디 밖에서 말한 이름은 미루기로 확정하지 않는다."""
+    request = "직급 채우고 직급은 나중에 할게"
+    assert not _named_in(request, ["직급"], morph.deferred_spans(request))
