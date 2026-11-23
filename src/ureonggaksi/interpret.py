@@ -44,6 +44,7 @@ CHECK = re.compile(
 # "요청번호 기준", "이름으로 찾아", "이름으로 대조", "발급번호로 행을". '로'만으로는 키가 아니다:
 # "비고를 이름으로 채워줘"는 이름을 넣으라는 뜻일 수 있다(PR #18 6차 검수 H1). "직급별로"는 묶기다
 KEY_AFTER = re.compile(r"^(기준|(으로|로)(찾|대조|맞추|맞춰|매칭|연결|비교|확인|검토|행))")
+KEY_UNDONE = re.compile(KEY_AFTER.pattern + r"[가-힣]{0,3}?(말고|빼|아니|지말|지마)")
 NEGATED = re.compile(
     r"^(칸|열|란)?(에는|에|은|는|을|를|이|가|도|까지는|까지|만은|만)?"
     r"(빼(?!놓지|먹지|지말|지마)|제외(?!하지말|하지마)|말고|그대로(?!옮|넣|채|입력|적|기입|반영)|손대지|건드리지|하지마|하지말"
@@ -860,7 +861,9 @@ def interpret(
     hint = next((n for n, after in mentions if KEY_AFTER.match(after)), None)
     named_keys = {n for n, a in found if KEY_AFTER.match(a)}
     # 키를 둘 말했거나("이름 기준 말고 발급번호 기준으로"), 말한 키에 모르는 말이 닿았으면 묻는다(PR #18 H2)
-    conflicting = any(n in skip for n in named_keys) or len(named_keys) > 1
+    # "사업번호 기준 말고", "로 찾지 말고": 말한 키를 스스로 지웠다(DIF-070 검수 M4)
+    undone = any(KEY_UNDONE.match(a) for n, a in found if KEY_AFTER.match(a))
+    conflicting = any(n in skip for n in named_keys) or len(named_keys) > 1 or undone
     if conflicting:
         hint = None
     elif hint:
@@ -880,7 +883,16 @@ def interpret(
             weak = [
                 c for c in _key_candidates(fields, view, named=True, any_hit=True) if c[1] == field
             ]
-            if len(hits) == 1 and len(weak) == 1:
+            # 채우라고 말한 열·머리글이 둘인 열은 키가 아니고(검수 M2), 값이 맞는 다른 후보가 문서를 다른 행으로
+            # 보내면 묻는다(말하지 않은 키 추정과 같은 검사, 검수 M1)
+            rivals_all = _key_candidates(fields, view, named=True, any_hit=True)
+            if (
+                len(hits) == 1
+                and len(weak) == 1
+                and hits[0][2] not in {n for n, _ in found}
+                and view.columns.count(hits[0][2]) == 1
+                and all(_same_rows(hits[0], c, by_name, view) for c in rivals_all)
+            ):
                 key, key_assumed = (hits[0][1], hits[0][2]), True
     else:  # 키를 말하지 않았다
         # 키는 원칙적으로 묻는다(2026-11-20 사용자 결정, 아래 예외는 2026-11-23). 값 일치 1위가
@@ -1293,7 +1305,7 @@ def _kind(value: str) -> str:
     if re.fullmatch(r"\d{4}\s*[-./년]\s*\d{1,2}\s*[-./월]\s*\d{1,2}\s*일?\.?", v):
         return "date"
     # 휴대전화는 하이픈 없이도 적는다("01039917702", DIF-070 W01)
-    if re.fullmatch(r"(0\d{1,2}-\d{3,4}(-\d{4})?|01[016789]\d{7,8}|내선\s*\d+)", v):
+    if re.fullmatch(r"(0\d{1,2}-\d{3,4}(-\d{4})?|010\d{8}|01[16789]\d{7,8}|내선\s*\d+)", v):
         return "phone"
     if re.fullmatch(r"[\d,]+(\.\d+)?\s*(원|천원|시간|명|개|점|%)?", v):
         return "number"

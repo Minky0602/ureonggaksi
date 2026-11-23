@@ -2546,16 +2546,28 @@ def test_only_then_do_not_fill_the_rest_is_not_a_skip(request_text):
     assert not _said_to_skip(request_text, "시간")
 
 
-def _grants(tmp_path, extra_column=None):
-    """보조금 서식 흉내: 문서 '사업번호'(넷 중 하나는 표에 없음), 열 '사업코드'."""
+def _grants(tmp_path, extra_column=None, swapped=False):
+    """보조금 서식 흉내: 문서 '사업번호'(넷 중 하나는 표에 없음), 열 '사업코드'. swapped면 표의 사업명 둘이 뒤바뀜."""
     head = ["사업코드", "사업명", "결과보고일"] + ([extra_column] if extra_column else [])
-    rows = [["P-11", "가", None], ["P-12", "나", None], ["P-13", "다", None], ["P-14", "라", None]]
+    first, second = ("어르신돌봄", "청소년캠프") if swapped else ("청소년캠프", "어르신돌봄")
+    rows = [
+        ["P-11", first, None],
+        ["P-12", second, None],
+        ["P-13", "마을축제", None],
+        ["P-14", "독서모임", None],
+    ]
     if extra_column:
         rows = [r + [c] for r, c in zip(rows, ["P-11", "Q-1", "Q-2", "Q-3"], strict=True)]
     docs = [
         _kv([("사업번호", n), ("사업명", m), ("결과보고일", "2026-03-0" + str(i))])
         for i, (n, m) in enumerate(
-            [("P-11", "가"), ("P-12", "나"), ("P-13", "다"), ("P-99", "마")], 1
+            [
+                ("P-11", "청소년캠프"),
+                ("P-12", "어르신돌봄"),
+                ("P-13", "마을축제"),
+                ("P-99", "환경정화"),
+            ],
+            1,
         )
     ]
     return build(tmp_path, docs, [head, *rows], "대장")
@@ -2595,3 +2607,39 @@ def test_a_column_found_by_synonym_pairs_with_its_same_named_field(setup):
 def test_a_mobile_number_without_hyphens_is_still_a_phone(samples, existing, fits):
     """DIF-070 W01: 하이픈 없는 휴대전화도 연락처 형태다."""
     assert _shape_fits(samples, existing) is fits
+
+
+def test_a_field_named_key_is_asked_when_another_field_points_to_other_rows(tmp_path):
+    """검수 M1: 사업명이 다른 행을 가리키면(표의 사업명 둘이 뒤바뀜) 키를 추정하지 않고 묻는다."""
+    _, docs, view = _grants(tmp_path, swapped=True)
+    result = interpret("사업번호 기준으로 결과보고일 채워줘", docs, view)
+    assert result.key is None
+
+
+def test_a_field_named_key_is_not_a_column_the_user_asked_to_fill(tmp_path):
+    """검수 M2: 채우라고 말한 사업코드를 키로 삼지 않는다."""
+    _, docs, view = _grants(tmp_path)
+    result = interpret("사업번호 기준으로 사업코드랑 결과보고일 채워줘", docs, view)
+    assert result.key is None
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "사업번호 기준 말고 결과보고일 채워줘",
+        "사업번호 기준은 빼고 결과보고일 채워줘",
+        "사업번호로 찾지 말고 결과보고일 채워줘",
+    ],
+)
+def test_a_key_the_user_takes_back_is_not_used(tmp_path, request_text):
+    """검수 M4: 말한 키를 부정하면 키로 쓰지 않는다."""
+    _, docs, view = _grants(tmp_path)
+    assert interpret(request_text, docs, view).key is None
+
+
+def test_subsidy_is_not_a_synonym_of_granted_amount():
+    """검수 M3: '보조금'은 교부결정액 등 여러 금액을 가리켜 교부액과 묶지 않는다."""
+    from ureonggaksi.interpret import _synonym
+
+    assert _synonym("보조금", ("교부결정액", "교부액")) is None
+    assert _synonym("보조금교부액", ("교부결정액", "교부액")) == "교부액"
