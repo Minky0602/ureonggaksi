@@ -203,7 +203,7 @@ def _named_in(request: str, names: list[str], spans: list[tuple[int, int]]) -> s
 # 낱말 뒤 같은 마디 안의 빼기·미루기 표현("생일이랑 이메일은 빼", "생일은 이번엔 놔두고", "다음 주에")
 SKIP_WORDS = re.compile(
     r"빼(?!놓지|먹지|지\s*[말마])|제외(?!\s*하지\s*[말마])|(?<!먹지 )(?<!먹지)말고|놔두(?!지\s*[말마])|두고"
-    r"|비워(?!\s*두지\s*[말마])|비우(?!지\s*[말마])|그대로(?!옮|넣|채|입력|적|기입|반영)|참고|취소|보류|생략|미루"
+    r"|비워(?!\s*두지\s*[말마])|비우(?!지\s*[말마])|그대로(?!옮|넣|채|입력|적|기입|반영)|참고|취소|보류|생략|미루(?!지\s*[말마])"
     r"|손대지|건드리지|하지\s*마|하지\s*말"
     r"|(나중에?|나중으로|추후에?|이따가?|다음에|다음\s*(주|달|번)에)(\s*따로)?(?=\s*(하|해(?!당)|할|요|넣|채|처리|정하|정할|정해(?!진)|[,.;]|$))"
     r"|아직\s*(하지|안\s*하|안\s*해|채우지|넣지|이야|이에요|이요)"
@@ -211,6 +211,7 @@ SKIP_WORDS = re.compile(
 # '다음 주까지'·'아직 비어 있는'·'신청인 다음에 생일'·'아직 안 채운 칸'·'나중에 확인할'은 미루기가 아니다(검수 L-1, PR #27)
 CLAUSE_END = re.compile(r"[,.;]|고\s")  # "생일 채우고 이수시간은 빼": '고 '에서 마디가 끝난다
 ONLY_AFTER = re.compile(r"(에)?만(?![원큼])")  # 낱말 바로 뒤 보조사 '만'("시간만", "비고에만")
+OTHERS = re.compile(r"나머지|다른|그\s*외")
 UNDO_BEFORE = re.compile(
     r"(빼|제외하|놔두|비워\s*두|두|미루|비우)지\s*$"
 )  # '말고·마' 앞의 부정되는 빼기
@@ -220,12 +221,17 @@ def _said_to_skip(request: str, word: str) -> bool:
     """그 낱말이 나온 어느 자리든, 같은 마디 뒤쪽에 빼기·미루기 표현이 있다. 넓게 잡는다(틀리면 덜 채울 뿐)."""
     for found in re.finditer(re.escape(word), request):
         rest = request[found.end() :]
-        if ONLY_AFTER.match(rest):
-            continue  # "시간만 넣어": 그것만 하라는 말이지 빼라는 말이 아니다(DIF-069 검수 H-1)
         end = CLAUSE_END.search(rest)
+        # "시간만 넣어 나머지는 비워": 'X만' 뒤에 채우기나 '나머지'가 먼저 오면 X는 채울 것이다(검수 r1 H-1).
+        # "시간만 빼고"·"시간만 넣지 마"처럼 'X만' 바로 뒤가 빼기면 빼기다(검수 r2 H-1)
+        only = ONLY_AFTER.match(rest)
+        if only and FILL_NEGATED.search(rest[: end.start()] if end else rest):
+            return True
         for hit in SKIP_WORDS.finditer(rest):
             # 빼기 낱말이 첫 마디 끝보다 앞에서 시작하면 그 마디의 말이다("비워 두고 " 자체가 '고 '로 끝난다, 검수 M-1)
             if end is not None and hit.start() >= end.start():
+                break
+            if only and (FILL.search(rest[: hit.start()]) or OTHERS.search(rest[: hit.start()])):
                 break
             # "빼지 말고": 앞의 빼기를 부정하는 '말고·마'는 빼기가 아니다(DIF-069 검수 M-1)
             if hit.group().startswith(("말", "마")) and UNDO_BEFORE.search(rest[: hit.start()]):

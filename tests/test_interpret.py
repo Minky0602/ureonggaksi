@@ -2496,3 +2496,36 @@ def test_an_adverb_inside_a_column_name_is_still_asked():
     assert "현재" in _unknown_words(
         "발급번호 기준으로 현재는 빼고 다 채워줘", ["발급번호", "현재직급"]
     )
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "발급번호 기준으로 시간만 빼고 다 채워줘",
+        "시간만은 빼줘",
+        "시간만 넣지 마",
+        "시간만 채우지 말고 다 채워줘",
+        "시간만 나중에 할게",
+    ],
+)
+def test_only_followed_by_a_skip_is_still_a_skip(request_text):
+    """검수 r2 H-1: 'X만' 바로 뒤가 빼기면 빼기다('X만 넣어 나머지는 비워'와 다르다)."""
+    assert _said_to_skip(request_text, "시간")
+
+
+def test_a_place_only_with_do_not_touch_is_a_skip():
+    assert _said_to_skip("비고에만 손대지 마", "비고")
+
+
+def test_do_not_postpone_is_not_a_skip():
+    """검수 r2 L-1: '미루지 말고'는 빼기가 아니다."""
+    assert not _said_to_skip("시간은 미루지 말고 지금 채워", "시간")
+
+
+def test_a_synonym_only_skip_keeps_the_column_out(setup):
+    """검수 r2 H-1(동의어 경로 회귀): '교육시간만 빼고 다'는 이수시간을 채우지 않는다."""
+    _, docs, view = setup
+    result = interpret(
+        "발급번호 기준으로 교육시간만 빼고 다 채워줘", docs, view, ask_many=fooled_with({})
+    )
+    assert "이수시간" not in {c for _, c, _ in result.fields}
