@@ -37,13 +37,16 @@ FILL_NEGATED = re.compile(  # 하지 않는 채우기: "채우지 마", "채워�
 )
 CHECK = re.compile(
     r"확인(?!서)|대조|검토(?!서)|비교|맞는지|맞나|같은지|일치|검증|틀린|다른지|차이|체크|점검|검사"
-    r"|괜찮은지|됐나|됐는지|제대로|봐\s?줘|살펴|없나|맞아|됐어|있어|있나|\?"
+    r"|괜찮은지|됐나|됐는지|제대로|봐\s?(줘|주세요|주시|줄래|주실)|살펴|없나|맞아|됐어|있어|있나|\?"
 )  # "기입 상태 봐줘"·"입력 누락 없나": 채우기 낱말이 명사로 쓰인 검토 요청(P04 ① 2차 검수).
 # '?'로 끝나는 묻는 말("입력했어?")은 채우기와 함께 나오면 작업 종류를 묻는다(DIF-050 M1)
 # 이름 바로 뒤(공백 제거) 글자로 읽는 표현
 # "요청번호 기준", "이름으로 찾아", "이름으로 대조", "발급번호로 행을". '로'만으로는 키가 아니다:
 # "비고를 이름으로 채워줘"는 이름을 넣으라는 뜻일 수 있다(PR #18 6차 검수 H1). "직급별로"는 묶기다
-KEY_AFTER = re.compile(r"^(기준|(으로|로)(찾|대조|맞추|맞춰|매칭|연결|비교|확인|검토|행))")
+# "대상자번호로 건강상태 채워": '로' 바로 뒤에 다른 항목 이름이 오면 그 이름이 키다. "대여번호 맞춰서": 조사 없이도(DIF-074)
+KEY_AFTER = re.compile(
+    r"^(기준|맞추|맞춰|(으로|로)(찾|대조|맞추|맞춰|매칭|연결|비교|확인|검토|행|(?=\x00)))"
+)
 # 말한 키를 지우는 말: 키 표현 바로 뒤 '-지 말·않'("로 찾지 말고") 또는 네 글자 안의 부정("기준 말고", "기준이
 # 아닌", "기준 안 쓰고"). 다른 것을 빼지 말라는 말("기준으로 빼먹지 말고", "기준 돈 빼지 말고")은 아니다(검수 r2 L-a·N1)
 KEY_UNDONE = re.compile(
@@ -53,9 +56,9 @@ KEY_UNDONE = re.compile(
 NEGATED = re.compile(
     r"^(칸|열|란)?(에는|에|은|는|을|를|이|가|도|까지는|까지|만은|만)?"
     r"(빼(?!놓지|먹지|지말|지마)|제외(?!하지말|하지마)|말고|그대로(?!옮|넣|채|입력|적|기입|반영)|손대지|건드리지|하지마|하지말"
-    r"|두고|놔두(?!지말|지마)|참고|비워(?!두지말|두지마)|비우(?!지말|지마)"
+    r"|두고|그냥(둬|두)|놔두(?!지말|지마)|참고|비워(?!두지말|두지마)|비우(?!지말|지마)"
     r"|채우지마|채우지말|넣지마|넣지말|보류|생략|취소"
-    r"|미루|(나중에?|나중으로|추후에?|이따가?|다음에|다음(주|달|번)에)(따로)?(?=하|해(?!당)|할|요|넣|채|처리|정하|정할|정해(?!진)|[,.;]|$)"
+    r"|미루|(나중에?|나중으로|추후에?|이따가?|다음에|다음(주|달|번)에)(따로)?(?=하|해(?!당)|할|요|넣|채|처리|정하|정할|정해(?!진)|정리|[,.;]|$)"
     r"|아직(하지|안하|안해|채우지|넣지|이야|이에요|이요))"
 )  # "번호 칸은 비워 둬", "비고 칸에 넣지 말고", "생일은 나중에 하고"(미루기는 SKIP_WORDS와 같은 뜻).
 # "빼지 마·비우지 말고·놔두지 마"는 빼지 말라는 말이다(곁마디 검수 r2 L-1)
@@ -70,7 +73,7 @@ ALLOWED_WORD = (
     r"|맞는지|같은지|일치하는지|다른지"
     r"|기준|기준으로|찾아|찾아서|찾고|찾구|행을"
     r"|(?:칸|열|란)에?"
-    rf"|(?:취합표|현황표|명단|표|시트|엑셀|문서|서류|신청서|확인서|요청서){PARTICLE}?"
+    rf"|(?:취합표|현황표|명단|표|시트|엑셀|문서|서류|신청서|확인서|요청서|대장|집계표|보고서|목록|내용){PARTICLE}?"
     r"|빈칸|빈칸을|빈칸에|다|모두|전부|전체|각각"  # "다 채워줘": 빼는 동사가 오면 그 동사가 모르는 말이라 묻는다
     rf"|{ENDING}|요|좀|부탁해|부탁해요|부탁합니다|부탁드립니다|감사합니다|감사해요|고맙습니다|[ㅠㅜ]+"
 )
@@ -183,6 +186,20 @@ def _synonym(name: str, pool: tuple[str, ...]) -> str | None:
     return found[0] if len(found) == 1 else None
 
 
+def _unit_twin(field, pool) -> str | None:
+    """단위 없는 문서 항목과 이름이 같고 단위만 붙은 열이 하나뿐이며, 문서 값이 모두 그 단위로 끝나면 그 열
+    ('피해면적' 23.5㎡ → 피해면적(㎡), '보증금' 20,000원 → 보증금(원)). 값의 단위가 다르면(4,350,000원 →
+    (천원)) 잇지 않는다(DIF-074)."""
+    if _unit(field.name):
+        return None
+    found = [c for c in pool if _norm(c) == _norm(field.name) and _unit(c)]
+    if len(found) != 1:
+        return None
+    unit = "".join(a or b for a, b in re.findall(r"\(([^)]*)\)|（([^）]*)）", found[0])).strip()
+    samples = [re.sub(r"\s", "", s) for s in field.samples if s and s.strip()]
+    return found[0] if unit and samples and all(s.endswith(unit) for s in samples) else None
+
+
 def _headed(word: str, pool: tuple[str, ...]) -> str | None:
     """word가 pool의 이름 하나만의 끝 명사와 같으면 그 이름('계좌'→지원계좌). 둘 이상('번호'→관리번호·
     전화번호)이거나 없으면 None. 4B는 이런 줄인 말을 열과 잇지 못했다(DIF-068·069)."""
@@ -208,10 +225,10 @@ def _named_in(request: str, names: list[str], spans: list[tuple[int, int]]) -> s
 
 # 낱말 뒤 같은 마디 안의 빼기·미루기 표현("생일이랑 이메일은 빼", "생일은 이번엔 놔두고", "다음 주에")
 SKIP_WORDS = re.compile(
-    r"빼(?!놓지|먹지|지\s*[말마])|제외(?!\s*하지\s*[말마])|(?<!먹지 )(?<!먹지)말고|놔두(?!지\s*[말마])|두고"
+    r"빼(?!놓지|먹지|지\s*[말마])|제외(?!\s*하지\s*[말마])|(?<!먹지 )(?<!먹지)말고|놔두(?!지\s*[말마])|두고|그냥\s*(둬|두)"
     r"|비워(?!\s*두지\s*[말마])|비우(?!지\s*[말마])|그대로(?!옮|넣|채|입력|적|기입|반영)|참고|취소|보류|생략|미루(?!지\s*[말마])"
     r"|손대지|건드리지|하지\s*마|하지\s*말"
-    r"|(나중에?|나중으로|추후에?|이따가?|다음에|다음\s*(주|달|번)에)(\s*따로)?(?=\s*(하|해(?!당)|할|요|넣|채|처리|정하|정할|정해(?!진)|[,.;]|$))"
+    r"|(나중에?|나중으로|추후에?|이따가?|다음에|다음\s*(주|달|번)에)(\s*따로)?(?=\s*(하|해(?!당)|할|요|넣|채|처리|정하|정할|정해(?!진)|정리|[,.;]|$))"
     r"|아직\s*(하지|안\s*하|안\s*해|채우지|넣지|이야|이에요|이요)"
 )  # 이름 경로의 빼기 낱말(NEGATED)과 같은 뜻을 쓴다. 미루기는 '하다'·마디 끝이 뒤따를 때만이다:
 # '다음 주까지'·'아직 비어 있는'·'신청인 다음에 생일'·'아직 안 채운 칸'·'나중에 확인할'은 미루기가 아니다(검수 L-1, PR #27)
@@ -483,7 +500,12 @@ def _work_type(request: str) -> str | None:
     # 정규식이 아는 꼴과 형태소로 읽은 꼴("다 채우진 마", "입력하지 않아도")을 함께 지운다(DIF-064)
     spans = [m.span() for m in FILL_NEGATED.finditer(request)]
     spans += morph.negated_fill_spans(request)
+    modifying = morph.modifying_fill_spans(
+        request
+    )  # "적어 낸 식구 수": 꾸미는 말은 일을 시키지 않는다
     rest = request
+    for start, end in modifying:
+        rest = rest[:start] + " " * (end - start) + rest[end:]
     for start, end in spans:
         rest = rest[:start] + " " * (end - start) + rest[end:]
     negated = bool(spans)
@@ -522,7 +544,13 @@ def _spans(request: str, names: list[str]) -> list[tuple[int, int, str]]:
     for variant, name in pairs:
         owners.setdefault(_compact(variant), set()).add(name)
     for variant, name in pairs:
-        if len(owners[_compact(variant)]) > 1 or re.fullmatch(ALLOWED_WORD, _compact(variant)):
+        # 여럿이 같은 글자를 가져도, 그중 하나가 그 글자 그대로인 이름이면 그 이름이다(문서 '보증금'과 열
+        # '보증금(원)'의 '보증금'은 문서 항목, DIF-074). 열 둘이 겹치면(비고(1)·비고(2)) 모르는 말로 남긴다
+        exact = [o for o in owners[_compact(variant)] if _compact(o) == _compact(variant)]
+        if len(owners[_compact(variant)]) > 1 and len(exact) == 1:
+            if name != exact[0]:
+                continue
+        elif len(owners[_compact(variant)]) > 1 or re.fullmatch(ALLOWED_WORD, _compact(variant)):
             name = ""  # 비고(1)·비고(2)의 '비고': 어느 이름인지 모른다. 모르는 말로 남긴다(5차 검수 H3)
         pattern = r"(?<![가-힣A-Za-z0-9])" + r"\s*".join(map(re.escape, _compact(variant)))
         for match in re.finditer(pattern, request):
@@ -1125,8 +1153,19 @@ def interpret(
         )
         try:
             roles, meant, meant_skip, unread, everything_said, skip_words, half_fill = (
-                _read_request(ask_many, request, asked_names, words, targets, everything_word)
+                _read_request(
+                    ask_many,
+                    request,
+                    asked_names,
+                    words,
+                    targets,
+                    everything_word and bool(every_word),
+                )
             )
+            # 모르는 말이 없으면 '전부'는 코드가 정한다(계약). '있는 거'처럼 허용 낱말 밖이지만 모르는 말도 아닌
+            # 표현 때문에 단순 요청이 아니게 되면, 4B가 '[요청] 전부'를 엇갈려 답해 꺼졌다(DIF-074 s02)
+            if not every_word:
+                everything_said = everything_word
         except ServiceError as error:
             if not error.code.startswith("AI_"):
                 raise
@@ -1223,6 +1262,14 @@ def interpret(
             field,
             tuple(c for c in columns if c != key_column and c not in taken and c not in off_limits),
         )
+        # 선택지(_order)는 단위만 다른 같은 이름을 미리 뺀다. 단위 짝은 남은 열 전체에서 찾는다
+        twin = _unit_twin(
+            by_name[field],
+            tuple(c for c in columns if c != key_column and c not in taken and c not in off_limits),
+        )
+        if twin is not None:
+            pairs.append((field, twin, "assumed"))
+            continue
         listed = _synonym(field, tuple(c for c in columns if c != key_column))
         if (
             listed in options
@@ -1461,7 +1508,19 @@ def _column_prompt(request, field: FieldCandidate, options, view) -> str:
 
 FRAME_NOUNS = (
     *("기준", "칸", "빈칸", "열", "란", "행", "표", "시트", "엑셀", "문서", "서류"),
-    *("취합표", "현황표", "명단", "신청서", "확인서", "요청서"),
+    *(
+        "취합표",
+        "현황표",
+        "명단",
+        "신청서",
+        "확인서",
+        "요청서",
+        "대장",
+        "집계표",
+        "보고서",
+        "목록",
+        "내용",
+    ),
 )  # 자리·자료를 가리키는 말: "발급번호 기준으로 찾아서", "엑셀 보고"
 
 
@@ -1526,7 +1585,7 @@ def _match_all(request, fields, columns, pairs, view, ask_many):
         if field.name in taken_fields:
             continue
         free = tuple(c for c in columns if c not in taken_columns)
-        same = _resolve(field.name, free)
+        same = _resolve(field.name, free) or _unit_twin(field, free)
         listed = _synonym(field.name, free)
         if (
             same is not None

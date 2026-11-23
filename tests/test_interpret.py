@@ -1989,7 +1989,7 @@ def test_fill_everything_needs_both_model_answers(setup):
             out["[요청] 전부"] = next(turns)
         return out
 
-    result = interpret("발급번호 기준으로 문서 내용 다 채워주실래요", docs, view, ask_many=split)
+    result = interpret("발급번호 기준으로 문서 사항 다 채워주실래요", docs, view, ask_many=split)
     assert not {"직급", "점수"} & {c for _, c, _ in result.fields}
 
 
@@ -2446,7 +2446,7 @@ def test_a_deferred_name_is_skipped_even_when_the_model_answers_split(setup, tai
     """DIF-069(J05): 형태소로 미루기가 확정된 이름은 모델 두 답이 엇갈려도 빼고 전부 채운다."""
     _, docs, view = setup
     request = f"발급번호 기준으로 다 채워줘. {tail}"
-    result = interpret(request, docs, view, ask_many=_split_on("직급", "채움", "무관"))
+    result = interpret(request, docs, view, ask_many=_split_by_call("직급", "채움", "무관"))
     columns = {c for _, c, _ in result.fields}
     assert "직급" not in columns and {"이름", "이수시간"} <= columns
 
@@ -2942,3 +2942,83 @@ def test_a_value_equal_to_one_header_keeps_the_roster(tmp_path, with_supervisor)
     }
     assert "현장 총괄" not in values
     assert {"제초 작업", "하천 정비", "도로 청소"} <= values
+
+
+@pytest.mark.parametrize(
+    ("request_text", "work"),
+    [
+        ("신청서에 적어 낸 식구 수가 대장이랑 다른지 봐 줘", "check"),  # '적어 낸'은 꾸미는 말
+        ("빌려 간 물건이 대장에 적혀 있는지 봐 주세요", "check"),
+        ("안 채운 칸 채워 줘", "fill"),
+    ],
+)
+def test_work_type_ignores_fill_verbs_that_only_describe(request_text, work):
+    """DIF-074: 채우기 동사가 관형형으로 명사를 꾸미면 일을 시키는 말이 아니다. '봐 주세요'는 검토다."""
+    from ureonggaksi.interpret import _work_type
+
+    assert _work_type(request_text) == work
+
+
+@pytest.mark.parametrize(
+    ("request_text", "key"),
+    [
+        ("발급번호로 이수시간 채워 줘", "발급번호"),  # '로' 바로 뒤에 다른 항목 이름
+        ("발급번호 맞춰서 이수시간 채워 줘", "발급번호"),  # 조사 없이 '맞춰'
+    ],
+)
+def test_more_key_phrases(setup, request_text, key):
+    _, docs, view = setup
+    result = interpret(request_text, docs, view)
+    assert result.key is not None and result.key[1] == key
+
+
+def test_a_name_then_ro_then_a_verb_is_still_not_a_key(setup):
+    """PR #18 6차 H1 유지: '비고를 이름으로 채워줘'의 '이름으로'는 키가 아니다."""
+    _, docs, view = setup
+    result = interpret("비고를 이름으로 채워줘", docs, view)
+    assert result.key is None or result.key[1] != "이름"
+
+
+@pytest.mark.parametrize("tail", ["직급은 다음에 정리할게", "직급은 그냥 둬"])
+def test_more_skip_phrases(tail):
+    request = f"발급번호 기준으로 다 채워줘. {tail}"
+    assert _negated(_mentions(request, ["직급"])) == {"직급"}
+
+
+def test_ledger_words_are_not_unknown_words():
+    """DIF-074: '대장·보고서·집계표·내용'은 자리·자료를 가리키는 말이라 모델에 묻지 않는다."""
+    assert _unknown_words("접수번호로 맞춰서 보고서 내용 대장에 다 채워 줘", ["접수번호"]) == []
+
+
+def _units_case(tmp_path, area, amount):
+    docs = [
+        _kv([("접수번호", f"R-{i}"), ("피해면적", a), ("피해액", m)])
+        for i, (a, m) in enumerate(zip(area, amount, strict=True), 1)
+    ]
+    sheet = [["접수번호", "피해면적(㎡)", "피해액(천원)"], ["R-1", None, None], ["R-2", None, None]]
+    return build(tmp_path, docs, sheet, "대장")
+
+
+def test_a_unit_column_pairs_only_when_document_values_carry_that_unit(tmp_path):
+    """DIF-074: '23.5㎡' → 피해면적(㎡)은 짝, '4,350,000원' → 피해액(천원)은 단위가 달라 짝이 아니다."""
+    _, docs, view = _units_case(tmp_path, ["23.5㎡", "41㎡"], ["4,350,000원", "12,800,000원"])
+    result = interpret("접수번호 기준으로 피해면적이랑 피해액 채워줘", docs, view)
+    assert ("피해면적", "피해면적(㎡)", "assumed") in result.fields
+    assert "피해액(천원)" not in {c for _, c, _ in result.fields}
+
+
+def test_everything_is_decided_by_code_when_no_word_is_unknown(setup):
+    """계약: 모르는 말이 없으면 '전부'는 코드가 정한다. 모델이 '아니오'라 해도 묻지 않는다."""
+    _, docs, view = setup
+    asked = []
+
+    def many(prompt, fields):
+        asked.append(list(fields))
+        out = fooled(prompt, fields)
+        if "[요청] 전부" in fields:
+            out["[요청] 전부"] = "아니오"
+        return out
+
+    result = interpret("발급번호 기준으로 확인서에 있는 거 다 채워 줘", docs, view, ask_many=many)
+    assert not any("[요청] 전부" in a for a in asked)
+    assert {"이름", "직급"} <= {c for _, c, _ in result.fields}
