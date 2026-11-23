@@ -353,11 +353,24 @@ def _document_fields(documents: tuple[Document, ...]) -> list[FieldCandidate]:
     return list(found.values())
 
 
-def _ambiguous_labels(documents: tuple[Document, ...]) -> set[str]:
-    """첫 문서에서 둘 이상 나오는 라벨(표 칸·문단 "라벨:"). 항목 후보에서 빠진 이름이다."""
+def _ambiguous_labels(
+    documents: tuple[Document, ...], record: RecordRule | None = None
+) -> set[str]:
+    """첫 문서에서 둘 이상 나오는 라벨(표 칸·문단 "라벨:"). 항목 후보에서 빠진 이름이다.
+    명단 표(record.kind == table_rows)의 머리글 아래 칸은 사람마다의 값이라 라벨이 아니다("21일", "제초 작업"이
+    여러 사람에게 같은 것은 흔하다, DIF-072 J05)."""
     counts: dict[str, int] = {}
     paragraph_label = re.compile(r"^\s*([^:：\s][^:：]{0,19}?)\s*[:：]")
     for block in documents[0].blocks:
+        if (
+            record is not None
+            and record.kind == "table_rows"
+            and block.kind == "cell"
+            and block.table == record.table
+            and (not record.section or block.section == record.section)
+            and block.row > record.header_row
+        ):
+            continue
         text = block.text.strip() if block.kind == "cell" else ""
         if block.kind == "paragraph" and (m := paragraph_label.match(block.text)):
             text = m.group(1)
@@ -407,6 +420,26 @@ def _roster_table(documents: tuple[Document, ...], view: TargetView):
             for d in documents[1:]
         )
         overlap = sum(1 for n in names if n and _related(n, view.columns))
+        # 머리글 이름이 아래 행에 다시 나오면(보호자 '성명|관계|연락처' 행, 쪽마다 반복된 머리글) 아래 행이 모두
+        # 같은 사람들의 행이 아니다. 명단으로 읽으면 보호자 번호가 표시 없이 들어갔다(DIF-072 검수 기존 H)
+        # 한 행에 머리글 이름과 같은 칸이 둘 이상일 때만이다. 값 하나가 머리글과 같은 것('참석' 열의 '참석',
+        # 이름이 '비고'인 사람)은 흔하다(검수 r2 M-1). 그런 표가 후보였으면 다른 표로 넘어가지 않는다: 작은 표를
+        # 명단으로 골라 감독자 값을 모두의 칸에 넣었다(검수 r2 H-1)
+        heads = {_norm(n) for n in names if n}
+        hits: dict[tuple[int, int], int] = {}
+        for i, d in enumerate(documents):
+            for c in d.blocks:
+                if (
+                    c.kind == "cell"
+                    and (c.section, c.table) == (section, table)
+                    and c.row > top
+                    and _norm(c.text) in heads
+                ):
+                    hits[(i, c.row)] = hits.get((i, c.row), 0) + 1
+        if any(n >= 2 for n in hits.values()):
+            if same_everywhere and overlap >= 2:
+                return None
+            continue
         if same_everywhere and overlap >= 2 and (best is None or overlap > best[0]):
             best = (overlap, section, table, top, names)
     return best
@@ -1205,7 +1238,7 @@ def interpret(
             pairs.append((field, answer, "model"))
     # 문서에 같은 이름 라벨이 있지만 겹쳐서 뺀 열: 답은 그 라벨뿐이라 다른 항목을 고르게 하지 않는다(6차 A01)
     asked_columns = list(only_columns)  # 겹친 라벨로 빠지기 전, 채우라고 말한(읽은) 열(검수 r2 L-4)
-    ambiguous = _ambiguous_labels(documents)
+    ambiguous = _ambiguous_labels(documents, record)
     held += [c for c in only_columns if _norm(c) in ambiguous]
     only_columns = [c for c in only_columns if _norm(c) not in ambiguous]
     for column in only_columns:
@@ -1270,7 +1303,7 @@ def interpret(
         # 빼기 낱말 목록으로는 목록 밖 표현이 샌다(4차 검수 H-1)
         and _side_clauses_settled(request, settled_words, hint)
         # 같은 라벨이 문서에 두 번 이상 나오는 서식은 값 칸이 항목명으로 잡힌다(3차 검수 H-3)
-        and not _ambiguous_labels(documents)
+        and not _ambiguous_labels(documents, record)
     ):
         # 값이 문서마다 우연히 같으면 그 값 칸이 항목명으로 잡히고("12시간", "팀장") 아래 칸 값을 가져간다.
         # 그러면 다른 항목과 값이 똑같아져 어느 쪽이 진짜인지 가를 수 없다. 값처럼 생긴 이름과, 값이 다른

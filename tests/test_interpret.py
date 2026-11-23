@@ -2827,3 +2827,118 @@ def test_a_check_drops_a_name_the_model_never_read_as_compare(setup, first, seco
     reader = _split_by_call("이수시간", first, second) if first else reads({"점수": "채움"})
     result = interpret(request, docs, view, ask_many=reader)
     assert "이수시간" not in {c for _, c, _ in result.fields}
+
+
+def _roster_docs(rows_by_doc):
+    """명단 표 문서들: 머리글(참여자번호·성명·출근일수·담당업무) + 사람마다 한 행."""
+    out = []
+    for people in rows_by_doc:
+        head = [cell(h, 0, i) for i, h in enumerate(("참여자번호", "성명", "출근일수", "담당업무"))]
+        body = [[cell(v, r, i) for i, v in enumerate(p)] for r, p in enumerate(people, 1)]
+        out.append(["<hp:p><hp:run>" + table([head, *body]) + "</hp:run></hp:p>"])
+    return out
+
+
+def test_repeated_values_in_roster_rows_do_not_block_fill_everything(tmp_path):
+    """DIF-072 J05: 명단 표의 값('21일', '제초 작업')이 여러 사람에게 같아도 반복 라벨이 아니다."""
+    docs = _roster_docs(
+        [
+            [("J-1", "가나다", "21일", "제초 작업"), ("J-2", "라마바", "21일", "제초 작업")],
+            [("J-3", "사아자", "20일", "하천 정비"), ("J-4", "차카타", "19일", "제초 작업")],
+        ]
+    )
+    sheet = [
+        ["참여자번호", "성명", "출근일수", "담당업무"],
+        ["J-1", "가나다", None, None],
+        ["J-2", "라마바", None, None],
+        ["J-3", "사아자", None, None],
+        ["J-4", "차카타", None, None],
+    ]
+    _, documents, view = build(tmp_path, docs, sheet, "집계")
+    result = interpret("참여자번호 기준으로 다 채워줘", documents, view, ask_many=fooled)
+    columns = {c for _, c, _ in result.fields}
+    assert {"출근일수", "담당업무"} <= columns
+
+
+def _guardian_docs():
+    """신청인 행 아래 보호자 '성명|관계|연락처' 행이 다시 나오는 가로 서식. 보호자 라마바는 대상 표의 다른 사람이다."""
+
+    def doc(applicant, guardian):
+        rows = [
+            [cell(h, 0, i) for i, h in enumerate(("성명", "소속", "연락처"))],
+            [cell(v, 1, i) for i, v in enumerate(applicant)],
+            [cell(h, 2, i) for i, h in enumerate(("성명", "관계", "연락처"))],
+            [cell(v, 3, i) for i, v in enumerate(guardian)],
+        ]
+        return ["<hp:p><hp:run>" + table(rows) + "</hp:run></hp:p>"]
+
+    return [
+        doc(("가나다", "총무과", "010-1111-1111"), ("라마바", "부", "010-9999-0001")),
+        doc(("사아자", "민원과", "010-2222-2222"), ("차카타", "모", "010-9999-0002")),
+    ]
+
+
+@pytest.mark.parametrize("request_text", ["성명 기준으로 연락처 채워줘", "성명 기준으로 다 채워줘"])
+def test_a_table_repeating_its_header_is_not_a_roster(tmp_path, request_text):
+    """DIF-072 검수(기존 H·M-1): 머리글 이름이 아래 행에 다시 나오면 명단이 아니다. 보호자 번호를 신청인 행에 넣지 않는다."""
+    sheet = [
+        ["성명", "소속", "연락처"],
+        ["가나다", None, None],
+        ["라마바", None, None],
+        ["사아자", None, None],
+    ]
+    inputs, documents, view = build(tmp_path, _guardian_docs(), sheet, "명단")
+    result = interpret(request_text, documents, view, ask_many=fooled)
+    assert result.record.kind != "table_rows"
+    rule = build_rule(result, view)
+    if rule is not None:
+        plan = analyze(inputs, rule)
+        assert not any(
+            item.proposed and "010-9999" in item.proposed.value and item.write_selected
+            for item in plan.items
+        )
+
+
+def _attendance_docs(with_supervisor):
+    """명단 '참여자번호|성명|참석|담당업무'('참석' 값이 머리글과 같다), 원하면 감독자 표 '성명|담당업무'가 뒤에 붙는다."""
+
+    def doc(people, supervisor):
+        head = ("참여자번호", "성명", "참석", "담당업무")
+        rows = [[cell(h, 0, i) for i, h in enumerate(head)]]
+        rows += [[cell(v, r, i) for i, v in enumerate(p)] for r, p in enumerate(people, 1)]
+        body = "<hp:p><hp:run>" + table(rows) + "</hp:run></hp:p>"
+        if with_supervisor:
+            sup = [
+                [cell("성명", 0, 0), cell("담당업무", 0, 1)],
+                [cell(supervisor, 1, 0), cell("현장 총괄", 1, 1)],
+            ]
+            body += "<hp:p><hp:run>" + table(sup) + "</hp:run></hp:p>"
+        return [body]
+
+    return [
+        doc(
+            [("J-1", "가나다", "참석", "제초 작업"), ("J-2", "라마바", "불참", "하천 정비")],
+            "가나다",
+        ),
+        doc([("J-3", "사아자", "참석", "도로 청소")], "사아자"),
+    ]
+
+
+@pytest.mark.parametrize("with_supervisor", [False, True])
+def test_a_value_equal_to_one_header_keeps_the_roster(tmp_path, with_supervisor):
+    """검수 r2 M-1·H-1: '참석' 값 하나로 명단을 버리지 않고, 감독자 표를 명단으로 고르지 않는다."""
+    sheet = [
+        ["참여자번호", "성명", "참석", "담당업무"],
+        ["J-1", "가나다", None, None],
+        ["J-2", "라마바", None, None],
+        ["J-3", "사아자", None, None],
+    ]
+    inputs, documents, view = build(tmp_path, _attendance_docs(with_supervisor), sheet, "집계")
+    result = interpret("성명 기준으로 담당업무 채워줘", documents, view, ask_many=fooled)
+    rule = build_rule(result, view)
+    assert rule is not None
+    values = {
+        i.proposed.value for i in analyze(inputs, rule).items if i.write_selected and i.proposed
+    }
+    assert "현장 총괄" not in values
+    assert {"제초 작업", "하천 정비", "도로 청소"} <= values
