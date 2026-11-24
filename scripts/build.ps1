@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $pythonPath = Join-Path $projectRoot '.venv/Scripts/python.exe'
 Push-Location $projectRoot
@@ -13,6 +13,13 @@ try {
     & $pythonPath examples/generate_samples.py
     if ($LASTEXITCODE -ne 0) { throw 'sample generation failed' }
     Get-ChildItem -LiteralPath examples/generated -Filter '*.hwpx' | Copy-Item -Destination dist/Ureonggaksi/examples
+    # 3분 체험용 합성 자료(입력만): 스모크 시험용과 배포 폴더용을 각각 새로 만든다
+    & $pythonPath examples/make_demo.py
+    if ($LASTEXITCODE -ne 0) { throw 'demo generation failed' }
+    & $pythonPath examples/make_demo.py dist/Ureonggaksi/examples/demo
+    if ($LASTEXITCODE -ne 0) { throw 'demo generation failed' }
+    # 메모장이 어느 Windows에서도 한글을 바로 읽게 BOM 있는 UTF-8로 쓴다(Windows PowerShell 5.1의 utf8)
+    Get-Content -LiteralPath packaging/START_HERE.txt -Encoding UTF8 | Set-Content -LiteralPath (Join-Path dist/Ureonggaksi '처음 실행.txt') -Encoding UTF8
     Copy-Item -LiteralPath THIRD_PARTY_NOTICES.md -Destination dist/Ureonggaksi/THIRD_PARTY_NOTICES.md
     & $pythonPath scripts/collect_licenses.py dist/Ureonggaksi/licenses
     if ($LASTEXITCODE -ne 0) { throw 'license collection failed' }

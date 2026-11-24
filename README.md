@@ -10,6 +10,12 @@ HWPX 문서의 값을 외부 전송 없이 Excel로 취합하는 오프라인 Wi
 
 ## 설치와 실행
 
+### Windows 실행 파일
+
+[Releases](https://github.com/Minky0602/ureonggaksi/releases)에서 `Ureonggaksi-<버전>-windows-x64.zip`을 받아 폴더째 풀고 `Ureonggaksi.exe`를 실행한다. 설치·관리자 권한·Python·인터넷이 필요 없다. 코드 서명이 없어 처음에 "Windows의 PC 보호" 창이 뜨면 [추가 정보] → [실행]을 누른다. 폴더 안 `처음 실행.txt`에 합성 예시로 3분 안에 해 보는 순서가 있다. 같은 폴더의 `.sha256` 파일로 받은 zip이 CI에서 만든 것과 같은지 확인할 수 있다.
+
+### 소스에서 실행
+
 [uv](https://docs.astral.sh/uv/)를 설치한 뒤 실행한다. Python 3.12는 uv가 맞춘다.
 
 ```powershell
