@@ -5,6 +5,7 @@
 usage: python scripts/smoke_exe.py dist/Ureonggaksi/Ureonggaksi.exe
 """
 
+import os
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,20 @@ from pathlib import Path
 
 DEMO = Path(__file__).resolve().parent.parent / "examples" / "generated" / "demo"
 REQUEST = "발급번호 기준으로 신청인이랑 생일, 이수시간 채워줘"
+
+
+def _without_python() -> dict[str, str]:
+    """Python·uv·가상환경이 없는 PC처럼 보이는 환경. EXE가 몰래 시스템 Python에 기대면 여기서 드러난다."""
+    hidden = ("PYTHON", "VIRTUAL_ENV", "UV_")
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith(hidden)}
+    words = ("python", "/uv", "/.venv", "pipx")
+    keep = [
+        p
+        for p in env.get("PATH", "").split(os.pathsep)
+        if p and not any(w in p.lower().replace("\\", "/") for w in words)
+    ]
+    env["PATH"] = os.pathsep.join(keep)
+    return env
 
 
 def main(exe: str) -> int:
@@ -25,7 +40,7 @@ def main(exe: str) -> int:
         command = [exe, "prepare", "--request", REQUEST, "--target", target, "--out", plan]
         command += ["--rules-dir", work / "rules", *docs]
         try:
-            done = subprocess.run(command, capture_output=True, timeout=120)
+            done = subprocess.run(command, capture_output=True, timeout=120, env=_without_python())
         except subprocess.TimeoutExpired:
             subprocess.run(["taskkill", "/F", "/IM", Path(exe).name], capture_output=True)
             print("smoke: EXE가 120초 안에 끝나지 않았습니다(오류 대화상자일 수 있음)")

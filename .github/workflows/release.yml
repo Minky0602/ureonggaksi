@@ -1,0 +1,72 @@
+name: Release
+
+# v0.1.0 같은 태그를 push하면 깨끗한 Windows 러너에서 빌드·스모크 시험을 하고 초안(draft) Release를 만든다.
+# 공개는 사람이 초안을 확인한 뒤 GitHub에서 한다. 배포 파일을 바꾼 PR에서는 빌드·스모크 시험까지만 한다.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "scripts/build.ps1"
+      - "scripts/smoke_exe.py"
+      - "scripts/collect_licenses.py"
+      - "scripts/desktop_entry.py"
+      - "packaging/**"
+      - "pyproject.toml"
+      - "uv.lock"
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: windows build
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: write # 초안 Release를 만들고 파일을 붙이는 데만 쓴다
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      # Actions are pinned to a commit SHA: a tag can be moved, a commit cannot.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.5"
+
+      - name: Check tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path pyproject.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} != pyproject v$version" }
+
+      - name: Install dependencies
+        run: uv sync --locked --extra dev
+
+      # build.ps1은 라이선스 수집과, Python을 PATH에서 뺀 환경의 EXE 스모크 시험까지 한다.
+      - name: Build and smoke test
+        shell: powershell
+        run: ./scripts/build.ps1
+
+      - name: Zip and checksum
+        shell: pwsh
+        run: |
+          $tag = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "pr" }
+          $name = "Ureonggaksi-$tag-windows-x64"
+          # 파이썬 zipfile은 한글 파일 이름에 UTF-8 표시를 붙여 탐색기에서도 이름이 깨지지 않는다
+          .venv/Scripts/python.exe -c "import shutil, sys; shutil.make_archive(sys.argv[1], 'zip', 'dist', 'Ureonggaksi')" $name
+          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+          "ZIP=$name.zip" >> $env:GITHUB_ENV
+
+      - name: Create draft release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: gh release create "${{ github.ref_name }}" "$env:ZIP" "$env:ZIP.sha256" --draft --verify-tag --title "우렁각시 ${{ github.ref_name }}" --generate-notes
