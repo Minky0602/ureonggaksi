@@ -1231,8 +1231,11 @@ def test_a_column_put_off_for_later_is_never_filled(birth_setup, request_text):
         reader = reads({"생일": role, "신청인": "채움", "이수시간": "채움"})
         result = interpret(request_text, docs, view, ask_many=reader)
         assert "생일" not in {c for _, c, _ in result.fields}
-        if role == "채움":  # 갈린 생일만 비우고 확실한 짝은 모두 채운다(DIF-062)
-            assert result.conflicted == ("생일",)
+        if (
+            role == "채움"
+        ):  # 생일만 비우고 확실한 짝은 모두 채운다(DIF-062). 형태소로 미루기가 확정되면
+            # 갈림이 아니라 빼기로 정리된다(DIF-075)
+            assert (result.conflicted == ("생일",)) != ("생일" in result.skipped)
             assert {c for _, c, _ in result.fields} == {"신청인", "이수시간"}
     assert "생일" in result.skipped and result.conflicted == ()  # '무관'이면 빼라는 말로 정리된다
 
@@ -2451,12 +2454,14 @@ def test_a_deferred_name_is_skipped_even_when_the_model_answers_split(setup, tai
     assert "직급" not in columns and {"이름", "이수시간"} <= columns
 
 
-def test_a_deferred_name_the_model_twice_reads_as_fill_keeps_everything_off(setup):
-    """모델이 두 번 모두 '채움'이면 갈린 것이라 '전부'를 켜지 않는다(미루기 인정은 답이 엇갈릴 때만)."""
+def test_a_deferred_name_stays_skipped_even_when_the_model_twice_reads_it_as_fill(setup):
+    """DIF-075(J05): 형태소로 확정된 미루기는 모델이 두 번 모두 '채움'이라 해도 빼고 나머지를 채운다."""
     _, docs, view = setup
     request = "발급번호 기준으로 다 채워줘. 직급은 나중에 따로 정할게"
     result = interpret(request, docs, view, ask_many=_split_on("직급", "채움", "채움"))
-    assert "이수시간" not in {c for _, c, _ in result.fields}
+    columns = {c for _, c, _ in result.fields}
+    assert "직급" not in columns and "이수시간" in columns
+    assert "직급" not in result.conflicted and not result.questions
 
 
 def test_a_name_said_both_before_and_in_a_deferral_is_not_deferred(setup):
@@ -3022,3 +3027,24 @@ def test_everything_is_decided_by_code_when_no_word_is_unknown(setup):
     result = interpret("발급번호 기준으로 확인서에 있는 거 다 채워 줘", docs, view, ask_many=many)
     assert not any("[요청] 전부" in a for a in asked)
     assert {"이름", "직급"} <= {c for _, c, _ in result.fields}
+
+
+@pytest.mark.parametrize("slot", ["빈칸만", "칸을", "빈칸들"])
+def test_listed_names_with_their_blanks_are_not_pointing(setup, slot):
+    """DIF-075(W03): "이름이랑 이수시간 빈칸만 채워"는 두 이름의 빈칸을 채우라는 말이다(지목 아님)."""
+    _, docs, view = setup
+
+    def columns(text):
+        return {c for _, c, _ in interpret(text, docs, view, ask_many=everyone_fills).fields}
+
+    plain = columns("발급번호 기준으로 이름이랑 이수시간 채워줘")
+    assert plain and columns(f"발급번호 기준으로 이름이랑 이수시간 {slot} 채워줘") == plain
+
+
+def test_a_name_then_a_blank_slot_with_another_item_is_still_pointing(setup):
+    """'칸에' 뒤에 다른 항목이 오면 지금처럼 지목이라 짝을 정하지 않는다(DIF-050 H2)."""
+    _, docs, view = setup
+    result = interpret(
+        "발급번호 기준으로 이수시간 빈칸에 직급 채워줘", docs, view, ask_many=everyone_fills
+    )
+    assert not result.fields

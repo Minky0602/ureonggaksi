@@ -1057,7 +1057,9 @@ def interpret(
                 pointing_unclear = True  # 나열한 이름 가운데 어느 것을 넣을지 모른다
             previous = before_previous = None
             continue
-        if SLOT.match(after):
+        # "월세랑 보증금 빈칸만 채워", "A랑 B 칸을 채워": 칸 낱말에 '만·을·들'이 붙으면 그 이름들의 빈칸을
+        # 채우라는 말이지 다른 항목을 넣을 자리가 아니다(DIF-075 W03). '칸에'·맨 '칸'은 지금처럼 지목으로 본다
+        if SLOT.match(after) and not re.match(r"^의?(빈칸|칸|열|란|셀)(만|들|을|를)", after):
             slotted.append(position)  # "이용일 칸 비어 있으면 채워"는 그 칸을 채우라는 말이다
         if DIRECTION.match(after) or re.match(r"^(은|는)\x00", after):
             pointing_unclear = True
@@ -1181,13 +1183,11 @@ def interpret(
         unread = [*unread, *overflow]
         # 코드가 빼기로 읽은 이름(NEGATED)은 오탐이 있다("직급 그대로 다 옮겨", "참고해서"). 모델도 두 번 모두
         # 빼기로 읽었을 때만 '빼고 전부'로 본다(3차 검수 M-1)
-        # 형태소로 미루기가 확정된 이름("직무는 나중에 따로 정할게")은 모델 답이 엇갈려도 빼기로 인정한다. 비우는
-        # 쪽이라 틀려도 덜 채울 뿐이다. 모델이 두 번 모두 채움·키라고 했으면 갈린 것으로 둔다(DIF-069)
+        # 형태소로 미루기가 확정된 이름("직무는 나중에 따로 정할게")은 모델 답과 상관없이 빼기로 인정한다. 비우는
+        # 쪽이라 틀려도 덜 채울 뿐이다. 물음이 작아지자 4B가 두 번 모두 '채움'이라 답해 요청 전체가 질문이 됐다
+        # (DIF-069 → DIF-075 J05)
         deferred = _named_in(request, coded_skip, morph.deferred_spans(request))
-        skip_settled = all(
-            roles.get(n) in (SKIP_ROLE, "무관") or (n in deferred and n not in roles)
-            for n in coded_skip
-        )
+        skip_settled = all(roles.get(n) in (SKIP_ROLE, "무관") or n in deferred for n in coded_skip)
         settled_words += [
             *coded_skip,
             *skip_words,
@@ -1214,15 +1214,21 @@ def interpret(
                 ]
             )
         )
-        filled = {n for n, r in roles.items() if r == FILL_ROLE and n not in alias_skip} | set(
-            meant
-        )
+        filled = {
+            n
+            for n, r in roles.items()
+            if r == FILL_ROLE and n not in alias_skip and n not in deferred
+        } | set(meant)
         # 빼라는 말인지 갈린 이름(코드는 빼기, 모델은 아님 / 채우라고도 빼라고도 읽음)만 비워 두고 나머지는
         # 채운다. 전에는 하나만 갈려도 요청 전체를 물어 확실한 짝까지 버렸다(DIF-062, "애매한 칸은 비워 두고 소명")
         uncertain = list(
             dict.fromkeys(
                 [
-                    *(n for n in coded_skip if roles.get(n) not in (SKIP_ROLE, "무관")),
+                    *(
+                        n
+                        for n in coded_skip
+                        if roles.get(n) not in (SKIP_ROLE, "무관") and n not in deferred
+                    ),
                     *(n for n in skipped if n in filled),
                 ]
             )
