@@ -18,7 +18,12 @@ REQUEST = "발급번호 기준으로 신청인이랑 생일, 이수시간 채워
 
 def _without_python() -> dict[str, str]:
     """Python·uv·가상환경이 없는 PC처럼 보이는 환경. EXE가 몰래 시스템 Python에 기대면 여기서 드러난다."""
-    hidden = ("PYTHON", "VIRTUAL_ENV", "UV_")
+    hidden = (
+        "PYTHON",
+        "VIRTUAL_ENV",
+        "UV_",
+        "QT_QPA_PLATFORM",
+    )  # 화면은 실제 Windows 플러그인으로 띄운다
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith(hidden)}
     words = ("python", "/uv", "/.venv", "pipx")
     keep = [
@@ -50,7 +55,26 @@ def main(exe: str) -> int:
             print(done.stdout.decode("utf-8", "replace")[-2000:])
             print(done.stderr.decode("utf-8", "replace")[-2000:])
             return 1
-    print("smoke: prepare 통과")
+        print("smoke: prepare 통과")
+        # 사용자는 EXE를 두 번 눌러 화면으로 쓴다. 창을 실제로 띄워 캡처한 뒤 스스로 닫는지 본다
+        # (Qt 플랫폼 플러그인·글꼴 등 화면에만 필요한 파일이 빠지면 여기서 드러난다)
+        shot = work / "gui.png"
+        try:
+            gui = subprocess.run(
+                [exe, "--smoke-test", "--screenshot", shot],
+                capture_output=True,
+                timeout=120,
+                env=_without_python(),
+            )
+        except subprocess.TimeoutExpired:
+            subprocess.run(["taskkill", "/F", "/IM", Path(exe).name], capture_output=True)
+            print("smoke: 화면이 120초 안에 닫히지 않았습니다(오류 대화상자일 수 있음)")
+            return 1
+        if gui.returncode != 0 or not shot.is_file() or shot.stat().st_size == 0:
+            print(f"smoke: 화면 실행 실패(종료 코드 {gui.returncode})")
+            print(gui.stderr.decode("utf-8", "replace")[-2000:])
+            return 1
+        print(f"smoke: 화면 통과({shot.stat().st_size} bytes 캡처)")
     return 0
 
 

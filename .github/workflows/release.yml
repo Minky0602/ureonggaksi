@@ -8,6 +8,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/release.yml"
+      - "src/**" # 소스가 바뀌어 묶은 EXE가 깨지면 태그 전에 PR에서 드러나게
       - "scripts/build.ps1"
       - "scripts/smoke_exe.py"
       - "scripts/collect_licenses.py"
@@ -41,9 +42,11 @@ jobs:
       - name: Check tag matches package version
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }} # 태그 이름을 스크립트에 직접 펼치지 않는다(명령 주입 방지)
         run: |
           $version = (Select-String -Path pyproject.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
-          if ("v$version" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} != pyproject v$version" }
+          if ("v$version" -ne $env:TAG) { throw "tag $env:TAG != pyproject v$version" }
 
       - name: Install dependencies
         run: uv sync --locked --extra dev
@@ -55,18 +58,21 @@ jobs:
 
       - name: Zip and checksum
         shell: pwsh
+        env:
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'pr' }}
         run: |
-          $tag = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}" } else { "pr" }
+          $tag = $env:TAG
           $name = "Ureonggaksi-$tag-windows-x64"
           # 파이썬 zipfile은 한글 파일 이름에 UTF-8 표시를 붙여 탐색기에서도 이름이 깨지지 않는다
           .venv/Scripts/python.exe -c "import shutil, sys; shutil.make_archive(sys.argv[1], 'zip', 'dist', 'Ureonggaksi')" $name
           $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+          [IO.File]::WriteAllText("$PWD/$name.zip.sha256", "$hash  $name.zip`n")  # LF: sha256sum -c 호환
           "ZIP=$name.zip" >> $env:GITHUB_ENV
 
       - name: Create draft release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
         shell: pwsh
-        run: gh release create "${{ github.ref_name }}" "$env:ZIP" "$env:ZIP.sha256" --draft --verify-tag --title "우렁각시 ${{ github.ref_name }}" --generate-notes
+        run: gh release create $env:TAG $env:ZIP "$env:ZIP.sha256" --draft --verify-tag --title "우렁각시 $env:TAG" --generate-notes
