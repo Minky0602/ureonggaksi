@@ -102,3 +102,44 @@ def test_strip_unit_only_takes_a_number_with_that_unit():
 def test_a_bad_target_unit_is_a_caller_error():
     with pytest.raises(ValueError):
         normalize("1원", "money", target_unit="달러")
+
+
+@pytest.mark.parametrize(
+    ("header", "raw"),
+    [("비고(1)", "51"), ("비고(1)", "101"), ("구분(2차)", "12차"), ("점수(100)", "1100")],
+)
+def test_a_parenthesis_with_digits_is_not_a_unit(header, raw):
+    """검수 H: 숫자가 든 괄호를 단위로 읽으면 "51"이 5로 잘렸다."""
+    assert column_unit(header) == ""
+    assert strip_unit(raw, "1") is None
+
+
+def test_percent_stays_text():
+    """검수 M1: 백분율 서식 칸이면 5가 500%로 보인다. 글자로 둔다."""
+    assert strip_unit("5%", "%") is None
+
+
+def test_rounding_happens_once_in_the_column_unit():
+    """검수 M3: 4,350,499.5원을 원에서 먼저 반올림하면 4,350,500 → 4351이 된다. 정확한 값은 4350."""
+    result = normalize("4,350,499.5원", "money", target_unit="천원", rounding="half_up")
+    assert result.value.value == "4350"
+
+
+def test_existing_text_with_the_same_unit_is_unchanged(tmp_path):
+    """검수 M2: 기존 칸 글자 "4회"와 문서 "4회"는 숫자 4로 바꿔도 같은 값이다(대조에서 거짓 불일치 없음)."""
+    rows = [("성명", "가나다"), ("방문횟수", "4회")]
+    body = table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
+    source = write_hwpx(
+        tmp_path / "d.hwpx", [para("접수번호: R-1") + "<hp:p><hp:run>" + body + "</hp:run></hp:p>"]
+    )
+    sheet = [["접수번호", "방문횟수(회)"], ["R-1", "4회"]]
+    target = write_xlsx(tmp_path / "집계.xlsx", sheet, sheet="집계")
+    prepared = prepare(
+        "접수번호 기준으로 방문횟수가 맞는지 확인해줘",
+        [source],
+        target,
+        output_path=tmp_path / "o.xlsx",
+        ask_many=lambda p, f: {k: "채움" for k in f if k.startswith("[이름]")},
+    )
+    item = _items(prepared, "방문횟수")["R-1"]
+    assert item.status == "unchanged", item.reason_code

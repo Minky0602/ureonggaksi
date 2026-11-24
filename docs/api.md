@@ -238,8 +238,8 @@ def normalize(raw: str, value_type, *, unit="", default_unit="", rounding=None, 
     # 뒤의 "(금삼백오십만원)" 괄호 한글 금액과 끝의 "정"은 읽지 않고 넘긴다. 그 밖의 주석("(VAT 포함)", "(금액 미정)")은 거부.
     # target_unit(금액만): 원으로 읽은 뒤 열 단위로 나눠 CellValue(number, …, unit=target_unit)로 낸다(4,350,000원 →
     #   천원 4350, 근거 "단위 원→천원 ÷1,000(열 머리글)"). 나눈 값이 정수가 아니면 rounding을 그 단위에서 적용하고,
-    #   없으면 needs_rounding. 단위 없는 금액은 target_unit이 있어도 ambiguous_unit이다(열 단위로 간주하지 않는다).
-    # column_unit(header) -> str: 열 머리글 끝 괄호의 단위("피해추산액(천원)"→"천원", "금액(단위: 천원)"→"천원").
+    #   없으면 needs_rounding(반올림은 쓰는 단위에서 한 번만 한다). 단위 없는 금액은 target_unit이 있어도 ambiguous_unit이다(열 단위로 간주하지 않는다).
+    # column_unit(header) -> str: 열 머리글 끝 괄호의 단위("피해추산액(천원)"→"천원", "금액(단위: 천원)"→"천원"). 숫자가 든 괄호는 "".
     # strip_unit(raw, unit) -> Normalized | None: '숫자+그 단위'면 숫자("23.5㎡"→23.5), 아니면 None.
     # 원칙: 정보를 지어내야 읽을 수 있는 글자는 읽지 않는다
 
@@ -451,7 +451,8 @@ def analyze(inputs: Inputs, rule: RuleSet | WorkflowVersion, *, scope: Literal["
     #   ③ 변환: ambiguous_unit · parse_failed · needs_rounding  ④ 대상 행: no_target · multi_target(+target_candidates)
     #     변환 단위는 대상 열 머리글이 정한다(DIF-079·080, 규칙 형식은 그대로). 머리글 단위가 금액 단위면 값 종류가
     #     text라도 money로 읽어 열 단위로 환산한다(target_unit). 다른 단위면 '숫자+같은 단위'만 number로 바꾸고 나머지는
-    #     지금처럼 text다. 단위가 아닌 괄호('연락처(휴대폰)')는 영향이 없다. 비교(⑥)도 환산한 값으로 한다
+    #     지금처럼 text다. 숫자가 든 괄호('비고(1)', '구분(2차)')는 단위가 아니고, '%'는 셀 서식과 뜻이 엇갈려 글자로 둔다.
+    #     비교(⑥)는 환산한 값으로 하되, 기존 칸이 글자이고 문서 원문과 글자가 같으면("4회") 같은 값으로 본다
     #   ⑤ 막힌 칸: blocked_formula/merged/protected  ⑥ 작업 종류: existing_differs(fill) · mismatch/missing_in_sheet(check)
     #   ⑦ 같은 (키, 항목)을 노리는 레코드가 둘 이상: 제안값이 모두 같고 모두 읽혔으면 ChangeItem 하나에 evidence를 모아
     #     한 번 쓴다. 묶음 판정 순서(입력 순서와 무관): 읽힌 값이 하나도 없으면 ②③의 이유(여럿이면 missing_value ·

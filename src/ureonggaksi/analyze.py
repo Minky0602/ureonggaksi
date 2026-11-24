@@ -143,8 +143,14 @@ def _short_hash(parts: list[str]) -> str:
     return hashlib.sha256(canonical_json(parts).encode("utf-8")).hexdigest()[:16]
 
 
-def _same(a: CellValue | None, b: CellValue) -> bool:
-    return a is not None and (a.kind, a.value) == (b.kind, b.value)
+def _same(a: CellValue | None, b: CellValue, raws: tuple[str, ...] = ()) -> bool:
+    """같은 값인가. 기존 칸이 글자이고 문서 원문과 글자가 같으면 환산 전 값이 같은 것이다("4회" 칸과 문서 "4회"
+    → 숫자 4로 바꿨어도 일치, 검수 M2)."""
+    if a is None:
+        return False
+    if (a.kind, a.value) == (b.kind, b.value):
+        return True
+    return a.kind == "text" and any(a.value.strip() == r.strip() for r in raws if r)
 
 
 def _address_order(address: str | None) -> tuple:
@@ -403,14 +409,14 @@ def _merge(judged_list, ruleset, cells, column_index, names) -> list[ChangeItem]
             if ruleset.work_type == "fill":
                 if previous is None or previous.kind == "empty":
                     status, write_selected = "confirmed", True
-                elif _same(previous, proposed):
+                elif _same(previous, proposed, tuple(e.raw_text for e in evidence)):
                     status = "unchanged"
                 else:
                     reason_code = "existing_differs"
             else:
                 if previous is None or previous.kind == "empty":
                     reason_code = "missing_in_sheet"
-                elif _same(previous, proposed):
+                elif _same(previous, proposed, tuple(e.raw_text for e in evidence)):
                     status = "unchanged"
                 else:
                     reason_code = "mismatch"

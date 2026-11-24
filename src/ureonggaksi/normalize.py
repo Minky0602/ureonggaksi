@@ -140,14 +140,19 @@ def column_unit(header: str) -> str:
     """열 머리글 끝 괄호의 단위("피해추산액(천원)" → "천원", "면적(㎡)" → "㎡"). 괄호가 없으면 "".
     "단위: 천원"·"단위 천원"도 받는다. 금액 단위인지는 호출자가 UNITS로 본다."""
     match = re.search(r"[(（]\s*(?:단위\s*[:：]?\s*)?([^()（）]+?)\s*[)）]\s*$", header or "")
-    return match.group(1).replace(" ", "") if match else ""
+    unit = match.group(1).replace(" ", "") if match else ""
+    # 숫자가 든 괄호('비고(1)', '구분(2차)', '점수(100)')는 단위가 아니다. 단위로 읽으면 "51"이 5로 잘렸다(검수 H)
+    return "" if re.search(r"\d", unit) else unit
 
 
 def strip_unit(raw: str, unit: str) -> Normalized | None:
     """금액이 아닌 단위 열: 문서 값이 '숫자+그 단위'면 숫자로("23.5㎡" → 23.5). 아니면 None(손대지 않음)."""
     text = (raw or "").translate(_FULLWIDTH).strip()
+    # '%'는 셀 서식(백분율)과 값 뜻이 엇갈려 글자로 둔다(검수 M1). 숫자가 든 단위는 column_unit이 이미 뺀다
+    if not unit or unit == "%" or re.search(r"\d", unit):
+        return None
     match = re.fullmatch(rf"(?P<digits>{_DIGITS})\s*{re.escape(unit)}", text)
-    if not unit or not match:
+    if not match:
         return None
     with localcontext() as context:
         context.prec = DECIMAL_PRECISION
@@ -180,7 +185,10 @@ def _money(
     amount = number * factor
     if factor != 1:
         transforms.append(f"단위 {found}→원 ×{factor:,.0f}({source})")
-    if amount != amount.to_integral_value():
+    scaled_later = bool(target_unit) and target_unit != "원"
+    if (
+        amount != amount.to_integral_value() and not scaled_later
+    ):  # 반올림은 쓰는 단위에서 한 번만(검수 M3)
         if rounding is None:
             return Normalized(None, "needs_rounding", tuple(transforms))
         amount = amount.quantize(Decimal(1), rounding=ROUNDING_MODES[rounding])
