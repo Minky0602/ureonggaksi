@@ -65,9 +65,18 @@ sudo apt-get install -y --no-install-recommends libgl1 libegl1 libxkbcommon0 lib
 ./scripts/build.ps1
 ```
 
-`dist/Ureonggaksi/` 폴더가 만들어진다. `Ureonggaksi.exe`를 실행하며 폴더 전체가 필요하다. Python이 없는 PC에서의 실행은 아직 검증하지 않았다. 실행할 때마다 라이브러리를 임시 폴더에 푸는 onefile 방식 대신 onedir 방식을 쓴다. 관리자 권한, 한글이나 Excel 설치, 계정은 필요 없다.
+`dist/Ureonggaksi/` 폴더가 만들어진다. `Ureonggaksi.exe`를 실행하며 폴더 전체가 필요하다. 빌드 마지막에 PATH에서 Python·uv를 뺀 환경으로 EXE를 실행해 합성 요청을 처리하는지 본다(`scripts/smoke_exe.py`). 실행할 때마다 라이브러리를 임시 폴더에 푸는 onefile 방식 대신 onedir 방식을 쓴다. 관리자 권한, 한글이나 Excel 설치, 계정은 필요 없다.
 
 인터넷이 없는 다른 개발 PC로 옮길 때는 같은 Windows·Python 구성에서 `requirements.lock.txt`에 맞는 wheel을 미리 받아 `pip install --no-deps --no-index --find-links <폴더> -r requirements.lock.txt`로 설치하거나(`--no-deps` 필수: kiwipiepy가 선언한 numpy는 쓰지 않아 uv 설정으로 뺐는데, pip는 그 설정을 모른다), 완성된 `dist` 폴더를 쓴다. `.venv` 폴더를 그대로 복사하지 않는다.
+
+## 릴리스
+
+1. `pyproject.toml`의 `version`을 올리고 PR로 병합한다.
+2. main에서 `git tag v<버전>` 후 태그를 push한다.
+3. `Release` 워크플로가 깨끗한 Windows 러너에서 빌드·스모크 시험을 하고 zip과 SHA256을 붙인 **초안** Release를 만든다. 태그와 패키지 버전이 다르면 실패한다.
+4. 초안의 노트와 파일을 확인한 뒤 GitHub에서 공개한다.
+
+배포 파일(`scripts/build.ps1`, `packaging/` 등)을 바꾼 PR에서도 같은 워크플로가 빌드·스모크 시험까지 돈다.
 
 ## 참고한 1차 자료
 
