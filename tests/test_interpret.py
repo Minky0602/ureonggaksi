@@ -1235,7 +1235,10 @@ def test_a_column_put_off_for_later_is_never_filled(birth_setup, request_text):
             role == "채움"
         ):  # 생일만 비우고 확실한 짝은 모두 채운다(DIF-062). 형태소로 미루기가 확정되면
             # 갈림이 아니라 빼기로 정리된다(DIF-075)
-            assert (result.conflicted == ("생일",)) != ("생일" in result.skipped)
+            if _named_in(request_text, ["생일"], morph.deferred_spans(request_text)):
+                assert "생일" in result.skipped and result.conflicted == ()
+            else:
+                assert result.conflicted == ("생일",)
             assert {c for _, c, _ in result.fields} == {"신청인", "이수시간"}
     assert "생일" in result.skipped and result.conflicted == ()  # '무관'이면 빼라는 말로 정리된다
 
@@ -3048,3 +3051,58 @@ def test_a_name_then_a_blank_slot_with_another_item_is_still_pointing(setup):
         "발급번호 기준으로 이수시간 빈칸에 직급 채워줘", docs, view, ask_many=everyone_fills
     )
     assert not result.fields
+
+
+@pytest.mark.parametrize("slot", ["빈칸을", "빈칸만", "칸을"])
+def test_a_blank_slot_followed_by_another_item_is_still_pointing(setup, slot):
+    """검수 r1 H: "비고 빈칸을 이수시간 채워"는 비고 자리에 이수시간을 넣으라는 지목일 수 있어 확정하지 않는다."""
+    _, docs, view = setup
+    result = interpret(
+        f"발급번호 기준으로 비고 {slot} 이수시간 채워줘", docs, view, ask_many=everyone_fills
+    )
+    assert not result.fields
+
+
+def test_a_column_named_like_a_frame_word_is_still_a_name(tmp_path):
+    """검수 r1 M1: '내용'이 자리 낱말이 됐어도 이름이 정확히 '내용'인 열은 그 열이다."""
+    docs = [_kv([("접수번호", f"R-{i}"), ("내용", c)]) for i, c in enumerate(["소음", "주차"], 1)]
+    sheet = [["접수번호", "내용"], ["R-1", None], ["R-2", None]]
+    _, docs, view = build(tmp_path, docs, sheet, "대장")
+    result = interpret("접수번호 기준으로 내용 채워줘", docs, view)
+    assert ("내용", "내용", "match") in result.fields
+
+
+def test_a_hedged_everything_is_asked_to_the_model(setup):
+    """검수 r1 M2: "거의 다"·"대충 다"는 코드가 '전부'를 정하지 않고 모델에 묻는다."""
+    _, docs, view = setup
+    for hedge in ("거의", "대충"):
+        asked = []
+
+        def many(prompt, fields, asked=asked):
+            asked.append(list(fields))
+            out = everyone_fills(prompt, fields)
+            if "[요청] 전부" in fields:
+                out["[요청] 전부"] = "아니오"
+            return out
+
+        result = interpret(f"발급번호 기준으로 {hedge} 다 채워줘", docs, view, ask_many=many)
+        assert any("[요청] 전부" in a for a in asked) and not result.fields
+
+
+def test_a_unit_must_follow_a_number(tmp_path):
+    """검수 r1 L: '500천원'은 (원), '3km'는 (m)으로 끝나도 그 단위가 아니다."""
+    docs = [
+        _kv([("접수번호", f"R-{i}"), ("거리", a), ("보증금", b)])
+        for i, (a, b) in enumerate([("3km", "500천원"), ("2km", "300천원")], 1)
+    ]
+    sheet = [["접수번호", "거리(m)", "보증금(원)"], ["R-1", None, None], ["R-2", None, None]]
+    _, docs, view = build(tmp_path, docs, sheet, "대장")
+    result = interpret(
+        "접수번호 기준으로 거리랑 보증금 채워줘", docs, view, ask_many=everyone_fills
+    )
+    assert not result.fields
+
+
+def test_an_already_arranged_value_is_not_a_deferral():
+    """'나중에 정리된 값'은 미루기가 아니다(검수 r1 L)."""
+    assert not _said_to_skip("직급은 나중에 정리된 값 보고 넣어", "직급")
