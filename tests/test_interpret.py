@@ -3008,11 +3008,16 @@ def _units_case(tmp_path, area, amount):
 
 
 def test_a_unit_column_pairs_only_when_document_values_carry_that_unit(tmp_path):
-    """DIF-074: '23.5㎡' → 피해면적(㎡)은 짝, '4,350,000원' → 피해액(천원)은 단위가 달라 짝이 아니다."""
+    """DIF-074: '23.5㎡' → 피해면적(㎡)은 짝. 금액은 쓸 때 열 단위로 환산하므로 '4,350,000원'도 피해액(천원)과
+    잇는다(DIF-080, 전에는 단위가 달라 짝이 아니었다). 면적 '23.5m'처럼 다른 단위는 여전히 짝이 아니다."""
     _, docs, view = _units_case(tmp_path, ["23.5㎡", "41㎡"], ["4,350,000원", "12,800,000원"])
     result = interpret("접수번호 기준으로 피해면적이랑 피해액 채워줘", docs, view)
     assert ("피해면적", "피해면적(㎡)", "assumed") in result.fields
-    assert "피해액(천원)" not in {c for _, c, _ in result.fields}
+    assert ("피해액", "피해액(천원)", "assumed") in result.fields
+    (tmp_path / "m").mkdir()
+    _, docs, view = _units_case(tmp_path / "m", ["23.5m", "41m"], ["4,350,000원", "12,800,000원"])
+    result = interpret("접수번호 기준으로 피해면적 채워줘", docs, view)
+    assert "피해면적(㎡)" not in {c for _, c, _ in result.fields}
 
 
 def test_everything_is_decided_by_code_when_no_word_is_unknown(setup):
@@ -3090,7 +3095,8 @@ def test_a_hedged_everything_is_asked_to_the_model(setup):
 
 
 def test_a_unit_must_follow_a_number(tmp_path):
-    """검수 r1 L: '500천원'은 (원), '3km'는 (m)으로 끝나도 그 단위가 아니다."""
+    """검수 r1 L: '3km'는 (m)으로 끝나도 그 단위가 아니다. 금액은 쓸 때 환산하므로 '500천원'은 보증금(원)과
+    잇는다(DIF-080)."""
     docs = [
         _kv([("접수번호", f"R-{i}"), ("거리", a), ("보증금", b)])
         for i, (a, b) in enumerate([("3km", "500천원"), ("2km", "300천원")], 1)
@@ -3100,7 +3106,8 @@ def test_a_unit_must_follow_a_number(tmp_path):
     result = interpret(
         "접수번호 기준으로 거리랑 보증금 채워줘", docs, view, ask_many=everyone_fills
     )
-    assert not result.fields
+    columns = {c for _, c, _ in result.fields}
+    assert "거리(m)" not in columns and "보증금(원)" in columns
 
 
 def test_an_already_arranged_value_is_not_a_deferral():
@@ -3143,3 +3150,20 @@ def test_a_model_pick_into_a_synonym_column_does_not_drop_the_synonym_pair(setup
     )
     columns = [c for _, c, _ in result.fields]
     assert ("성명", "이름", "synonym") in result.fields and columns.count("이름") == 1
+
+
+@pytest.mark.parametrize(
+    ("samples", "paired"),
+    [
+        (["1,000만원", "500만원", "3000000"], True),  # 단위 없는 값은 그 칸만 비운다
+        (["3000000", "5000000"], False),  # 단위가 적힌 값이 하나도 없다
+        (["1,000만원", "미정"], False),  # 금액으로 못 읽는 값이 있다
+    ],
+)
+def test_a_money_column_with_another_unit_pairs_when_values_carry_units(tmp_path, samples, paired):
+    """DIF-080: 이름이 같고 금액 단위만 다른 열은 금액으로 읽히는 값이면 잇는다(쓸 때 열 단위로 환산)."""
+    docs = [_kv([("관리번호", f"M-{i}"), ("보증금", v)]) for i, v in enumerate(samples, 1)]
+    sheet = [["관리번호", "보증금(만원)"], *[[f"M-{i}", None] for i in range(1, len(samples) + 1)]]
+    _, docs, view = build(tmp_path, docs, sheet, "대장")
+    result = interpret("관리번호 기준으로 보증금 채워줘", docs, view, ask_many=everyone_fills)
+    assert (("보증금", "보증금(만원)", "assumed") in result.fields) is paired

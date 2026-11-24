@@ -15,7 +15,7 @@ from .errors import Pairs, ServiceError
 from .inputs import Inputs, inspect_source
 from .manual import ManualItem, action_of, describe, kind_of, sort_key
 from .models import CellValue
-from .normalize import normalize
+from .normalize import UNITS, column_unit, normalize, strip_unit
 from .patch import unsupported_writes
 from .records import Record, extract_records
 from .rules import RuleSet, WorkflowVersion, canonical_json, rule_hash, validate_rule
@@ -283,14 +283,23 @@ def _judge(record, field_name, ruleset, rows_by_key, cells, key_letter) -> _Judg
     field_rule = ruleset.field(field_name)
     value = record.value(field_name)
     raw = value.raw_text if value and value.status == "ok" else ""
+    # 열 머리글이 단위를 말하면 그 단위의 숫자로 쓴다(DIF-079). 금액 단위면 원으로 읽어 열 단위로 나누고,
+    # 다른 단위(㎡·회)는 '숫자+같은 단위'일 때만 숫자로 바꾼다. 단위 없는 괄호('연락처(휴대폰)')는 그대로다
+    target_unit = column_unit(field_rule.target_column)
+    value_type = field_rule.value_type
+    if target_unit in UNITS and value_type in ("text", "money"):
+        value_type = "money"
     normalized = normalize(
         raw,
-        field_rule.value_type,
+        value_type,
         unit=field_rule.unit,
         default_unit=ruleset.policy_value("default_unit"),
         rounding=ruleset.policy_value("rounding") or None,
         date_order=ruleset.policy_value("date_order") or None,
+        target_unit=target_unit if value_type == "money" and target_unit in UNITS else "",
     )
+    if value_type == "text" and target_unit and target_unit not in UNITS:
+        normalized = strip_unit(raw, target_unit) or normalized
     proposed = normalized.value if normalized.value is not None else CellValue()
     location = value.location if value else ""
     evidence = Evidence(

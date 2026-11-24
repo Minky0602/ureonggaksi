@@ -23,6 +23,7 @@ from . import morph
 from .errors import ServiceError
 from .extract import _normalized as normalized_label
 from .models import Block, Document
+from .normalize import UNITS, column_unit, normalize
 from .rules import FieldRule, RecordRule, RuleSet, TargetRule
 from .synonyms import GROUPS
 from .xlsx import TargetView
@@ -187,9 +188,9 @@ def _synonym(name: str, pool: tuple[str, ...]) -> str | None:
 
 
 def _unit_twin(field, pool) -> str | None:
-    """단위 없는 문서 항목과 이름이 같고 단위만 붙은 열이 하나뿐이며, 문서 값이 모두 그 단위로 끝나면 그 열
-    ('피해면적' 23.5㎡ → 피해면적(㎡), '보증금' 20,000원 → 보증금(원)). 값의 단위가 다르면(4,350,000원 →
-    (천원)) 잇지 않는다(DIF-074)."""
+    """단위 없는 문서 항목과 이름이 같고 단위만 붙은 열이 하나뿐이면 그 열. 금액 단위 열은 금액으로 읽히는 값이면
+    단위가 달라도 잇는다(쓸 때 환산, DIF-080). 다른 단위 열은 문서 값이 모두 '숫자+그 단위'일 때만 잇는다
+    ('피해면적' 23.5㎡ → 피해면적(㎡); '3km' → 거리(m)는 아님, DIF-074)."""
     if _unit(field.name):
         return None
     found = [c for c in pool if _norm(c) == _norm(field.name) and _unit(c)]
@@ -197,6 +198,14 @@ def _unit_twin(field, pool) -> str | None:
         return None
     unit = "".join(a or b for a, b in re.findall(r"\(([^)]*)\)|（([^）]*)）", found[0])).strip()
     samples = [re.sub(r"\s", "", s) for s in field.samples if s and s.strip()]
+    money_unit = column_unit(found[0])
+    if money_unit in UNITS and samples:
+        # 금액 열은 쓸 때 열 단위로 환산한다(DIF-080). 모든 값이 금액으로 읽히고(단위 없는 값은 그 칸만 비운다)
+        # 단위가 적힌 값이 하나 이상이면 짝이다('보증금' 1,000만원 → 보증금(만원), 500천원 → 보증금(원))
+        read = [normalize(s, "money").reason_code for s in samples]
+        if all(r in ("", "ambiguous_unit") for r in read) and "" in read:
+            return found[0]
+        return None
     tail = re.compile(
         rf"\d[\d.,]*{re.escape(unit)}$"
     )  # '500천원'은 (원), '3km'는 (m)이 아니다(검수 r1 L)

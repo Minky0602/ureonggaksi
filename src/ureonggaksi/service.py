@@ -22,12 +22,12 @@ QUESTION_RATIO = 0.30  # 공통 문제 질문 기준(api 2.0). Q01 정답셋으�
 # 답 하나로 정해지는 공통 문제(PRD 6.2). 날짜 순서는 읽기 실패와 같은 코드라 아직 따로 묻지 못한다
 POLICY_SLOTS = {"ambiguous_unit": "default_unit", "needs_rounding": "rounding"}
 POLICY_CHOICES = {
-    "default_unit": ("원", "천원", "백만원"),
+    "default_unit": ("원", "천원", "만원", "백만원"),
     "rounding": ("down", "up", "half_up"),
 }
 POLICY_TEXT = {
     "default_unit": "금액에 단위가 없는 값이 많습니다. 어떤 단위로 읽을까요?",
-    "rounding": "원 단위로 바꾸면 소수가 생기는 값이 많습니다. 어떻게 처리할까요?",
+    "rounding": "금액 단위를 바꾸면 소수가 생기는 값이 많습니다. 어떻게 처리할까요?",
 }
 AI_ERRORS = {"AI_UNAVAILABLE", "AI_TIMEOUT", "AI_BAD_OUTPUT"}
 
