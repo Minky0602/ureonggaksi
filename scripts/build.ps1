@@ -1,4 +1,6 @@
 ﻿$ErrorActionPreference = 'Stop'
+# 빌드 도구 스크립트가 한글 경로를 출력해도 영문 Windows 콘솔(cp1252)에서 멈추지 않게 한다. EXE 스모크 시험은 이 변수를 뺀다
+$env:PYTHONUTF8 = '1'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $pythonPath = Join-Path $projectRoot '.venv/Scripts/python.exe'
 Push-Location $projectRoot
