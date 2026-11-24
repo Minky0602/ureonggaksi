@@ -5,7 +5,21 @@ from pathlib import Path
 from .offline import install_network_guard
 
 
+def _utf8_output() -> None:
+    """출력 인코딩이 한글을 못 쓰면(영문 Windows의 cp1252) UTF-8로 바꾼다. 그대로 두면 한글 메시지를 내다
+    UnicodeEncodeError로 끝났다. 한글을 쓸 수 있는 cp949·UTF-8은 그대로 둔다. 창 모드 EXE처럼 출력이
+    없으면(None) 건드리지 않는다."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            "한글".encode(stream.encoding or "ascii")
+        except (UnicodeEncodeError, LookupError):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv=None):
+    _utf8_output()
     install_network_guard()
     parser = argparse.ArgumentParser(description="우렁각시 - 오프라인 HWPX 취합")
     sub = parser.add_subparsers(dest="command")

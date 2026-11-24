@@ -57,6 +57,17 @@ def test_help_survives_korean_windows_pipe():
         assert expected in result.stdout
 
 
+def test_korean_output_survives_an_english_windows_pipe():
+    """영문 Windows 콘솔(cp1252)에서도 한글 도움말을 내다 끝나지 않는다(릴리스 CI에서 발견). UTF-8로 바꿔 낸다."""
+    result = subprocess.run(
+        [sys.executable, "-m", "ureonggaksi", "--help"],
+        capture_output=True,
+        env={**os.environ, "PYTHONIOENCODING": "cp1252"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "우렁각시" in result.stdout.decode("utf-8")
+
+
 def _cli(*args):
     return subprocess.run(
         [sys.executable, "-m", "ureonggaksi", *map(str, args)],
