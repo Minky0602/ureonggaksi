@@ -1231,8 +1231,14 @@ def test_a_column_put_off_for_later_is_never_filled(birth_setup, request_text):
         reader = reads({"생일": role, "신청인": "채움", "이수시간": "채움"})
         result = interpret(request_text, docs, view, ask_many=reader)
         assert "생일" not in {c for _, c, _ in result.fields}
-        if role == "채움":  # 갈린 생일만 비우고 확실한 짝은 모두 채운다(DIF-062)
-            assert result.conflicted == ("생일",)
+        if (
+            role == "채움"
+        ):  # 생일만 비우고 확실한 짝은 모두 채운다(DIF-062). 형태소로 미루기가 확정되면
+            # 갈림이 아니라 빼기로 정리된다(DIF-075)
+            if _named_in(request_text, ["생일"], morph.deferred_spans(request_text)):
+                assert "생일" in result.skipped and result.conflicted == ()
+            else:
+                assert result.conflicted == ("생일",)
             assert {c for _, c, _ in result.fields} == {"신청인", "이수시간"}
     assert "생일" in result.skipped and result.conflicted == ()  # '무관'이면 빼라는 말로 정리된다
 
@@ -1989,7 +1995,7 @@ def test_fill_everything_needs_both_model_answers(setup):
             out["[요청] 전부"] = next(turns)
         return out
 
-    result = interpret("발급번호 기준으로 문서 내용 다 채워주실래요", docs, view, ask_many=split)
+    result = interpret("발급번호 기준으로 문서 사항 다 채워주실래요", docs, view, ask_many=split)
     assert not {"직급", "점수"} & {c for _, c, _ in result.fields}
 
 
@@ -2446,17 +2452,19 @@ def test_a_deferred_name_is_skipped_even_when_the_model_answers_split(setup, tai
     """DIF-069(J05): 형태소로 미루기가 확정된 이름은 모델 두 답이 엇갈려도 빼고 전부 채운다."""
     _, docs, view = setup
     request = f"발급번호 기준으로 다 채워줘. {tail}"
-    result = interpret(request, docs, view, ask_many=_split_on("직급", "채움", "무관"))
+    result = interpret(request, docs, view, ask_many=_split_by_call("직급", "채움", "무관"))
     columns = {c for _, c, _ in result.fields}
     assert "직급" not in columns and {"이름", "이수시간"} <= columns
 
 
-def test_a_deferred_name_the_model_twice_reads_as_fill_keeps_everything_off(setup):
-    """모델이 두 번 모두 '채움'이면 갈린 것이라 '전부'를 켜지 않는다(미루기 인정은 답이 엇갈릴 때만)."""
+def test_a_deferred_name_stays_skipped_even_when_the_model_twice_reads_it_as_fill(setup):
+    """DIF-075(J05): 형태소로 확정된 미루기는 모델이 두 번 모두 '채움'이라 해도 빼고 나머지를 채운다."""
     _, docs, view = setup
     request = "발급번호 기준으로 다 채워줘. 직급은 나중에 따로 정할게"
     result = interpret(request, docs, view, ask_many=_split_on("직급", "채움", "채움"))
-    assert "이수시간" not in {c for _, c, _ in result.fields}
+    columns = {c for _, c, _ in result.fields}
+    assert "직급" not in columns and "이수시간" in columns
+    assert "직급" not in result.conflicted and not result.questions
 
 
 def test_a_name_said_both_before_and_in_a_deferral_is_not_deferred(setup):
@@ -2942,3 +2950,196 @@ def test_a_value_equal_to_one_header_keeps_the_roster(tmp_path, with_supervisor)
     }
     assert "현장 총괄" not in values
     assert {"제초 작업", "하천 정비", "도로 청소"} <= values
+
+
+@pytest.mark.parametrize(
+    ("request_text", "work"),
+    [
+        ("신청서에 적어 낸 식구 수가 대장이랑 다른지 봐 줘", "check"),  # '적어 낸'은 꾸미는 말
+        ("빌려 간 물건이 대장에 적혀 있는지 봐 주세요", "check"),
+        ("안 채운 칸 채워 줘", "fill"),
+    ],
+)
+def test_work_type_ignores_fill_verbs_that_only_describe(request_text, work):
+    """DIF-074: 채우기 동사가 관형형으로 명사를 꾸미면 일을 시키는 말이 아니다. '봐 주세요'는 검토다."""
+    from ureonggaksi.interpret import _work_type
+
+    assert _work_type(request_text) == work
+
+
+@pytest.mark.parametrize(
+    ("request_text", "key"),
+    [
+        ("발급번호로 이수시간 채워 줘", "발급번호"),  # '로' 바로 뒤에 다른 항목 이름
+        ("발급번호 맞춰서 이수시간 채워 줘", "발급번호"),  # 조사 없이 '맞춰'
+    ],
+)
+def test_more_key_phrases(setup, request_text, key):
+    _, docs, view = setup
+    result = interpret(request_text, docs, view)
+    assert result.key is not None and result.key[1] == key
+
+
+def test_a_name_then_ro_then_a_verb_is_still_not_a_key(setup):
+    """PR #18 6차 H1 유지: '비고를 이름으로 채워줘'의 '이름으로'는 키가 아니다."""
+    _, docs, view = setup
+    result = interpret("비고를 이름으로 채워줘", docs, view)
+    assert result.key is None or result.key[1] != "이름"
+
+
+@pytest.mark.parametrize("tail", ["직급은 다음에 정리할게", "직급은 그냥 둬"])
+def test_more_skip_phrases(tail):
+    request = f"발급번호 기준으로 다 채워줘. {tail}"
+    assert _negated(_mentions(request, ["직급"])) == {"직급"}
+
+
+def test_ledger_words_are_not_unknown_words():
+    """DIF-074: '대장·보고서·집계표·내용'은 자리·자료를 가리키는 말이라 모델에 묻지 않는다."""
+    assert _unknown_words("접수번호로 맞춰서 보고서 내용 대장에 다 채워 줘", ["접수번호"]) == []
+
+
+def _units_case(tmp_path, area, amount):
+    docs = [
+        _kv([("접수번호", f"R-{i}"), ("피해면적", a), ("피해액", m)])
+        for i, (a, m) in enumerate(zip(area, amount, strict=True), 1)
+    ]
+    sheet = [["접수번호", "피해면적(㎡)", "피해액(천원)"], ["R-1", None, None], ["R-2", None, None]]
+    return build(tmp_path, docs, sheet, "대장")
+
+
+def test_a_unit_column_pairs_only_when_document_values_carry_that_unit(tmp_path):
+    """DIF-074: '23.5㎡' → 피해면적(㎡)은 짝, '4,350,000원' → 피해액(천원)은 단위가 달라 짝이 아니다."""
+    _, docs, view = _units_case(tmp_path, ["23.5㎡", "41㎡"], ["4,350,000원", "12,800,000원"])
+    result = interpret("접수번호 기준으로 피해면적이랑 피해액 채워줘", docs, view)
+    assert ("피해면적", "피해면적(㎡)", "assumed") in result.fields
+    assert "피해액(천원)" not in {c for _, c, _ in result.fields}
+
+
+def test_everything_is_decided_by_code_when_no_word_is_unknown(setup):
+    """계약: 모르는 말이 없으면 '전부'는 코드가 정한다. 모델이 '아니오'라 해도 묻지 않는다."""
+    _, docs, view = setup
+    asked = []
+
+    def many(prompt, fields):
+        asked.append(list(fields))
+        out = fooled(prompt, fields)
+        if "[요청] 전부" in fields:
+            out["[요청] 전부"] = "아니오"
+        return out
+
+    result = interpret("발급번호 기준으로 확인서에 있는 거 다 채워 줘", docs, view, ask_many=many)
+    assert not any("[요청] 전부" in a for a in asked)
+    assert {"이름", "직급"} <= {c for _, c, _ in result.fields}
+
+
+@pytest.mark.parametrize("slot", ["빈칸만", "칸을", "빈칸들"])
+def test_listed_names_with_their_blanks_are_not_pointing(setup, slot):
+    """DIF-075(W03): "이름이랑 이수시간 빈칸만 채워"는 두 이름의 빈칸을 채우라는 말이다(지목 아님)."""
+    _, docs, view = setup
+
+    def columns(text):
+        return {c for _, c, _ in interpret(text, docs, view, ask_many=everyone_fills).fields}
+
+    plain = columns("발급번호 기준으로 이름이랑 이수시간 채워줘")
+    assert plain and columns(f"발급번호 기준으로 이름이랑 이수시간 {slot} 채워줘") == plain
+
+
+def test_a_name_then_a_blank_slot_with_another_item_is_still_pointing(setup):
+    """'칸에' 뒤에 다른 항목이 오면 지금처럼 지목이라 짝을 정하지 않는다(DIF-050 H2)."""
+    _, docs, view = setup
+    result = interpret(
+        "발급번호 기준으로 이수시간 빈칸에 직급 채워줘", docs, view, ask_many=everyone_fills
+    )
+    assert not result.fields
+
+
+@pytest.mark.parametrize("slot", ["빈칸을", "빈칸만", "칸을"])
+def test_a_blank_slot_followed_by_another_item_is_still_pointing(setup, slot):
+    """검수 r1 H: "비고 빈칸을 이수시간 채워"는 비고 자리에 이수시간을 넣으라는 지목일 수 있어 확정하지 않는다."""
+    _, docs, view = setup
+    result = interpret(
+        f"발급번호 기준으로 비고 {slot} 이수시간 채워줘", docs, view, ask_many=everyone_fills
+    )
+    assert not result.fields
+
+
+def test_a_column_named_like_a_frame_word_is_still_a_name(tmp_path):
+    """검수 r1 M1: '내용'이 자리 낱말이 됐어도 이름이 정확히 '내용'인 열은 그 열이다."""
+    docs = [_kv([("접수번호", f"R-{i}"), ("내용", c)]) for i, c in enumerate(["소음", "주차"], 1)]
+    sheet = [["접수번호", "내용"], ["R-1", None], ["R-2", None]]
+    _, docs, view = build(tmp_path, docs, sheet, "대장")
+    result = interpret("접수번호 기준으로 내용 채워줘", docs, view)
+    assert ("내용", "내용", "match") in result.fields
+
+
+def test_a_hedged_everything_is_asked_to_the_model(setup):
+    """검수 r1 M2: "거의 다"·"대충 다"는 코드가 '전부'를 정하지 않고 모델에 묻는다."""
+    _, docs, view = setup
+    for hedge in ("거의", "대충"):
+        asked = []
+
+        def many(prompt, fields, asked=asked):
+            asked.append(list(fields))
+            out = everyone_fills(prompt, fields)
+            if "[요청] 전부" in fields:
+                out["[요청] 전부"] = "아니오"
+            return out
+
+        result = interpret(f"발급번호 기준으로 {hedge} 다 채워줘", docs, view, ask_many=many)
+        assert any("[요청] 전부" in a for a in asked) and not result.fields
+
+
+def test_a_unit_must_follow_a_number(tmp_path):
+    """검수 r1 L: '500천원'은 (원), '3km'는 (m)으로 끝나도 그 단위가 아니다."""
+    docs = [
+        _kv([("접수번호", f"R-{i}"), ("거리", a), ("보증금", b)])
+        for i, (a, b) in enumerate([("3km", "500천원"), ("2km", "300천원")], 1)
+    ]
+    sheet = [["접수번호", "거리(m)", "보증금(원)"], ["R-1", None, None], ["R-2", None, None]]
+    _, docs, view = build(tmp_path, docs, sheet, "대장")
+    result = interpret(
+        "접수번호 기준으로 거리랑 보증금 채워줘", docs, view, ask_many=everyone_fills
+    )
+    assert not result.fields
+
+
+def test_an_already_arranged_value_is_not_a_deferral():
+    """'나중에 정리된 값'은 미루기가 아니다(검수 r1 L)."""
+    assert not _said_to_skip("직급은 나중에 정리된 값 보고 넣어", "직급")
+
+
+def test_a_column_named_like_the_key_word_keeps_the_key(tmp_path):
+    """검수 r2 M: 열 이름이 '기준'이어도 "접수번호 기준으로"의 '기준'은 키 표현이다."""
+    docs = [_kv([("접수번호", f"R-{i}"), ("성명", n)]) for i, n in enumerate(["가", "나"], 1)]
+    sheet = [["접수번호", "성명", "기준"], ["R-1", None, None], ["R-2", None, None]]
+    _, docs, view = build(tmp_path, docs, sheet, "대장")
+    result = interpret("접수번호 기준으로 성명 채워줘", docs, view)
+    assert result.key == ("접수번호", "접수번호") and ("성명", "성명", "match") in result.fields
+
+
+@pytest.mark.parametrize("word", ["일단", "싹", "그냥"])
+def test_an_adverb_that_does_not_shrink_everything_lets_code_decide(setup, word):
+    """검수 r2 M: '일단·싹·그냥 다'는 양을 줄이지 않아 코드가 '전부'를 정한다."""
+    _, docs, view = setup
+    asked = []
+
+    def many(prompt, fields):
+        asked.append(list(fields))
+        return everyone_fills(prompt, fields)
+
+    interpret(f"발급번호 기준으로 {word} 다 채워줘", docs, view, ask_many=many)
+    assert not any("[요청] 전부" in a for a in asked)
+
+
+def test_a_model_pick_into_a_synonym_column_does_not_drop_the_synonym_pair(setup):
+    """DIF-077(W03): 모델이 다른 항목을 동의어 짝의 열로 고르면 모델 짝만 버리고 동의어 짝은 남긴다."""
+    _, docs, view = setup
+
+    def wrong(prompt, options):  # 어떤 항목이든 '이름' 열로 고르는 모델
+        return "이름" if "이름" in options else "없음"
+
+    result = interpret(
+        "발급번호 기준으로 이름이랑 직위 채워줘", docs, view, choose=wrong, ask_many=everyone_fills
+    )
+    columns = [c for _, c, _ in result.fields]
+    assert ("성명", "이름", "synonym") in result.fields and columns.count("이름") == 1

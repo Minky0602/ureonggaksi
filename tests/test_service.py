@@ -319,12 +319,12 @@ def test_model_exclusion_wins_and_model_errors_fall_back_to_asking(files):
 
 
 def test_a_disputed_skip_is_left_blank_and_the_rest_is_filled(files):
-    """코드는 '나중에'로 빼라고 읽었는데 모델이 채우라고 읽으면 그 열만 비우고 알린다(DIF-062).
+    """코드는 '보류'로 빼라고 읽었는데 모델이 채우라고 읽으면 그 열만 비우고 알린다(DIF-062).
     갈린 열 말고 채울 것이 없으면 그 열을 짚어 묻는다(DIF-060)."""
     sources, target, out, _ = files
     both = reader({"이수시간": "채움", "직급": "채움"})
     prepared = prepare(
-        "이름 기준으로 직급은 나중에 하고 이수시간 채워줘",
+        "이름 기준으로 직급은 보류하고 이수시간 채워줘",
         sources,
         target,
         output_path=out,
@@ -334,7 +334,7 @@ def test_a_disputed_skip_is_left_blank_and_the_rest_is_filled(files):
     assert targets == ["이수시간"]
     assert "‘직급’은(는) 뺄지 채울지 확실하지 않아 비워 둡니다." in prepared.warnings
     alone = prepare(
-        "이름 기준으로 직급은 나중에 하고 나머지 채워 주세요",
+        "이름 기준으로 직급은 보류하고 나머지 채워 주세요",
         sources,
         target,
         output_path=out,
@@ -379,7 +379,7 @@ def test_a_skip_without_a_model_answer_keeps_the_plain_question(files):
 def test_a_question_left_by_a_dropped_pair_does_not_blame_the_conflict(files):
     """검수 L1: 갈린 직급 말고 남은 짝을 사용자가 [빼기]해 비었으면, 갈림 탓으로 묻지 않는다."""
     sources, target, out, _ = files
-    request = "이름 기준으로 직급은 나중에 하고 이수시간 채워줘"
+    request = "이름 기준으로 직급은 보류하고 이수시간 채워줘"
     model = reader({"직급": "채움", "이수시간": "채움"})
     first = prepare(request, sources, target, output_path=out, ask_many=model)
     assert first.question is None and any("뺄지 채울지" in w for w in first.warnings)

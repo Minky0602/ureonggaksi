@@ -432,6 +432,22 @@ def aside_spans(text: str, *, later: bool = True) -> list[tuple[int, int]]:
     return spans
 
 
+def modifying_fill_spans(text: str) -> list[tuple[int, int]]:
+    """채우기 동사가 관형형으로 명사를 꾸미는 자리("신청서에 [적어 낸] 식구 수", "[채운] 칸"). 일을 시키는 말이
+    아니라 대상을 설명한다(DIF-074 s02). 사이에는 연결 어미·보조 용언만 온다."""
+    tokens = _tokens(text)
+    spans = []
+    for i, token in enumerate(tokens):
+        if _fill_end(tokens, i) is None:
+            continue
+        j = i + 1
+        while j < len(tokens) and tokens[j].tag in ("EC", "VX", "XSV", "EP"):
+            j += 1
+        if j < len(tokens) and tokens[j].tag == "ETM":
+            spans.append((token.start, tokens[j].end))
+    return spans
+
+
 def deferred_spans(text: str) -> list[tuple[int, int]]:
     """미루는 마디("직무는 [나중에 따로 정할게]")에서 '나중·추후' 앞에 온 명사의 글자 범위. 미루는 대상이다.
 
