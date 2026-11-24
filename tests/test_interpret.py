@@ -3129,3 +3129,17 @@ def test_an_adverb_that_does_not_shrink_everything_lets_code_decide(setup, word)
 
     interpret(f"발급번호 기준으로 {word} 다 채워줘", docs, view, ask_many=many)
     assert not any("[요청] 전부" in a for a in asked)
+
+
+def test_a_model_pick_into_a_synonym_column_does_not_drop_the_synonym_pair(setup):
+    """DIF-077(W03): 모델이 다른 항목을 동의어 짝의 열로 고르면 모델 짝만 버리고 동의어 짝은 남긴다."""
+    _, docs, view = setup
+
+    def wrong(prompt, options):  # 어떤 항목이든 '이름' 열로 고르는 모델
+        return "이름" if "이름" in options else "없음"
+
+    result = interpret(
+        "발급번호 기준으로 이름이랑 직위 채워줘", docs, view, choose=wrong, ask_many=everyone_fills
+    )
+    columns = [c for _, c, _ in result.fields]
+    assert ("성명", "이름", "synonym") in result.fields and columns.count("이름") == 1

@@ -1414,11 +1414,23 @@ def interpret(
     held += [name for p in pairs if p not in fits for name in p[:2]]
     pairs = fits
 
-    # 한 열에 둘 이상이 몰리면 어느 것도 확정하지 않는다(검수 H7)
-    count: dict[str, int] = {}
-    for _, column, _ in pairs:
-        count[column] = count.get(column, 0) + 1
-    mapped = tuple(p for p in pairs if count[p[1]] == 1)
+    # 한 열에 둘 이상이 몰리면 어느 것도 확정하지 않는다(검수 H7). 다만 이름 일치·동의어표로 이은 짝이 그중
+    # 하나뿐이면 그 짝은 남기고 모델이 고른 짝만 버린다. 4B가 문서 '보증금'을 '월세' 열로 골라 동의어 짝
+    # '월 임차료→월세'까지 버렸다(DIF-077 W03)
+    by_column: dict[str, list] = {}
+    for pair in pairs:
+        by_column.setdefault(pair[1], []).append(pair)
+    mapped = []
+    for pair in pairs:
+        rivals = by_column[pair[1]]
+        sure = [r for r in rivals if r[2] in ("match", "synonym")]
+        if len(rivals) == 1 or (
+            len(sure) == 1
+            and pair is sure[0]
+            and all(r[2] == "model" for r in rivals if r is not pair)
+        ):
+            mapped.append(pair)
+    mapped = tuple(mapped)
     placed = {p[0] for p in mapped} | {p[1] for p in mapped}
     requested = [
         *only_fields,
