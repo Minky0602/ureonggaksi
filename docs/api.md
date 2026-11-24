@@ -452,7 +452,7 @@ def analyze(inputs: Inputs, rule: RuleSet | WorkflowVersion, *, scope: Literal["
     #     변환 단위는 대상 열 머리글이 정한다(DIF-079·080, 규칙 형식은 그대로). 머리글 단위가 금액 단위면 값 종류가
     #     text라도 money로 읽어 열 단위로 환산한다(target_unit). 다른 단위면 '숫자+같은 단위'만 number로 바꾸고 나머지는
     #     지금처럼 text다. 숫자가 든 괄호('비고(1)', '구분(2차)')는 단위가 아니고, '%'는 셀 서식과 뜻이 엇갈려 글자로 둔다.
-    #     비교(⑥)는 환산한 값으로 하되, 기존 칸이 글자이고 문서 원문과 글자가 같으면("4회") 같은 값으로 본다
+    #     비교(⑥)는 환산한 값으로 하되, 단위만 뗀 열(㎡·회)에서 기존 칸이 글자이고 문서 원문과 글자가 같으면("4회") 같은 값으로 본다(금액 열은 아님)
     #   ⑤ 막힌 칸: blocked_formula/merged/protected  ⑥ 작업 종류: existing_differs(fill) · mismatch/missing_in_sheet(check)
     #   ⑦ 같은 (키, 항목)을 노리는 레코드가 둘 이상: 제안값이 모두 같고 모두 읽혔으면 ChangeItem 하나에 evidence를 모아
     #     한 번 쓴다. 묶음 판정 순서(입력 순서와 무관): 읽힌 값이 하나도 없으면 ②③의 이유(여럿이면 missing_value ·

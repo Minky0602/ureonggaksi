@@ -143,3 +143,27 @@ def test_existing_text_with_the_same_unit_is_unchanged(tmp_path):
     )
     item = _items(prepared, "방문횟수")["R-1"]
     assert item.status == "unchanged", item.reason_code
+
+
+def test_old_won_text_left_in_a_thousand_won_column_is_not_the_same(tmp_path):
+    """검수 r2 H: v0.1.0이 천원 열에 남긴 "4,350,000원" 글자는 문서 원문과 같아도 열 단위로는 다른 값이다."""
+    rows = [("성명", "가나다"), ("피해액", "4,350,000원")]
+    body = table([[cell(k, i, 0), cell(v, i, 1)] for i, (k, v) in enumerate(rows)])
+    source = write_hwpx(
+        tmp_path / "d.hwpx", [para("접수번호: R-1") + "<hp:p><hp:run>" + body + "</hp:run></hp:p>"]
+    )
+    sheet = [["접수번호", "피해액(천원)"], ["R-1", "4,350,000원"]]
+    target = write_xlsx(tmp_path / "대장.xlsx", sheet, sheet="대장")
+    for request in (
+        "접수번호 기준으로 피해액 채워줘",
+        "접수번호 기준으로 피해액이 맞는지 확인해줘",
+    ):
+        prepared = prepare(
+            request,
+            [source],
+            target,
+            output_path=tmp_path / "o.xlsx",
+            ask_many=lambda p, f: {k: "채움" for k in f if k.startswith("[이름]")},
+        )
+        item = _items(prepared, "피해액")["R-1"]
+        assert item.status != "unchanged" and item.reason_code in ("existing_differs", "mismatch")

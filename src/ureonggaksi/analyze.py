@@ -150,6 +150,10 @@ def _same(a: CellValue | None, b: CellValue, raws: tuple[str, ...] = ()) -> bool
         return False
     if (a.kind, a.value) == (b.kind, b.value):
         return True
+    # 단위만 뗀 열(㎡·회)에서만 원문 글자를 견준다. 금액 열은 아니다: 천원 열에 예전에 남은 "4,350,000원" 글자는
+    # 문서 원문과 같아도 열 단위로는 1,000배 다른 값이다(검수 r2 H)
+    if b.kind != "number" or b.unit in UNITS:
+        return False
     return a.kind == "text" and any(a.value.strip() == r.strip() for r in raws if r)
 
 
