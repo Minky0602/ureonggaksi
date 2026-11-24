@@ -48,6 +48,7 @@ def main(exe: str) -> int:
         if done.returncode != 0 or not plan.is_file():
             print(f"smoke: prepare 실패(종료 코드 {done.returncode})")
             print(done.stdout.decode("utf-8", "replace")[-2000:])
+            print(done.stderr.decode("utf-8", "replace")[-2000:])
             return 1
     print("smoke: prepare 통과")
     return 0
