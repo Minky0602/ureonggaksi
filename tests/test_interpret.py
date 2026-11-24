@@ -3106,3 +3106,26 @@ def test_a_unit_must_follow_a_number(tmp_path):
 def test_an_already_arranged_value_is_not_a_deferral():
     """'나중에 정리된 값'은 미루기가 아니다(검수 r1 L)."""
     assert not _said_to_skip("직급은 나중에 정리된 값 보고 넣어", "직급")
+
+
+def test_a_column_named_like_the_key_word_keeps_the_key(tmp_path):
+    """검수 r2 M: 열 이름이 '기준'이어도 "접수번호 기준으로"의 '기준'은 키 표현이다."""
+    docs = [_kv([("접수번호", f"R-{i}"), ("성명", n)]) for i, n in enumerate(["가", "나"], 1)]
+    sheet = [["접수번호", "성명", "기준"], ["R-1", None, None], ["R-2", None, None]]
+    _, docs, view = build(tmp_path, docs, sheet, "대장")
+    result = interpret("접수번호 기준으로 성명 채워줘", docs, view)
+    assert result.key == ("접수번호", "접수번호") and ("성명", "성명", "match") in result.fields
+
+
+@pytest.mark.parametrize("word", ["일단", "싹", "그냥"])
+def test_an_adverb_that_does_not_shrink_everything_lets_code_decide(setup, word):
+    """검수 r2 M: '일단·싹·그냥 다'는 양을 줄이지 않아 코드가 '전부'를 정한다."""
+    _, docs, view = setup
+    asked = []
+
+    def many(prompt, fields):
+        asked.append(list(fields))
+        return everyone_fills(prompt, fields)
+
+    interpret(f"발급번호 기준으로 {word} 다 채워줘", docs, view, ask_many=many)
+    assert not any("[요청] 전부" in a for a in asked)

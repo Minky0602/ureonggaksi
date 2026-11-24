@@ -557,9 +557,9 @@ def _spans(request: str, names: list[str]) -> list[tuple[int, int, str]]:
             len(owners[_compact(variant)]) > 1
             or (
                 re.fullmatch(ALLOWED_WORD, _compact(variant))
-                and not (exact and not FILL.search(variant) and not CHECK.search(variant))
+                and not (exact and not any(p.search(variant) for p in (FILL, CHECK, KEY_AFTER)))
             )
-        ):  # 이름 그대로인 열('내용')은 허용 낱말보다 먼저다(검수 r1 M1). 동사 낱말('확인')은 아니다
+        ):  # 이름 그대로인 열('내용')은 허용 낱말보다 먼저다(검수 r1 M1). 동사('확인')·키 낱말('기준')은 아니다
             name = ""  # 비고(1)·비고(2)의 '비고': 어느 이름인지 모른다. 모르는 말로 남긴다(5차 검수 H3)
         pattern = r"(?<![가-힣A-Za-z0-9])" + r"\s*".join(map(re.escape, _compact(variant)))
         for match in re.finditer(pattern, request):
@@ -641,21 +641,13 @@ def _unknown_words(request: str, names: list[str]) -> list[str]:
     return list(dict.fromkeys(words))
 
 
-def _hedges(request: str, names: list[str]) -> list[str]:
-    """모르는 말에서 거른 부사 가운데 허용 낱말이 아닌 것("거의 다", "대충 다"의 '거의'·'대충'). 이런 말이
-    '전부'를 꾸미면 코드가 '전부'를 정하지 않고 모델에 묻는다(검수 r1 M2)."""
-    request = _blank(request, morph.aside_spans(request))
-    out = []
-    for token in re.split(r"[\s,.!~·、/?]+", _mask(request, names)):
-        word = morph.strip_particles(token) if token else ""
-        if (
-            word
-            and not re.fullmatch(ALLOWED_WORD, word)
-            and morph.is_adverb(word)
-            and not any(_norm(word) in _norm(n) for n in names)
-        ):
-            out.append(word)
-    return out
+HEDGE = re.compile(r"거의|대충|대강|얼추|웬만하면|웬만한|어지간하면|대부분")
+
+
+def _hedges(request: str) -> list[str]:
+    """'전부'의 양을 줄이는 말("거의 다", "대충 다"). 있으면 코드가 '전부'를 정하지 않고 모델에 묻는다
+    (검수 r1 M2). '일단·싹·그냥'처럼 양을 줄이지 않는 부사는 세지 않는다(검수 r2 M)."""
+    return HEDGE.findall(_blank(request, morph.aside_spans(request)))
 
 
 def _read_request(
@@ -1157,7 +1149,7 @@ def interpret(
     elif not simple:
         assumed = True
         every_word = _unknown_words(request, columns + names)
-        hedges = _hedges(request, columns + names)
+        hedges = _hedges(request)
         words, overflow = (
             every_word[:8],
             every_word[8:],
