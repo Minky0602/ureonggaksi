@@ -93,18 +93,25 @@ def normalize(
     default_unit: str = "",
     rounding: Rounding | None = None,
     date_order: DateOrder | None = None,
+    target_unit: str = "",
 ) -> Normalized:
     """raw 글자를 value_type의 CellValue로 바꾼다.
 
     unit: 규칙이 밝힌 원문 단위(예: 표 머리의 "단위: 천원"). 글자에 단위가 있으면 글자가 우선한다.
     default_unit: 질문 답(policy)으로 정한 기본 단위. 글자에도 규칙에도 단위가 없을 때만 쓴다.
+    target_unit: 금액을 쓸 열의 단위(열 머리글 "피해추산액(천원)"). 원으로 읽은 뒤 이 단위로 나눈다.
+        나눈 값이 정수가 아니면 rounding을 이 단위에서 적용하고, 없으면 needs_rounding.
     rounding·date_order·unit에 허용 밖 값이 오면 ValueError(호출자의 실수).
     """
     if rounding is not None and rounding not in ROUNDING_MODES:
         raise ValueError(f"반올림 방법이 유효하지 않습니다: {rounding}")
     if date_order is not None and date_order not in ("ymd", "dmy", "mdy"):
         raise ValueError(f"날짜 순서가 유효하지 않습니다: {date_order}")
-    for name, value in (("unit", unit), ("default_unit", default_unit)):
+    for name, value in (
+        ("unit", unit),
+        ("default_unit", default_unit),
+        ("target_unit", target_unit),
+    ):
         if value and value not in UNITS:
             raise ValueError(f"{name}이 유효하지 않습니다: {value}")
     if not isinstance(raw, str) or not raw.strip():
@@ -123,13 +130,41 @@ def normalize(
                 return Normalized(None, "parse_failed")
             return Normalized(CellValue("number", _number_text(number)))
         if value_type == "money":
-            return _money(text, unit, default_unit, rounding)
+            return _money(text, unit, default_unit, rounding, target_unit)
     if value_type == "date":
         return _date(text, date_order)
     raise ValueError(f"지원하지 않는 값 종류: {value_type}")
 
 
-def _money(text: str, unit: str, default_unit: str, rounding: Rounding | None) -> Normalized:
+def column_unit(header: str) -> str:
+    """열 머리글 끝 괄호의 단위("피해추산액(천원)" → "천원", "면적(㎡)" → "㎡"). 괄호가 없으면 "".
+    "단위: 천원"·"단위 천원"도 받는다. 금액 단위인지는 호출자가 UNITS로 본다."""
+    match = re.search(r"[(（]\s*(?:단위\s*[:：]?\s*)?([^()（）]+?)\s*[)）]\s*$", header or "")
+    unit = match.group(1).replace(" ", "") if match else ""
+    # 숫자가 든 괄호('비고(1)', '구분(2차)', '점수(100)')는 단위가 아니다. 단위로 읽으면 "51"이 5로 잘렸다(검수 H)
+    return "" if re.search(r"\d", unit) else unit
+
+
+def strip_unit(raw: str, unit: str) -> Normalized | None:
+    """금액이 아닌 단위 열: 문서 값이 '숫자+그 단위'면 숫자로("23.5㎡" → 23.5). 아니면 None(손대지 않음)."""
+    text = (raw or "").translate(_FULLWIDTH).strip()
+    # '%'는 셀 서식(백분율)과 값 뜻이 엇갈려 글자로 둔다(검수 M1). 숫자가 든 단위는 column_unit이 이미 뺀다
+    if not unit or unit == "%" or re.search(r"\d", unit):
+        return None
+    match = re.fullmatch(rf"(?P<digits>{_DIGITS})\s*{re.escape(unit)}", text)
+    if not match:
+        return None
+    with localcontext() as context:
+        context.prec = DECIMAL_PRECISION
+        number = Decimal(match.group("digits").replace(",", ""))
+    return Normalized(
+        CellValue("number", _number_text(number), unit), "", (f"단위 {unit} 뗌(열 머리글)",)
+    )
+
+
+def _money(
+    text: str, unit: str, default_unit: str, rounding: Rounding | None, target_unit: str = ""
+) -> Normalized:
     text = _HANGUL_AMOUNT.sub("", text)
     match = _MONEY.match(text)
     number = _signed(match) if match else None
@@ -150,12 +185,26 @@ def _money(text: str, unit: str, default_unit: str, rounding: Rounding | None) -
     amount = number * factor
     if factor != 1:
         transforms.append(f"단위 {found}→원 ×{factor:,.0f}({source})")
-    if amount != amount.to_integral_value():
+    scaled_later = bool(target_unit) and target_unit != "원"
+    if (
+        amount != amount.to_integral_value() and not scaled_later
+    ):  # 반올림은 쓰는 단위에서 한 번만(검수 M3)
         if rounding is None:
             return Normalized(None, "needs_rounding", tuple(transforms))
         amount = amount.quantize(Decimal(1), rounding=ROUNDING_MODES[rounding])
         transforms.append(ROUNDING_LABELS[rounding])
-    return Normalized(CellValue("number", _number_text(amount), "원"), "", tuple(transforms))
+    if not target_unit or target_unit == "원":
+        return Normalized(CellValue("number", _number_text(amount), "원"), "", tuple(transforms))
+    # 열 단위로 나눈다(4,350,000원 → 천원 4350). 원 미만과 같은 규칙: 정수가 아니면 반올림 답이 있어야 쓴다
+    scale = UNITS[target_unit]
+    scaled = amount / scale
+    transforms.append(f"단위 원→{target_unit} ÷{scale:,.0f}(열 머리글)")
+    if scaled != scaled.to_integral_value():
+        if rounding is None:
+            return Normalized(None, "needs_rounding", tuple(transforms))
+        scaled = scaled.quantize(Decimal(1), rounding=ROUNDING_MODES[rounding])
+        transforms.append(ROUNDING_LABELS[rounding].replace("원 미만", f"{target_unit} 미만"))
+    return Normalized(CellValue("number", _number_text(scaled), target_unit), "", tuple(transforms))
 
 
 def _date(text: str, date_order: DateOrder | None) -> Normalized:

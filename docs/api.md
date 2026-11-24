@@ -228,7 +228,7 @@ class RuleSet:                   # 직접 선택·AI·가져오기 모두 이 �
     #   data_rows_invalid · unit_not_money · key_not_text · key_target_ignored · target_column_missing/unknown/duplicate ·
     #   target_is_key · no_value_fields · no_sources. 표의 실제 존재 여부(table_rows)는 analyze가 문서를 읽을 때 판정한다
 
-def normalize(raw: str, value_type, *, unit="", default_unit="", rounding=None, date_order=None) -> Normalized
+def normalize(raw: str, value_type, *, unit="", default_unit="", rounding=None, date_order=None, target_unit="") -> Normalized
     # Normalized(value: CellValue | None, reason_code: str, transforms: tuple[str, ...]). reason_code는 5.1절:
     # missing_value(빈 글자) · parse_failed(숫자·날짜로 못 읽음, "미정", ▲ 부호, 순서 모호한 날짜, 두 자리 연도,
     #   쉼표 자릿수가 틀린 숫자, 백분율, 짝이 안 맞는 괄호) · ambiguous_unit(단위가 글자·규칙·답 어디에도 없음) ·
@@ -236,6 +236,11 @@ def normalize(raw: str, value_type, *, unit="", default_unit="", rounding=None, 
     # text는 양끝 공백만 떼고 그대로("0012", 전각도 그대로 — 글자 일치 대조용). 숫자·금액·날짜만 전각을 반각으로 바꾼다.
     # money는 원으로 환산해 CellValue(number, …, unit="원"). 단위는 글자(뒤의 "(천원)" 포함) > 규칙 unit > 답 default_unit.
     # 뒤의 "(금삼백오십만원)" 괄호 한글 금액과 끝의 "정"은 읽지 않고 넘긴다. 그 밖의 주석("(VAT 포함)", "(금액 미정)")은 거부.
+    # target_unit(금액만): 원으로 읽은 뒤 열 단위로 나눠 CellValue(number, …, unit=target_unit)로 낸다(4,350,000원 →
+    #   천원 4350, 근거 "단위 원→천원 ÷1,000(열 머리글)"). 나눈 값이 정수가 아니면 rounding을 그 단위에서 적용하고,
+    #   없으면 needs_rounding(반올림은 쓰는 단위에서 한 번만 한다). 단위 없는 금액은 target_unit이 있어도 ambiguous_unit이다(열 단위로 간주하지 않는다).
+    # column_unit(header) -> str: 열 머리글 끝 괄호의 단위("피해추산액(천원)"→"천원", "금액(단위: 천원)"→"천원"). 숫자가 든 괄호는 "".
+    # strip_unit(raw, unit) -> Normalized | None: '숫자+그 단위'면 숫자("23.5㎡"→23.5), 아니면 None.
     # 원칙: 정보를 지어내야 읽을 수 있는 글자는 읽지 않는다
 
 @dataclass(frozen=True)
@@ -330,8 +335,10 @@ def interpret(request: str, documents: tuple[Document, ...], view: TargetView,
     #      이름이 다른 열은 숫자로만 된 값(날짜·금액)으로 잇지 않는다.
     #   값 형태 검사(코드형 값을 숫자 열에 넣지 않음)에서 휴대전화는 하이픈이 없어도("01039917702") 연락처다.
     #   키 표현: 'X 기준', 'X로 찾아·대조·맞춰', 조사 없는 'X 맞춰서', 'X로' 바로 뒤에 다른 항목 이름이 오는 꼴("대상자번호로 건강상태 채워").
-    #   단위 없는 문서 항목과 이름이 같고 단위만 붙은 열이 하나뿐이며 문서 값이 모두 숫자 바로 뒤 그 단위로 끝나면 짝(출처 assumed,
-    #   '23.5㎡' → 피해면적(㎡)). 값의 단위가 다르면(4,350,000원 → (천원), '500천원' → (원), '3km' → (m)) 잇지 않는다.
+    #   단위 없는 문서 항목과 이름이 같고 단위만 붙은 열이 하나뿐이면 짝(출처 assumed). 금액 단위 열(원·천원·만원·백만원·
+    #   억원)은 문서 값이 모두 금액으로 읽히고(단위 없는 값 허용) 단위가 적힌 값이 하나 이상이면 단위가 달라도 잇는다
+    #   ('보증금' 1,000만원 → 보증금(만원); 쓸 때 환산). 다른 단위 열은 문서 값이 모두 숫자 바로 뒤 그 단위로 끝날
+    #   때만 잇는다('23.5㎡' → 피해면적(㎡); '3km' → (m)은 아님).
     #   한 문서에 같은 라벨이 둘 이상이면 그 항목은 후보가 아니다.
     # 항목 짝은 요청의 모든 낱말이 '이름+조사' 또는 허용 낱말(채우기·검토 동사, 키 표현, '칸에', 표·문서 이름(취합표·명단·대장·
     #   집계표·보고서·목록·내용 등), 부탁 표현, 다·모두)일 때만 확정한다(출처 match). 허용 낱말과 글자가 같은
@@ -442,6 +449,10 @@ def analyze(inputs: Inputs, rule: RuleSet | WorkflowVersion, *, scope: Literal["
     # (P02-4에서 확정) 기준 적용 순서와 reason_code: ① validate_rule 이슈가 있으면 분석 전 RULE_INVALID(detail=(path, code)…)
     #   ② 값 한 곳: missing_value · ambiguous_field · tracked_change(→ status "failed"는 missing_value·tracked_change만)
     #   ③ 변환: ambiguous_unit · parse_failed · needs_rounding  ④ 대상 행: no_target · multi_target(+target_candidates)
+    #     변환 단위는 대상 열 머리글이 정한다(DIF-079·080, 규칙 형식은 그대로). 머리글 단위가 금액 단위면 값 종류가
+    #     text라도 money로 읽어 열 단위로 환산한다(target_unit). 다른 단위면 '숫자+같은 단위'만 number로 바꾸고 나머지는
+    #     지금처럼 text다. 숫자가 든 괄호('비고(1)', '구분(2차)')는 단위가 아니고, '%'는 셀 서식과 뜻이 엇갈려 글자로 둔다.
+    #     비교(⑥)는 환산한 값으로 하되, 단위만 뗀 열(㎡·회)에서 기존 칸이 글자이고 문서 원문과 글자가 같으면("4회") 같은 값으로 본다(금액 열은 아님)
     #   ⑤ 막힌 칸: blocked_formula/merged/protected  ⑥ 작업 종류: existing_differs(fill) · mismatch/missing_in_sheet(check)
     #   ⑦ 같은 (키, 항목)을 노리는 레코드가 둘 이상: 제안값이 모두 같고 모두 읽혔으면 ChangeItem 하나에 evidence를 모아
     #     한 번 쓴다. 묶음 판정 순서(입력 순서와 무관): 읽힌 값이 하나도 없으면 ②③의 이유(여럿이면 missing_value ·

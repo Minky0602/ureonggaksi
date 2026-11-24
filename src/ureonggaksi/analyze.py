@@ -15,7 +15,7 @@ from .errors import Pairs, ServiceError
 from .inputs import Inputs, inspect_source
 from .manual import ManualItem, action_of, describe, kind_of, sort_key
 from .models import CellValue
-from .normalize import normalize
+from .normalize import UNITS, column_unit, normalize, strip_unit
 from .patch import unsupported_writes
 from .records import Record, extract_records
 from .rules import RuleSet, WorkflowVersion, canonical_json, rule_hash, validate_rule
@@ -143,8 +143,18 @@ def _short_hash(parts: list[str]) -> str:
     return hashlib.sha256(canonical_json(parts).encode("utf-8")).hexdigest()[:16]
 
 
-def _same(a: CellValue | None, b: CellValue) -> bool:
-    return a is not None and (a.kind, a.value) == (b.kind, b.value)
+def _same(a: CellValue | None, b: CellValue, raws: tuple[str, ...] = ()) -> bool:
+    """같은 값인가. 기존 칸이 글자이고 문서 원문과 글자가 같으면 환산 전 값이 같은 것이다("4회" 칸과 문서 "4회"
+    → 숫자 4로 바꿨어도 일치, 검수 M2)."""
+    if a is None:
+        return False
+    if (a.kind, a.value) == (b.kind, b.value):
+        return True
+    # 단위만 뗀 열(㎡·회)에서만 원문 글자를 견준다. 금액 열은 아니다: 천원 열에 예전에 남은 "4,350,000원" 글자는
+    # 문서 원문과 같아도 열 단위로는 1,000배 다른 값이다(검수 r2 H)
+    if b.kind != "number" or b.unit in UNITS:
+        return False
+    return a.kind == "text" and any(a.value.strip() == r.strip() for r in raws if r)
 
 
 def _address_order(address: str | None) -> tuple:
@@ -283,14 +293,23 @@ def _judge(record, field_name, ruleset, rows_by_key, cells, key_letter) -> _Judg
     field_rule = ruleset.field(field_name)
     value = record.value(field_name)
     raw = value.raw_text if value and value.status == "ok" else ""
+    # 열 머리글이 단위를 말하면 그 단위의 숫자로 쓴다(DIF-079). 금액 단위면 원으로 읽어 열 단위로 나누고,
+    # 다른 단위(㎡·회)는 '숫자+같은 단위'일 때만 숫자로 바꾼다. 단위 없는 괄호('연락처(휴대폰)')는 그대로다
+    target_unit = column_unit(field_rule.target_column)
+    value_type = field_rule.value_type
+    if target_unit in UNITS and value_type in ("text", "money"):
+        value_type = "money"
     normalized = normalize(
         raw,
-        field_rule.value_type,
+        value_type,
         unit=field_rule.unit,
         default_unit=ruleset.policy_value("default_unit"),
         rounding=ruleset.policy_value("rounding") or None,
         date_order=ruleset.policy_value("date_order") or None,
+        target_unit=target_unit if value_type == "money" and target_unit in UNITS else "",
     )
+    if value_type == "text" and target_unit and target_unit not in UNITS:
+        normalized = strip_unit(raw, target_unit) or normalized
     proposed = normalized.value if normalized.value is not None else CellValue()
     location = value.location if value else ""
     evidence = Evidence(
@@ -394,14 +413,14 @@ def _merge(judged_list, ruleset, cells, column_index, names) -> list[ChangeItem]
             if ruleset.work_type == "fill":
                 if previous is None or previous.kind == "empty":
                     status, write_selected = "confirmed", True
-                elif _same(previous, proposed):
+                elif _same(previous, proposed, tuple(e.raw_text for e in evidence)):
                     status = "unchanged"
                 else:
                     reason_code = "existing_differs"
             else:
                 if previous is None or previous.kind == "empty":
                     reason_code = "missing_in_sheet"
-                elif _same(previous, proposed):
+                elif _same(previous, proposed, tuple(e.raw_text for e in evidence)):
                     status = "unchanged"
                 else:
                     reason_code = "mismatch"
