@@ -55,7 +55,7 @@
 | 3 | 11-09 | chore: PR 템플릿 항목 변경 | P01 | |
 | 4 | 11-09 | Chore: add prototype | P01 | 프로토타입 코드, 시험 편입, Windows, Ubuntu CI, 새 체크아웃, Linux 시험 실패 수정 |
 | 5 | 11-09 | Docs/rewrite readme | | README, CONTRIBUTING 정리 |
-| 6 | 11-09 | refactor: diagram reading explanation from architecture.md | | architecture.md 설명 정리 |
+| 6 | 11-10 | refactor: diagram reading explanation from architecture.md | | architecture.md 설명 정리 |
 | 7 | 11-10 | fix: 한글 특수 공백이 사라져 앞뒤 글자가 붙는 문제 수정 | P02 | 실제 한글 저장본에서 찾은 결함 |
 | 8 | 11-11 | fix: 변경 추적이 남은 글자를 값으로 읽는 문제 수정 | P02 | 변경 추적이 남은 칸은 추측하지 않고 비움 |
 | 9 | 11-11 | feat: 입력 연결과 취합표 미리보기 추가 | P02 | 입력 지문, 스냅샷, 취합표 읽기. 악성 XLSX 대응 검수 5회 |
@@ -79,7 +79,7 @@
 | 29 | 11-21 | perf: 순서를 바꿔 두 번 묻는 모델 물음을 동시에 띄움 | 후속 개선 | 미리보기 32~42초 → 21.6~29.2초 |
 | 30 | 11-22 | feat: 빼라는 말인지 갈린 이름만 비우고 나머지 짝은 채움 | 후속 개선 | |
 | 31 | 11-22 | feat: 형태소 분석기 Kiwi로 요청의 조사와 하지 않는 채우기를 읽음 | 후속 개선 | Kiwi 채택. 검수 4회 |
-| 32 | 11-22 | docs: 개발 기록 추가, 보안, 에이전트 안내를 현재 구현에 맞춤 | | development-notes.md 추가 |
+| 32 | 11-22 | docs: 개발 기록 추가, 보안·에이전트 안내를 현재 구현에 맞춤 | | development-notes.md 추가 |
 | 33 | 11-22 | feat: '전부·다 채워' 요청은 문서 항목 전부를 후보로 짝지음 | 후속 개선 | |
 | 34 | 11-23 | feat: 대조 요청에서 이어 말한 항목과 열을 짝으로 보고 '-금액↔-액'을 같은 이름으로 봄 | 후속 개선 | |
 | 35 | 11-23 | feat: 말하지 않은 키를 좁은 조건에서 추정하고 '확인 필요'로 보임 | 후속 개선 | |
