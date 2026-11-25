@@ -19,6 +19,7 @@
 - [로컬 AI 지정]으로 고른 파일 경로: 레지스트리 HKCU\Software\ureonggaksi
   (PowerShell: Remove-Item -Recurse "HKCU:\Software\ureonggaksi")
 결과 XLSX·확인필요·근거 파일은 저장한 폴더에 있습니다.
+파일을 고를 때 쓰는 Windows 대화상자는 다른 프로그램처럼 최근 항목 기록을 남길 수 있습니다.
 
 
 1. 실행하기

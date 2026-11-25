@@ -48,10 +48,6 @@ PAGE_STYLE = "QWidget#page, QScrollArea { background: #F5F7F5; } QFrame#card { b
 MANUAL_LIMIT = 200  # 직접 처리 목록은 화면에 이만큼만 보이고 나머지는 확인필요 파일에 있다
 
 
-# Windows 기본 대화상자는 고른 경로를 최근 파일(MRU) 기록에 남긴다. Qt 자체 대화상자를 쓴다(SECURITY.md)
-DIALOG_OPTIONS = QFileDialog.Option.DontUseNativeDialog
-
-
 def _label(text: str = "", name: str = "") -> QLabel:
     widget = QLabel(text)
     widget.setTextFormat(Qt.TextFormat.PlainText)  # 문서 값의 HTML을 그리지 않는다(SECURITY.md)
@@ -222,9 +218,7 @@ class FlowWindow(QMainWindow):
     # ---------- 입력 ----------
 
     def pick_sources(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "원본 문서", "", "한글 문서 (*.hwpx)", options=DIALOG_OPTIONS
-        )
+        paths, _ = QFileDialog.getOpenFileNames(self, "원본 문서", "", "한글 문서 (*.hwpx)")
         self.add_sources([Path(p) for p in paths])
 
     def add_sources(self, paths: list[Path]) -> None:
@@ -240,9 +234,7 @@ class FlowWindow(QMainWindow):
         self.invalidate(reset_answers=True)
 
     def pick_target(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "취합표", "", "Excel 통합 문서 (*.xlsx)", options=DIALOG_OPTIONS
-        )
+        path, _ = QFileDialog.getOpenFileName(self, "취합표", "", "Excel 통합 문서 (*.xlsx)")
         if path:
             self.set_target(Path(path))
 
@@ -257,13 +249,10 @@ class FlowWindow(QMainWindow):
             "llama-completion 실행 파일",
             "",
             "실행 파일 (*.exe);;모든 파일 (*)",
-            options=DIALOG_OPTIONS,
         )
         if not runtime:
             return
-        model, _ = QFileDialog.getOpenFileName(
-            self, "GGUF 모델 파일", "", "GGUF (*.gguf)", options=DIALOG_OPTIONS
-        )
+        model, _ = QFileDialog.getOpenFileName(self, "GGUF 모델 파일", "", "GGUF (*.gguf)")
         if model:
             self.settings.setValue("ai/runtime", runtime)
             self.settings.setValue("ai/model", model)

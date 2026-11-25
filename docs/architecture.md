@@ -61,7 +61,7 @@ flowchart LR
 | `synonyms.py` | 행정 서식에서 같은 뜻으로 쓰는 항목 이름 묶음(데이터). 금액·기간·담당자처럼 뜻이 넓은 말은 넣지 않는다 |
 | `ai.py` | 로컬 모델 실행기. `llama-completion`을 질문마다 자식 프로세스로 실행(`--offline`, HTTP 서버·포트 없음)하고 JSON 스키마 enum으로 답을 선택지 하나(`choose`) 또는 칸마다 하나(`ask_fields`, 객체 스키마)로 제한한다. 실행 불가·시간 초과는 예외, 목록 밖 답은 버림. `ai_status`는 실행 파일·모델 파일 유무 |
 | `manual.py` | 6.3절 소명 종류·문장 틀을 데이터로. `manual_items`가 화면과 확인필요 파일이 함께 쓰는 목록을 만든다 |
-| `storage.py` | 로컬 경로 검사와 원자적 저장 |
+| `storage.py` | 로컬 경로 검사와 원자적 저장(`atomic_write`: 규칙·`extract` 결과용). 한 줄 요청 결과는 `save.py`가 덮어쓰지 않고 새 이름으로 공개한다 |
 | `offline.py` | 파이썬 네트워크 차단(audit hook) |
 | `service.py` | 화면·명령행이 부르는 서비스: `prepare`(해석 → 규칙 → 분석 → 질문 또는 미리보기, 쓰기 없음), `commit`(규칙 저장 → 승인 → 저장), `replay`(저장 규칙·계획 파일로 AI 없이 다시 분석), `describe_rule`(해석 한 줄) |
 | `cli.py` | 명령행 두 단계 `prepare`(계획 파일·지문 출력) → `commit`(지문이 같을 때만 저장) |

@@ -10,7 +10,7 @@ import pytest
 from conftest import cell, para, table, write_hwpx, write_xlsx
 from openpyxl import load_workbook
 from PySide6.QtCore import QCoreApplication, QEvent, QSettings, Qt
-from PySide6.QtWidgets import QApplication, QFileDialog, QLabel
+from PySide6.QtWidgets import QApplication, QLabel
 
 from ureonggaksi import __version__
 from ureonggaksi.errors import ServiceError
@@ -113,25 +113,6 @@ def test_document_text_is_never_rendered_as_html(window, app, tmp_path):
     ask(window, app, "이름 기준으로 이수시간 채워줘")
     labels = window.findChildren(QLabel)
     assert labels and all(lbl.textFormat() == Qt.TextFormat.PlainText for lbl in labels)
-
-
-def test_file_dialogs_do_not_use_the_windows_recent_list(window, monkeypatch):
-    """SECURITY.md: Windows 기본 대화상자는 고른 경로를 최근 파일 기록에 남긴다. Qt 대화상자를 쓴다."""
-    seen = []
-
-    def fake(*args, options=None, **kwargs):
-        seen.append(options)
-        return ([], "") if fake.many else ("", "")
-
-    fake.many = True
-    monkeypatch.setattr(QFileDialog, "getOpenFileNames", staticmethod(fake))
-    window.pick_sources()
-    fake.many = False
-    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(fake))
-    window.pick_target()
-    window.pick_model()
-    assert len(seen) == 3
-    assert all(o is not None and o & QFileDialog.Option.DontUseNativeDialog for o in seen)
 
 
 def test_the_window_shows_the_version(window):
