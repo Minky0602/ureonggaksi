@@ -1,0 +1,147 @@
+erDiagram
+    %% proposed / MVP logical model; no physical DB constraints
+    %% Source: docs/api.md 2.4 WorkflowVersion.workflow_id/name
+    Workflow {
+        string workflow_id PK "logical key proposal"
+        string name
+    }
+    %% Source: docs/api.md 2.4 WorkflowVersion, RuleSet
+    WorkflowVersion {
+        ref workflow_id PK "logical key proposal"
+        int revision PK "logical key proposal"
+        int schema_version
+        sha256 rule_hash
+        object record_rule
+        array field_rules
+        object target_rule
+        enum work_type
+        object policy
+        string request
+        datetime saved_at
+    }
+    %% Source: docs/api.md 2.0 Prepared, 2.2 Inputs, 2.6 Plan
+    Run {
+        string run_id PK "logical key proposal"
+        optional_version_ref workflow_ref
+        string request
+        object answers
+        optional_sha256 rule_hash
+        enum scope
+        path output_dir
+        object counts
+    }
+    %% Source: docs/api.md 2.5 RuleDraft; run_id is a logical reference, not a field of the API value
+    RuleDraft {
+        string draft_id PK "logical key proposal"
+        ref run_id
+        enum origin
+        optional_object rule
+        array questions
+        array issues
+    }
+    %% Source: docs/api.md 2.2 InputFile (file_id = document_id)
+    Document {
+        string document_id PK "logical key proposal"
+        ref run_id
+        enum role
+        path local_path
+        optional_sha256 fingerprint
+        enum status
+        string reason
+        optional_ref duplicate_of
+    }
+    %% Source: docs/api.md 2.6 analyze (internal), Evidence.record_key
+    SourceRecord {
+        string record_id PK "logical key proposal"
+        ref document_id
+        object record_boundary
+        optional_string record_key
+    }
+    %% Source: docs/api.md 2.6 analyze (internal), Evidence.raw_text/extracted/location
+    ExtractedField {
+        string field_id PK "logical key proposal"
+        ref record_id
+        string field
+        optional_string raw_text
+        optional_typed_value extracted
+        object location
+    }
+    %% Source: docs/api.md 2.6 ChangeItem; target_document_id is implied (one target per run)
+    ChangeItem {
+        string change_id PK "logical key proposal"
+        ref run_id
+        ref target_document_id
+        string record_key
+        string field
+        optional_sheet_cell target_ref
+        array target_candidates
+        optional_typed_value previous
+        typed_value proposed
+        optional_typed_value corrected
+        enum status
+        string reason_code
+        bool resolved
+        bool write_selected
+        optional_string review_reason
+    }
+    %% Source: docs/api.md 2.6 Evidence; field_id is a logical reference (API links by record_key)
+    Evidence {
+        string evidence_id PK "logical key proposal"
+        ref change_id
+        ref field_id
+        sha256 document_fingerprint
+        string record_key
+        object location
+        string raw_text
+        typed_value extracted
+        array transforms
+    }
+    %% Source: docs/api.md 2.7 Approval
+    Approval {
+        ref run_id PK "logical key proposal"
+        array_ref approved_change_ids
+        object input_fingerprints
+        sha256 rule_hash
+        sha256 plan_hash
+        sha256 review_hash
+        path output_path
+        path evidence_path
+        optional_path manual_path
+        datetime approved_at
+    }
+    %% Source: docs/api.md 2.7 ResultPackage, Check
+    ResultPackage {
+        ref run_id PK "logical key proposal"
+        enum status
+        optional_path output_path
+        optional_sha256 output_sha256
+        optional_path evidence_path
+        optional_sha256 evidence_sha256
+        optional_path manual_path
+        array checks
+        object summary
+        optional_enum error
+    }
+    %% empty workflow allowed before first saved revision
+    Workflow ||--o{ WorkflowVersion : ""
+    %% Plan.rule_ref is None for a new request until commit saves the rule
+    WorkflowVersion |o..o{ Run : ""
+    %% proposal: drafts belong to the current run. The API RuleDraft value has no run_id
+    Run ||..o{ RuleDraft : ""
+    %% Inputs.sources/target
+    Run ||..o{ Document : ""
+    %% only source-role documents yield records
+    Document ||..o{ SourceRecord : ""
+    SourceRecord ||..o{ ExtractedField : ""
+    %% Plan.items
+    Run ||..o{ ChangeItem : ""
+    %% target-role reference. Derivable through Run because a run has exactly one target
+    Document ||..o{ ChangeItem : ""
+    %% ChangeItem.evidence; a writable change requires >=1 evidence
+    ChangeItem ||..o{ Evidence : ""
+    ExtractedField ||..o{ Evidence : ""
+    %% only the current valid approval is kept. A check run has none
+    Run ||--o| Approval : ""
+    %% approved_change_ids; no zero-write approval (NOTHING_TO_WRITE)
+    Approval |o..|{ ChangeItem : ""
+    Run ||--o| ResultPackage : ""

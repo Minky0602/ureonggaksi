@@ -1,0 +1,76 @@
+erDiagram
+    %% existing / Python object relations; no physical DB constraints
+    %% Source: src/ureonggaksi/models.py
+    Block {
+        str section
+        str locator
+        str text
+        str kind
+        int table
+        int row
+        int col
+        int row_span
+        int col_span
+    }
+    %% Source: src/ureonggaksi/models.py
+    Document {
+        str path
+        str sha256
+        tuple_Block_____ blocks
+    }
+    %% Source: src/ureonggaksi/models.py
+    ExtractedValue {
+        str document_path
+        str sha256
+        str field
+        str value
+        str status
+        Block_or_None source
+        int start
+        int end
+        int matches
+        str message
+        bool required
+    }
+    %% Source: src/ureonggaksi/models.py
+    DocumentResult {
+        str path
+        str sha256
+        tuple_ExtractedValue_____ values
+        str error
+    }
+    %% Source: src/ureonggaksi/models.py
+    Verification {
+        bool ok
+        str message
+        Block_or_None source
+    }
+    %% Source: src/ureonggaksi/workflow.py
+    Rule {
+        str name
+        str kind
+        str query
+        str section
+        int table
+        int row
+        int col
+        str direction
+        int group
+        bool required
+    }
+    %% Source: src/ureonggaksi/workflow.py
+    Workflow {
+        str name
+        tuple_Rule_____ rules
+        int version
+    }
+    %% models.py Document.blocks; containment, not FK
+    Document ||--o{ Block : ""
+    %% workflow.py Workflow.rules; 1..100 rules; containment
+    Workflow ||--|{ Rule : ""
+    %% models.py DocumentResult.values; error results may have empty values
+    DocumentResult ||--o{ ExtractedValue : ""
+    %% models.py ExtractedValue.source may be None; object reference
+    Block |o--o{ ExtractedValue : ""
+    %% models.py Verification.source may be None; object reference
+    Block |o--o{ Verification : ""
