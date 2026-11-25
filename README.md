@@ -179,4 +179,4 @@ CI는 PR마다 이 두 명령을 실행한다.
 
 ## 라이선스
 
-[Apache License 2.0](LICENSE). 의존하는 라이브러리의 라이선스는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 있다.
+[Apache License 2.0](LICENSE). 의존하는 라이브러리의 라이선스는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 있다. [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)는 원문을 따라 CC BY-SA 4.0이다.
