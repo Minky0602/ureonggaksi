@@ -1,6 +1,6 @@
 # 기여 안내
 
-우렁각시를 받아서 실행하고, 고치고, PR을 올리는 방법이다. 구조는 [docs/architecture.md](docs/architecture.md), 함수 계약은 [docs/api.md](docs/api.md), 요구사항은 [docs/requirements.md](docs/requirements.md)에 있다.
+우렁각시를 받아서 실행하고, 고치고, PR을 올리는 방법이다. 구조는 [docs/architecture.md](docs/architecture.md), 함수 계약은 [docs/api.md](docs/api.md), 요구사항은 [docs/requirements.md](docs/requirements.md)에 있다. 참여할 때는 [행동 강령](CODE_OF_CONDUCT.md)을 따른다.
 
 ## 개발 환경
 

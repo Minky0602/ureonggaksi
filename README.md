@@ -171,6 +171,7 @@ CI는 PR마다 이 두 명령을 실행한다.
 | [docs/architecture.md](docs/architecture.md) | 구조, 데이터 모델, 처리 흐름. 현재와 목표를 나눠 적었다 |
 | [docs/api.md](docs/api.md) | 서비스 함수 계약 |
 | [SECURITY.md](SECURITY.md) | 보안 범위와 한계 |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | 행동 강령과 신고 방법 |
 | [docs/development-notes.md](docs/development-notes.md) | 실제로 해 본 것, 어려웠던 점, 측정 수치, 결정, 교훈 |
 | [docs/research/](docs/research/) | 오픈소스와 모델 조사, 선택 이유, 평가 방법과 날짜별 측정 결과 |
 | [docs/records/](docs/records/) | 구현하면서 겪은 문제와 검증 기록 (날짜별) |
@@ -178,4 +179,4 @@ CI는 PR마다 이 두 명령을 실행한다.
 
 ## 라이선스
 
-[Apache License 2.0](LICENSE). 의존하는 라이브러리의 라이선스는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 있다.
+[Apache License 2.0](LICENSE). 의존하는 라이브러리의 라이선스는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)에 있다. [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)는 원문을 따라 CC BY-SA 4.0이다.
