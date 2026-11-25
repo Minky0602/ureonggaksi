@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ureonggaksi"
-version = "0.1.1"
+version = "0.1.2"
 description = "Offline HWPX extraction with verifiable Excel provenance"
 readme = "README.md"
 requires-python = ">=3.12"

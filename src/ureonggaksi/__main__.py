@@ -2,6 +2,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from . import __version__
 from .offline import install_network_guard
 
 
@@ -22,6 +23,7 @@ def main(argv=None):
     _utf8_output()
     install_network_guard()
     parser = argparse.ArgumentParser(description="우렁각시 - 오프라인 HWPX 취합")
+    parser.add_argument("--version", action="version", version=f"우렁각시 {__version__}")
     sub = parser.add_subparsers(dest="command")
     extract_parser = sub.add_parser("extract", help="워크플로를 이용한 명령행 일괄 추출")
     extract_parser.add_argument("--workflow", required=True, type=Path)

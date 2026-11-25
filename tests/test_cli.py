@@ -290,3 +290,21 @@ def test_a_copy_at_another_path_is_a_different_approval(tmp_path):
         == 2
     )
     assert not out.exists()
+
+
+def test_version_has_one_value_everywhere():
+    """앱 안의 버전(근거 JSON·창 제목·--version)이 패키지 버전과 같다. v0.1.1은 0.1.0을 내보냈다."""
+    import tomllib
+
+    from ureonggaksi import __version__
+
+    project = tomllib.loads((Path(__file__).parent.parent / "pyproject.toml").read_text("utf-8"))
+    assert __version__ == project["project"]["version"]
+    done = subprocess.run(
+        [sys.executable, "-m", "ureonggaksi", "--version"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONUTF8": "1"},
+    )
+    assert done.returncode == 0 and __version__ in done.stdout

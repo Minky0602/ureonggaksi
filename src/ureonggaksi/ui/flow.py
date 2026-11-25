@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import __version__
 from ..ai import LocalModel, ai_status, resume, stop_all
 from ..errors import ServiceError
 from ..manual import KINDS
@@ -49,6 +50,7 @@ MANUAL_LIMIT = 200  # 직접 처리 목록은 화면에 이만큼만 보이고 �
 
 def _label(text: str = "", name: str = "") -> QLabel:
     widget = QLabel(text)
+    widget.setTextFormat(Qt.TextFormat.PlainText)  # 문서 값의 HTML을 그리지 않는다(SECURITY.md)
     widget.setWordWrap(True)
     widget.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     if name:
@@ -76,7 +78,7 @@ def _clear(layout) -> None:
 class FlowWindow(QMainWindow):
     def __init__(self, settings: QSettings | None = None, store: RuleStore | None = None):
         super().__init__()
-        self.setWindowTitle("우렁각시")
+        self.setWindowTitle(f"우렁각시 {__version__}")
         self.setStyleSheet(STYLE + PAGE_STYLE)
         self.resize(1080, 820)
         self.settings = settings or QSettings()
@@ -243,7 +245,10 @@ class FlowWindow(QMainWindow):
 
     def pick_model(self) -> None:
         runtime, _ = QFileDialog.getOpenFileName(
-            self, "llama-completion 실행 파일", "", "실행 파일 (*.exe);;모든 파일 (*)"
+            self,
+            "llama-completion 실행 파일",
+            "",
+            "실행 파일 (*.exe);;모든 파일 (*)",
         )
         if not runtime:
             return
@@ -461,7 +466,9 @@ class FlowWindow(QMainWindow):
         self.message.setText("")
         self.save_button.setEnabled(False)  # 같은 미리보기로 두 번 저장하지 않는다
         check = self.prepared is not None and self.prepared.plan.rule.work_type == "check"
-        if package.status in ("failed", "cancelled"):
+        if package.status in ("failed", "cancelled") and package.cleanup_failed:
+            head = "저장하지 못했습니다. 만들다 만 파일 일부를 지우지 못했습니다. 직접 지워 주세요."
+        elif package.status in ("failed", "cancelled"):
             head = "저장하지 못했습니다. 만든 파일은 지웠습니다."
         elif check:
             head = "값 검토를 마쳤습니다. 다른 값과 빈칸은 확인필요 파일에 있습니다."
@@ -481,6 +488,7 @@ class FlowWindow(QMainWindow):
                 lines.append(f"{title}: {path}")
         if package.error:
             lines.append(package.error)
+        lines += [f"지우지 못한 파일: {path}" for path in package.cleanup_failed]
         self.result.setText("\n".join(lines))
         self.open_button.setVisible(bool(package.output_path or package.evidence_path))
 
