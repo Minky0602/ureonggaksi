@@ -13,7 +13,15 @@ from .errors import Pairs, ServiceError
 from .inputs import Inputs, inspect_source, open_inputs
 from .interpret import AskMany, Chooser, _same, build_rule, interpret
 from .manual import ManualItem
-from .rules import POLICY_VALUES, SKIP, RuleSet, RuleStore, WorkflowVersion, validate_rule
+from .rules import (
+    POLICY_VALUES,
+    SKIP,
+    RuleError,
+    RuleSet,
+    RuleStore,
+    WorkflowVersion,
+    validate_rule,
+)
 from .save import ResultPackage, approve, default_output_path, save_result
 from .storage import local_path
 from .xlsx import TargetView, inspect_target
@@ -471,20 +479,27 @@ def commit(
     progress: Progress = _no_progress,
     cancel: Cancel | None = None,
 ) -> ResultPackage:
-    """[저장] 한 번 = 승인. ① 규칙 저장(같은 지문이면 생략) ② 채우기: approve→save_result / 검토: save_check."""
+    """[저장] 한 번 = 승인. ① 규칙 저장(같은 지문이면 생략) ② approve→save_result(채우기·검토 공통)."""
     plan = prepared.plan
     if plan is None or prepared.question is not None:
         raise ServiceError("APPROVAL_INVALID", "질문에 먼저 답해야 저장할 수 있습니다.")
     # 검토도 prepare가 정한 경로로 승인한다(기본 경로는 시각이 들어가 다시 만들면 달라진다, 검수 M1).
     # 승인 확인(경로 충돌 등)을 규칙 저장보다 먼저 해, 저장하지 못할 결과의 규칙을 남기지 않는다(검수 L-a)
     approval = approve(plan, prepared.output_path)
-    store.save(
-        prepared.workflow.name if prepared.workflow else _rule_name(prepared),
-        plan.rule,
-        base=prepared.workflow,
-        request=prepared.request[:500],
+    try:
+        store.save(
+            prepared.workflow.name if prepared.workflow else _rule_name(prepared),
+            plan.rule,
+            base=prepared.workflow,
+            request=prepared.request[:500],
+        )
+    except (RuleError, OSError) as error:  # 결과 파일은 아직 만들지 않았다(api 5절)
+        raise ServiceError(
+            "RULE_SAVE_FAILED", f"작업 규칙을 저장하지 못해 결과도 만들지 않았습니다: {error}"
+        ) from error
+    return save_result(
+        plan, approval, progress=progress, cancel=cancel, interpretation=prepared.interpretation
     )
-    return save_result(plan, approval, progress=progress, cancel=cancel)
 
 
 # ---------- CLI 두 단계(api 2.9) ----------

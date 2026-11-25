@@ -3,7 +3,7 @@
 작성일: 2026-11-06 · 개정: 2026-11-09 · 상태: **3판 수정 사용자 승인 (2026-11-09)** (2판 사용자 승인 2026-11-06)
 
 - **기준 문서:** [데이터 모델(객체 11개)](architecture.md#4-목표-데이터-모델), [요구사항 v1.4](requirements.md)
-- **구현 상태:** 이 문서는 목표 계약이다. `service.py`와 아래 함수 대부분은 아직 코드에 없다. 지금 있는 코드는 [architecture.md 3절](architecture.md#3-현재-구현)에 있다.
+- **구현 상태(2026-11-25):** 아래 계약은 대부분 코드에 있다. 아직 없는 것: 자세히 화면의 검토(`review`, `REVIEW_REJECTED`), 결과 다시 열기(`open_result`·`ResultView`·`SourceState`), 범위 지정(`SourceScope`), 원본 빼기·칸 직접 처리 돌리기(`excluded`·`deselected`), 날짜 순서 질문(`date_order`), AiStatus의 `not_running`·`low_memory`. 모듈 목록은 [architecture.md 3절](architecture.md#3-현재-구현)에 있다.
 - **문서 안의 "ERD":** [architecture.md 4절](architecture.md#4-목표-데이터-모델)의 데이터 모델을 가리킨다.
 - **문서 안의 번호:** `DIF-숫자`는 팀 내부 검증 기록의 항목이고, `P01`~`R01`·`S01`·`Q01`은 PR 계획의 단계 이름이다. 둘 다 저장소 밖에서 관리한다.
 - **3판에서 바뀐 것:** 한 줄 요청용 `prepare`·`commit`, 완료/직접 처리 구분(`area`·`ManualItem`), 고정 자동 처리 기준, 종류별 확인필요 파일, 빈칸 채우기·값 검토, 공통 문제 질문, 최소 변경 저장. 이유는 [8.2절](#82-3판-반영-기록-2026-11-09). 2판 원문은 저장소 밖에 보관한다.
@@ -26,7 +26,7 @@ adapters: hwpx(기존) · xlsx(신규: 읽기는 openpyxl, 쓰기는 최소 변�
 ```
 prepare(요청, 파일, 답) = open_inputs → (저장 규칙 | interpret → build_rule → validate_rule) → analyze(all) → 자동 처리 판정
                          → 규칙이 서지 않거나 공통 문제가 기준을 넘으면 question만 돌려줌
-[저장] → commit(Prepared) = RuleStore.save(같은 규칙이면 생략) → 채우기: approve → save_result / 검토: save_check
+[저장] → commit(Prepared) = RuleStore.save(같은 규칙이면 생략) → approve → save_result(검토는 XLSX 없이)
 ```
 
 ## 2. 자료 형태와 함수 (계약 본문)
@@ -54,7 +54,7 @@ SKIP = "__skip__"                # 답: 건너뛰기. 해당 칸은 비워 둔�
 class Question:
     slot: QuestionSlot; text: str
     examples: tuple[str, ...]    # 입력에서 뽑은 예시 최대 2개
-    choices: tuple[str, ...]     # 버튼 2~3개. 화면은 직접 입력과 건너뛰기를 함께 둔다
+    choices: tuple[str, ...]     # 버튼 2~3개. 정책 질문(default_unit·rounding)에는 화면이 건너뛰기를 함께 둔다
     affects: int                 # 이 답으로 정해지는 칸 수. 규칙이 서지 않는 질문은 0
 
 @dataclass(frozen=True)
@@ -68,7 +68,7 @@ class Prepared:
     samples: tuple[ChangeItem, ...]   # 완료 영역 최대 3건. 서로 다른 원본·표기를 우선해 결정적으로 고른다
     warnings: tuple[str, ...]    # 해석 경보. 답할 수 없는 같은 문제가 QUESTION_RATIO 이상일 때(예: 대상 없음)
     manual: tuple[ManualItem, ...]    # 직접 처리 영역 전체(실패 파일 포함)
-    output_path: Path            # 기본: 대상 폴더/<대상명>_우렁각시_<YYYYMMDD-HHMM>.xlsx
+    output_path: Path | None     # 기본: 대상 폴더/<대상명>_우렁각시_<YYYYMMDD-HHMM>.xlsx. 질문으로 끝나면 None
     workflow: WorkflowVersion | None   # '최근 작업'으로 연 규칙
     unsure: tuple[tuple[str, str, str], ...]   # 코드가 확신하지 못한 해석 (종류, 이름, 대상 열). 화면은 '확인 필요'로 보인다
     #   pair: 모델이 읽은 짝(문서 항목, 열). 같은 이름이지만 채우라는 뜻을 모델이 읽은 짝과, 이름이 다른 짝(성명→신청인)을
@@ -102,17 +102,17 @@ def prepare(request: str, sources: list[Path], target: Path, *,
     # 예외: INPUT_*, PATH_CONFLICT, CANCELLED
 
 def commit(prepared: Prepared, store: RuleStore, *, progress: Progress, cancel: Cancel) -> ResultPackage
-    # [저장] 한 번 = 승인. 순서: ① store.save(같은 rule_hash가 있으면 생략) ② 채우기: approve → save_result
-    #                                                                       검토: save_check(XLSX 없음)
+    # [저장] 한 번 = 승인. 순서: ① store.save(같은 rule_hash가 있으면 생략. 실패하면 RULE_SAVE_FAILED)
+    #   ② approve → save_result(검토는 XLSX 없이 확인필요·근거만). 근거 JSON에 해석 한 줄을 넘긴다
     # 파일 쓰기 전 실패는 예외, 쓰기 시작 후는 ResultPackage로 돌려준다(5절 원칙 그대로).
     # 규칙은 결과 파일보다 먼저 저장된다. 결과 저장이 실패해도 규칙은 남지만, 사용자가 저장을 결정한 해석이므로 허용한다.
 
-def replay(rule: RuleSet, sources, target, *, request="", output_path=None, progress, cancel) -> Prepared
+def replay(rule: RuleSet, sources, target, *, request="", output_path=None, workflow=None, progress, cancel) -> Prepared
     # CLI commit용: 계획 파일의 규칙으로 AI 없이 다시 분석한다. 규칙이 지금 파일에 맞지 않으면 RULE_INVALID.
 def approval_hash(prepared: Prepared) -> str
     # [저장]이 승인할 plan_hash. CLI prepare가 출력하고 commit이 다시 계산해 비교한다.
 
-def describe_rule(rule: RuleSet, view: TargetView) -> str
+def describe_rule(rule: RuleSet, view: TargetView, unsure=()) -> str   # unsure: 확신 못 한 이름 → '(확인 필요)'
     # 예: "채우기: 사업코드로 행을 찾아 ‘사업비’를 D열(2026 예산)에 원 단위로 넣음"
     #     "검토: 표를 바꾸지 않고 D열(2026 예산)을 문서의 ‘사업비’와 대조함"
 ```
@@ -317,7 +317,7 @@ class RuleDraft:
     questions: tuple[str, ...]   # 모호한 지시에 대한 확인 질문. prepare는 첫 번째 하나만 보여준다
     issues: tuple[RuleIssue, ...]
 
-def ai_status() -> AiStatus
+def ai_status(runtime: Path | None, model: Path | None) -> AiStatus   # 파일 유무만 본다(not_running·low_memory는 아직 없음)
 def interpret(request: str, documents: tuple[Document, ...], view: TargetView,
               *, choose: Chooser | None = None, ask_many: AskMany | None = None) -> Interpretation
     # view는 데이터 행 전체를 담아야 한다(prepare는 preview_rows를 데이터 행 수 이상으로 연다).
@@ -695,7 +695,7 @@ ureonggaksi commit --plan 계획.plan.json --plan-hash <값>
 | `APPROVAL_INVALID` | save ① | 예외 | 다시 prepare 후 저장 |
 | `INPUT_CHANGED` · `WRITE_FAILED` · `VERIFY_FAILED` · `EVIDENCE_FAILED` · `PUBLISH_FAILED` | save ②~⑦ | `ResultPackage.error` | 사유 표시, 재시도 |
 | `CANCELLED` | prepare·analyze·suggest(예외), save(결과) | 위와 같음 | 원본·기존 결과 보존 |
-| `AI_UNAVAILABLE` · `AI_TIMEOUT` · `AI_BAD_OUTPUT` | prepare(모델 선택) | 예외 | 재시도, 최근 작업 사용, 또는 자세히의 직접 선택 |
+| `AI_UNAVAILABLE` · `AI_TIMEOUT` · `AI_BAD_OUTPUT` | prepare(모델 선택) | 예외로 끝내지 않음. 그 짝만 빼고 경고(2.0절) | 재시도, 또는 요청에 열 이름을 넣어 다시 |
 
 **받는 방식의 원칙:** 파일을 쓰기 시작하기 전에는 예외로 던진다. 쓰기를 시작한 뒤에는 정리 결과까지 담아 결과값으로 돌려준다.
 
@@ -725,9 +725,9 @@ ManualKind = Literal["existing_differs", "no_row", "source_conflict", "unreadabl
 | 파일 | 위치 | 핵심 내용 | Schema 작성 |
 |---|---|---|---|
 | 규칙 `rules/<id>/<rev>.json` | 사용자 로컬 | `schema_version: 3`, name, revision, request, `RuleSet`(work_type·policy 포함), rule_hash. 원본 경로·원문값은 넣지 않는다 | P02 |
-| 근거 `<출력명>.evidence.json` | 출력 XLSX 옆 | 첫머리 notice(원문값 포함 안내), run_id, 입력 file_id·경로·지문, 규칙 스냅샷, 해석 한 줄(`interpretation`, P04 전에는 null), 승인 해시, ChangeItem 전체(근거·보정·area 포함), checks, summary, XLSX·TXT sha256 | P03 |
+| 근거 `<출력명>.evidence.json` | 출력 XLSX 옆 | 첫머리 notice(원문값 포함 안내), run_id, 입력 file_id·경로·지문, 규칙 스냅샷, 앱 버전(`app_version`), 해석 한 줄(`interpretation`), 승인 해시, ChangeItem 전체(근거·보정·area 포함), checks, summary, XLSX·TXT sha256 | P03 |
 | 확인필요 `<출력명>_확인필요.txt` | 출력 XLSX 옆(값 검토는 대상 XLSX 옆) | 3절 종류별 형식. 안 채운 칸·차이가 있을 때만 | P03 |
-| CLI 계획 `<이름>.plan.json` | 사용자 지정 | request, 입력 경로·지문, RuleSet, 출력 경로, 미리보기 요약, plan_hash | P04 |
+| CLI 계획 `<이름>.plan.json` | 사용자 지정 | request, 입력 경로·지문, RuleSet, 출력 경로, plan_hash. 미리보기 요약은 prepare가 화면에 출력한다 | P04 |
 
 기존 v1 규칙(추출만)은 `RuleStore.import_file`로 가져온다. 대상 매핑이 빈 초안이 되고, 사용자가 채운 뒤 저장한다. v2 형식은 배포된 적이 없어 받지 않는다.
 

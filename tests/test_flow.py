@@ -1,14 +1,18 @@
 """주 화면 종단 흐름: 파일 → 한 줄 요청 → 미리보기 → [저장] (P05, PRD v1.4 기본 흐름). 합성 자료만 쓴다."""
 
 import hashlib
+import json
 import time
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from conftest import cell, para, table, write_hwpx, write_xlsx
 from openpyxl import load_workbook
-from PySide6.QtCore import QCoreApplication, QEvent, QSettings
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QCoreApplication, QEvent, QSettings, Qt
+from PySide6.QtWidgets import QApplication, QFileDialog, QLabel
 
+from ureonggaksi import __version__
 from ureonggaksi.errors import ServiceError
 from ureonggaksi.rules import RuleStore
 from ureonggaksi.ui.flow import FlowWindow
@@ -88,6 +92,50 @@ def test_preview_then_save_writes_a_new_file_and_keeps_the_original(window, app)
     assert hashlib.sha256(window.target.read_bytes()).hexdigest() == before
     sheet = load_workbook(package.output_path)["이수현황"]
     assert [sheet["D2"].value, sheet["D3"].value] != [None, None]
+    evidence = json.loads(package.evidence_path.read_text(encoding="utf-8"))
+    assert evidence["app_version"] == __version__
+    assert "이수시간" in evidence["interpretation"]  # 전에는 늘 null이었다
+
+
+def test_a_failed_save_says_which_files_were_left_behind(window, app):
+    """저장 실패 때 지우지 못한 임시 파일이 있으면 '지웠습니다'라고 하지 않는다."""
+    ask(window, app, "이름 기준으로 이수시간 채워줘")
+    window.save_button.click()
+    idle(window, app)
+    left = Path("남은파일.tmp")
+    window.show_result(replace(window.package, status="failed", cleanup_failed=(left,)))
+    assert "지우지 못" in window.result.text() and str(left) in window.result.text()
+    assert "지웠습니다" not in window.result.text()
+
+
+def test_document_text_is_never_rendered_as_html(window, app, tmp_path):
+    """SECURITY.md: 문서 값의 HTML을 그리지 않는다. 주 화면의 모든 글자 칸이 PlainText다."""
+    ask(window, app, "이름 기준으로 이수시간 채워줘")
+    labels = window.findChildren(QLabel)
+    assert labels and all(lbl.textFormat() == Qt.TextFormat.PlainText for lbl in labels)
+
+
+def test_file_dialogs_do_not_use_the_windows_recent_list(window, monkeypatch):
+    """SECURITY.md: Windows 기본 대화상자는 고른 경로를 최근 파일 기록에 남긴다. Qt 대화상자를 쓴다."""
+    seen = []
+
+    def fake(*args, options=None, **kwargs):
+        seen.append(options)
+        return ([], "") if fake.many else ("", "")
+
+    fake.many = True
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", staticmethod(fake))
+    window.pick_sources()
+    fake.many = False
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(fake))
+    window.pick_target()
+    window.pick_model()
+    assert len(seen) == 3
+    assert all(o is not None and o & QFileDialog.Option.DontUseNativeDialog for o in seen)
+
+
+def test_the_window_shows_the_version(window):
+    assert __version__ in window.windowTitle()
 
 
 def test_a_question_is_answered_with_a_button(window, app):

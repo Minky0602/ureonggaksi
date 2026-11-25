@@ -622,3 +622,18 @@ def test_a_key_answer_wins_over_an_assumed_key(tmp_path):
         )
         assert answered.plan.rule.target.key_column == column
         assert not any(kind == "key" for kind, _, _ in answered.unsure)
+
+
+def test_a_rule_that_cannot_be_saved_stops_before_any_result_file(files, monkeypatch):
+    """api 5절 RULE_SAVE_FAILED: 규칙 폴더에 쓸 수 없으면 결과 파일을 만들지 않고 코드로 알린다."""
+    sources, target, out, store = files
+    prepared = prepare("이름 기준으로 이수시간 채워줘", sources, target, output_path=out)
+
+    def denied(*args, **kwargs):
+        raise PermissionError("쓰기 권한 없음")
+
+    monkeypatch.setattr(store, "save", denied)
+    with pytest.raises(ServiceError) as caught:
+        commit(prepared, store)
+    assert caught.value.code == "RULE_SAVE_FAILED"
+    assert not out.exists()

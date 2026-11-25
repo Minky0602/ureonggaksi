@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+from . import __version__
 from .analyze import Cancel, ChangeItem, Plan, PlanCounts, evidence_place, manual_items
 from .errors import Pairs, ServiceError
 from .manual import KIND_WHY, KINDS, ManualItem
@@ -297,10 +298,12 @@ def evidence_json(
     output_sha: str | None,
     manual_sha: str | None,
     summary: "ResultSummary",
+    interpretation: str | None = None,
 ) -> bytes:
     data = {
         "schema_version": SCHEMA_VERSION,
         "notice": NOTICE,
+        "app_version": __version__,
         "run_id": plan.run_id,
         "created_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
         "status": status,
@@ -317,7 +320,7 @@ def evidence_json(
         ],
         "rule": rule_to_dict(plan.rule),
         "rule_hash": plan.rule_hash,
-        "interpretation": None,  # 해석 한 줄(describe_rule)은 P04 prepare가 채운다
+        "interpretation": interpretation,
         "approval": {
             "plan_hash": approval.plan_hash,
             "review_hash": approval.review_hash,
@@ -462,6 +465,7 @@ def save_result(
     *,
     progress: Progress = _no_progress,
     cancel: Cancel | None = None,
+    interpretation: str | None = None,
 ) -> ResultPackage:
     """api 3절 ①~⑦. 쓰기 시작 전의 실패는 예외, 그 뒤는 ResultPackage(status="failed"|"cancelled")."""
     # ① 사전 확인(예외). 승인 객체의 모든 필드를 계획에서 다시 계산해 비교한다(검수 M1·M4)
@@ -495,7 +499,7 @@ def save_result(
     temps: list[Path] = []
     leftover: list[Path] = []
     try:
-        package = _save(plan, approval, progress, cancel, temps)
+        package = _save(plan, approval, progress, cancel, temps, interpretation)
     finally:  # KeyboardInterrupt 같은 BaseException에도 숨김 임시 파일을 남기지 않는다(2차 검수 L2)
         for temp in temps:
             try:
@@ -523,6 +527,7 @@ def _save(
     progress: Progress,
     cancel: Cancel | None,
     temps: list[Path],
+    interpretation: str | None = None,
 ) -> ResultPackage:
     """임시 파일은 호출한 쪽이 지운다(지우지 못한 것을 cleanup_failed로 알리려고)."""
     folder = approval.evidence_path.parent
@@ -589,7 +594,9 @@ def _save(
         checks.append(Check("inputs", None, None, None, same, "입력 파일 지문 재확인"))
         if not same:
             return result("failed", "INPUT_CHANGED: 저장 중에 입력 파일이 바뀌었습니다.")
-        evidence = evidence_json(plan, approval, checks, status, output_sha, manual_sha, summary)
+        evidence = evidence_json(
+            plan, approval, checks, status, output_sha, manual_sha, summary, interpretation
+        )
         temps.append(_write_temp(folder, evidence, ".json"))
         evidence_sha = _sha(evidence)
         if cancelled():
